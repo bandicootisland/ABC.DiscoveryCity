@@ -1,0 +1,107 @@
+@page "/torrent-viewer"
+@using ABC.BookCity.Services
+@using System.IO
+
+<h3>Torrent Viewer</h3>
+
+<div class="mb-4">
+    <label class="form-label">Select a .torrent file to inspect:</label>
+    <InputFile OnChange="@LoadFiles" class="form-control" accept=".torrent" />
+</div>
+
+@if (isLoading)
+{
+    <div class="alert alert-info">Loading and parsing file...</div>
+}
+else if (torrentInfo != null)
+{
+    <div class="card mb-4">
+        <div class="card-header bg-primary text-white">
+            <h5 class="mb-0">@torrentInfo.Name</h5>
+        </div>
+        <div class="card-body">
+            <dl class="row">
+                <dt class="col-sm-3">Created By</dt>
+                <dd class="col-sm-9">@(torrentInfo.CreatedBy ?? "N/A")</dd>
+
+                <dt class="col-sm-3">Creation Date</dt>
+                <dd class="col-sm-9">@(torrentInfo.CreationDate?.ToString("g") ?? "N/A")</dd>
+
+                <dt class="col-sm-3">Comment</dt>
+                <dd class="col-sm-9">@(torrentInfo.Comment ?? "N/A")</dd>
+
+                <dt class="col-sm-3">Total Files</dt>
+                <dd class="col-sm-9">@torrentInfo.Files.Count</dd>
+                
+                <dt class="col-sm-3">Total Size</dt>
+                <dd class="col-sm-9">@FormatSize(torrentInfo.Files.Sum(f => f.Length))</dd>
+            </dl>
+        </div>
+    </div>
+
+    <h4>File Contents</h4>
+    <div class="table-responsive">
+        <table class="table table-striped table-hover table-sm">
+            <thead>
+                <tr>
+                    <th>Path / Filename</th>
+                    <th class="text-end">Size</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var file in torrentInfo.Files.OrderBy(f => f.Path))
+                {
+                    <tr>
+                        <td class="text-break">@file.Path</td>
+                        <td class="text-end" style="min-width: 100px;">@FormatSize(file.Length)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    private TorrentInfo? torrentInfo;
+    private bool isLoading = false;
+    private string? errorMessage;
+
+    private async Task LoadFiles(InputFileChangeEventArgs e)
+    {
+        isLoading = true;
+        errorMessage = null;
+        torrentInfo = null;
+
+        try
+        {
+            var file = e.File;
+            // Limit to 5MB for torrent files, which is generous
+            using var stream = file.OpenReadStream(maxAllowedSize: 5 * 1024 * 1024);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            
+            torrentInfo = TorrentParser.Parse(ms.ToArray());
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error parsing file: {ex.Message}";
+        }
+        finally
+        {
+            isLoading = false;
+        }
+    }
+
+    private string FormatSize(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = bytes;
+        int order = 0;
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len = len / 1024;
+        }
+        return $"{len:0.##} {sizes[order]}";
+    }
+}
