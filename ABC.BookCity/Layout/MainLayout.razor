@@ -1,0 +1,38 @@
+﻿@inherits LayoutComponentBase
+<div class="page">
+    <div class="sidebar">
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-row px-4">
+            <a href="https://learn.microsoft.com/aspnet/core/" target="_blank">About</a>
+        </div>
+
+        <article class="content px-4">
+            <TelerikRootComponent EnableRtl="@IsRtlEnabled">
+                @Body
+            </TelerikRootComponent>
+        </article>
+    </main>
+</div>
+
+@code {
+    [Inject]
+    private NavigationManager NavigationManager { get; set; }
+
+    private bool IsRtlEnabled { get; set; }
+
+    public override async Task SetParametersAsync(ParameterView parameters)
+    {
+        SetRtlForLocation();
+
+        await base.SetParametersAsync(parameters);
+    }
+
+    private void SetRtlForLocation()
+    {
+        IsRtlEnabled = NavigationManager.Uri.Contains("rtl");
+    }
+}
+
