@@ -4,7 +4,9 @@ using MonoTorrent.Client;
 namespace ABC.BookCity.Downloader;
 class Program
 {
-    private static string WatchFolder = @"H:\BookCity\Torrents";
+    //H:\BookCity\Annas-Archive\annas-archive\data-imports\scripts\torrents\isbndb_2022_09.torrent
+    private static string WatchFolder = @"H:\BookCity\Annas-Archive\annas-archive\data-imports\scripts\torrents\";    
+    
     private static string DownloadFolder = @"H:\BookCity\Books";
     private static ClientEngine Engine;
 
@@ -30,7 +32,7 @@ class Program
         // Process any existing files
         foreach (var file in Directory.GetFiles(WatchFolder, "*.torrent"))
         {
-             await StartDownloadAsync(file);
+             await StartDownloadAsync(file); 
         }
 
         // ----------------------------------------------
@@ -78,7 +80,7 @@ class Program
             // 1. Default all to DoNotDownload
             foreach (var file in manager.Files)
             {
-                await manager.SetFilePriorityAsync(file, Priority.DoNotDownload);
+                await manager.SetFilePriorityAsync(file, Priority.Normal);
             }
 
             // 2. Prioritize Schema/SQL files AND specific data files we want to inspect
@@ -126,6 +128,8 @@ class Program
                 {
                     var prioritized = manager.Files.Where(f => f.Priority == Priority.Highest).ToList();
                     var completedCount = prioritized.Count(f => f.BitField.PercentComplete >= 100.0);
+                    var downloadingFiles = prioritized.Where(f => f.BitField.PercentComplete > 0.0 && f.BitField.PercentComplete < 100).ToList();
+                    var downloadingCount = downloadingFiles.Count;
                     var totalCount = prioritized.Count;
                     
                     // Find our specific target file for inspection
@@ -133,12 +137,23 @@ class Program
 
                     Console.WriteLine($"[{DateTime.Now:T}] Status: {manager.State}");
                     Console.WriteLine($"  Speed: {manager.Monitor.DownloadRate / 1024.0:N0} KB/s (Peers: {manager.Peers.Available})");
+                    Console.WriteLine($"  Downloading: {downloadingCount}");
+                    
+                    if (downloadingFiles.Any())
+                    {
+                        Console.WriteLine($"  Files currently downloading:");
+                        foreach (var file in downloadingFiles)
+                        {
+                            Console.WriteLine($"    - {Path.GetFileName(file.Path)}: {file.BitField.PercentComplete:F6}%");
+                        }
+                    }
+                    
                     Console.WriteLine($"  Prioritized Files: {completedCount}/{totalCount} completed.");
                     
                     if (targetFile != null)
                     {
                         double percent = targetFile.BitField.PercentComplete;
-                        Console.WriteLine($"  Target File ({Path.GetFileName(targetFile.Path)}): {percent:F2}%");
+                        Console.WriteLine($"  Target File ({Path.GetFileName(targetFile.Path)}): {percent:F6}%");
                     }
                     Console.WriteLine("------------------------------------------------");
 

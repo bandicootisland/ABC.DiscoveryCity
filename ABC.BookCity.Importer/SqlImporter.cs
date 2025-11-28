@@ -8,7 +8,7 @@ public static class SqlImporter
     // Switched to 'root' because the script tries to access/create the 'allthethings' database,
     // which our limited 'bookcity_user' doesn't have permissions for.
     // Added AllowLoadLocalInfile=true for bulk loading
-    private static string ConnectionString = "Server=localhost;Port=3306;User=root;Password=password;AllowLoadLocalInfile=true;";
+    public static string ConnectionString = "Server=localhost;Port=3306;User=root;Password=password;AllowLoadLocalInfile=true;";
 
     public static async Task<bool> ImportSqlGzAsync(string gzFilePath)
     {

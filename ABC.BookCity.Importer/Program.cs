@@ -1,33 +1,56 @@
 ﻿using ABC.BookCity.Importer;
+using Microsoft.Extensions.Configuration;
 
 Console.WriteLine("ABC.BookCity Importer Service");
 Console.WriteLine("-----------------------------");
 
-string baseFolder = @"H:\BookCity\Books\aa_derived_mirror_metadata_20251121\mariadb";
-string historyFile = @"H:\_DOCKER-DATA\import_history.json";
+// Build Configuration
+var builder = new ConfigurationBuilder()
+    .SetBasePath(Directory.GetCurrentDirectory())
+    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+
+IConfiguration config = builder.Build();
+
+string connectionString = config.GetConnectionString("DefaultConnection") 
+    ?? "Server=localhost;Port=3306;User=root;Password=password;AllowLoadLocalInfile=true;";
+
+string baseFolder = config["ImportSettings:BaseFolder"] ?? @"H:\BookCity\Books";
+string historyFile = config["ImportSettings:HistoryFile"] ?? @"H:\_DOCKER-DATA\import_history.json";
+string sevenZipPath = config["ImportSettings:SevenZipPath"] ?? @"C:\Program Files\7-Zip\7z.exe";
+
+// Update Static Connection String
+SqlImporter.ConnectionString = connectionString;
+
 var history = new ImportHistory(historyFile);
 
 if (!Directory.Exists(baseFolder))
 {
     Console.WriteLine($"Directory not found: {baseFolder}");
     Console.WriteLine("Please ensure the torrent has started downloading.");
-    return;
+    // Don't return, allow user to maybe change config or use 'L' option with absolute path
 }
 
 while (true)
 {
     Console.WriteLine("\nAvailable files to import:");
     Console.WriteLine("0. [BATCH] Import Standard Schemas (Create DB + Tables)");
-    Console.WriteLine("D. [DATA] List all Data Files (.dat.gz)");
+    Console.WriteLine("D. [DATA] List all Data Files (.dat.gz)");    
     Console.WriteLine("V. [UTIL] Verify GZip Integrity of a file");
+    Console.WriteLine("L. [LEGACY] Import from RAR Archive (Libgen)");
     
-    var schemaFiles = Directory.GetFiles(baseFolder, "*.sql.gz")
-                         .OrderBy(f => f)
-                         .ToList();
-    var allDataFiles = Directory.GetFiles(baseFolder, "*.dat.gz");
+    List<string> schemaFiles = new List<string>();
+    List<string> allDataFiles = new List<string>();
+
+    if (Directory.Exists(baseFolder))
+    {
+        schemaFiles = Directory.GetFiles(baseFolder, "*.sql.gz")
+                             .OrderBy(f => f)
+                             .ToList();
+        allDataFiles = Directory.GetFiles(baseFolder, "*.*.gz").ToList();
+    }
 
     for (int i = 0; i < schemaFiles.Count; i++)
-    {
+    {   
         var fileInfo = new FileInfo(schemaFiles[i]);
         var fileName = Path.GetFileName(schemaFiles[i]);
         
@@ -96,6 +119,19 @@ while (true)
 
     // Check for Data Link Request (e.g. "38D")
     bool isDataLinkRequest = input.EndsWith("D", StringComparison.OrdinalIgnoreCase) && input.Length > 1;
+
+    if (input.ToLower() == "l")
+    {
+        Console.WriteLine("\nEnter path to RAR archive (e.g. libgen.rar):");
+        var rarPath = Console.ReadLine()?.Trim();
+        if (!string.IsNullOrWhiteSpace(rarPath))
+        {
+            // Use configured connection string and 7z path
+            var importer = new DataBatchingImporter(connectionString, sevenZipPath); 
+            await importer.ImportArchiveAsync(rarPath);
+        }
+        continue;
+    }
     string numberPart = isDataLinkRequest ? input.Substring(0, input.Length - 1) : input;
 
     if (int.TryParse(numberPart, out int choice) && choice > 0 && choice <= schemaFiles.Count)
