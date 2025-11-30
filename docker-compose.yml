@@ -11,6 +11,7 @@ services:
       - "3306:3306"
     volumes:
       - H:/_DOCKER-DATA/mariadb:/var/lib/mysql
+      - H:/Developer.BookCity/aa-data-import--temp-dir:/imports
     restart: unless-stopped
 
   bookcity-elastic:
