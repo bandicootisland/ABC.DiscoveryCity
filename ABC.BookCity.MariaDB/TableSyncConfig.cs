@@ -67,7 +67,7 @@ public class TableSyncConfig
         ["libgenli_series_add_descr"] = new TableSyncConfig
         {
             TableName = "libgenli_series_add_descr",
-            PrimaryKeyColumn = "sad_id",
+            PrimaryKeyColumn = "s_add_id",
             ChunkSize = 10000
         },
         ["libgenli_publishers"] = new TableSyncConfig

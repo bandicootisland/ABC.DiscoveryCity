@@ -15,6 +15,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Scripting", "Scripting", "{
 	ProjectSection(SolutionItems) = preProject
 		ABC.BookCity.Scripting\DownloadUsingCurl.cs = ABC.BookCity.Scripting\DownloadUsingCurl.cs
 		ABC.BookCity.Scripting\Download_libgenli_proxies.cs = ABC.BookCity.Scripting\Download_libgenli_proxies.cs
+		ABC.BookCity.Scripting\Syncher.cs = ABC.BookCity.Scripting\Syncher.cs
 	EndProjectSection
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.BookCity.MariaDB", "ABC.BookCity.MariaDB\ABC.BookCity.MariaDB.csproj", "{B005C9C0-8BC3-4180-B5FA-C2B2EE54BA35}"

@@ -20,6 +20,7 @@ string targetConnectionString = config.GetConnectionString("Target")
     ?? "Server=localhost;Port=3306;User=root;Password=password;Database=allthethings;";
 
 string stateFile = config["SyncSettings:StateFile"] ?? @"H:\_DOCKER-DATA\sync_state.json";
+string csvBasePath = config["SyncSettings:CsvBasePath"] ?? @"H:\BookCity\Books\aa_derived_mirror_metadata_20251121\mariadb";
 int defaultChunkSize = config.GetValue<int>("SyncSettings:DefaultChunkSize", 10000);
 int maxRetries = config.GetValue<int>("SyncSettings:MaxRetries", 3);
 int retryDelayMs = config.GetValue<int>("SyncSettings:RetryDelayMs", 5000);
@@ -27,24 +28,12 @@ int retryDelayMs = config.GetValue<int>("SyncSettings:RetryDelayMs", 5000);
 Console.WriteLine($"Source: {MaskConnectionString(sourceConnectionString)}");
 Console.WriteLine($"Target: {MaskConnectionString(targetConnectionString)}");
 Console.WriteLine($"State:  {stateFile}");
+Console.WriteLine($"CSV:    {csvBasePath}");
 Console.WriteLine();
 
 var syncState = new SyncState(stateFile);
 var mover = new ChunkedDataMover(sourceConnectionString, targetConnectionString, syncState, maxRetries, retryDelayMs);
-
-// Table list for numbered access
-var tableList = new[]
-{
-    "libgenli_files",
-    "libgenli_editions",
-    "libgenli_editions_to_files",
-    "libgenli_files_add_descr",
-    "libgenli_editions_add_descr",
-    "libgenli_series",
-    "libgenli_series_add_descr",
-    "libgenli_publishers",
-    "libgenli_elem_descr"
-};
+var csvLoader = new GzipCsvLoader(targetConnectionString, syncState, csvBasePath, maxRetries, retryDelayMs);
 
 // Cancellation support
 var cts = new CancellationTokenSource();
@@ -57,55 +46,108 @@ Console.CancelKeyPress += (s, e) =>
 
 while (true)
 {
-    // Fetch live status for menu display
-    Console.WriteLine("\nFetching table status...");
-    var statuses = await mover.GetTableStatusAsync();
-    var statusDict = statuses.ToDictionary(s => s.TableName, s => s);
-    
-    Console.WriteLine("\n┌──────────────────────────────────────────────────────────────────────────────────────────┐");
-    Console.WriteLine("│  TABLES                                                                                  │");
-    Console.WriteLine("├────┬─────────────────────────────────┬───────────────┬───────────────┬───────────────────┤");
-    Console.WriteLine("│ #  │ Table Name                      │ Source Rows   │ Target Rows   │ Sync %            │");
-    Console.WriteLine("├────┼─────────────────────────────────┼───────────────┼───────────────┼───────────────────┤");
-    
-    for (int i = 0; i < tableList.Length; i++)
-    {
-        var tbl = tableList[i];
-        var st = statusDict.GetValueOrDefault(tbl);
-        string srcRows = st?.SourceRows >= 0 ? $"{st.SourceRows:N0}" : "N/A";
-        string tgtRows = st?.TargetRows >= 0 ? $"{st.TargetRows:N0}" : "N/A";
-        string pct = st?.SourceRows > 0 ? $"{st.SyncPercentage:F1}%" : "-";
-        Console.WriteLine($"│ {i + 1}  │ {tbl,-31} │ {srcRows,-13} │ {tgtRows,-13} │ {pct,-17} │");
-    }
-    
-    Console.WriteLine("├────┴─────────────────────────────────┴───────────────┴───────────────┴───────────────────┤");
-    Console.WriteLine("│  COMMANDS: S=Status Detail | A=Sync All | R=Reset | Q=Quit                              │");
-    Console.WriteLine("│  Enter table number (1-9) to sync that table                                            │");
-    Console.WriteLine("└──────────────────────────────────────────────────────────────────────────────────────────┘");
+    Console.WriteLine("\n╔══════════════════════════════════════════════════════════════╗");
+    Console.WriteLine("║                     MAIN MENU                                ║");
+    Console.WriteLine("╠══════════════════════════════════════════════════════════════╣");
+    Console.WriteLine("║  1. Sync from Source MariaDB (libgenli tables)               ║");
+    Console.WriteLine("║  2. Load from CSV/GZ files                                   ║");
+    Console.WriteLine($"║     [{csvBasePath}]");
+    Console.WriteLine("║  Q. Quit                                                     ║");
+    Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
     Console.Write("\nSelect option: ");
     
-    var input = Console.ReadLine()?.Trim().ToUpperInvariant();
+    var mainInput = Console.ReadLine()?.Trim().ToUpperInvariant();
     
-    if (string.IsNullOrEmpty(input) || input == "Q") break;
+    if (string.IsNullOrEmpty(mainInput) || mainInput == "Q") break;
     
     try
     {
+        switch (mainInput)
+        {
+            case "1":
+                await ShowMariaDBSyncMenu(mover, syncState, cts);
+                break;
+            case "2":
+                await ShowCsvLoadMenu(csvLoader, syncState, cts);
+                break;
+            default:
+                Console.WriteLine("Invalid option.");
+                break;
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine("Operation cancelled. Progress has been saved.");
+        cts = new CancellationTokenSource();
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"\nError: {ex.Message}");
+        Console.WriteLine("Progress has been saved. You can resume later.");
+    }
+}
+
+Console.WriteLine("\nGoodbye!");
+
+// ============================================================================
+// MariaDB Sync Menu
+// ============================================================================
+async Task ShowMariaDBSyncMenu(ChunkedDataMover mover, SyncState syncState, CancellationTokenSource cts)
+{
+    var tableList = new[]
+    {
+        "libgenli_files",
+        "libgenli_editions",
+        "libgenli_editions_to_files",
+        "libgenli_files_add_descr",
+        "libgenli_editions_add_descr",
+        "libgenli_series",
+        "libgenli_series_add_descr",
+        "libgenli_publishers",
+        "libgenli_elem_descr"
+    };
+    
+    while (true)
+    {
+        Console.WriteLine("\nFetching table status...");
+        var statuses = await mover.GetTableStatusAsync();
+        var statusDict = statuses.ToDictionary(s => s.TableName, s => s);
+        
+        Console.WriteLine("\n┌──────────────────────────────────────────────────────────────────────────────────────────┐");
+        Console.WriteLine("│  MARIADB SYNC - libgenli Tables                                                          │");
+        Console.WriteLine("├────┬─────────────────────────────────┬───────────────┬───────────────┬───────────────────┤");
+        Console.WriteLine("│ #  │ Table Name                      │ Source Rows   │ Target Rows   │ Sync %            │");
+        Console.WriteLine("├────┼─────────────────────────────────┼───────────────┼───────────────┼───────────────────┤");
+        
+        for (int i = 0; i < tableList.Length; i++)
+        {
+            var tbl = tableList[i];
+            var st = statusDict.GetValueOrDefault(tbl);
+            string srcRows = st?.SourceRows >= 0 ? $"{st.SourceRows:N0}" : "N/A";
+            string tgtRows = st?.TargetRows >= 0 ? $"{st.TargetRows:N0}" : "N/A";
+            string pct = st?.SourceRows > 0 ? $"{st.SyncPercentage:F1}%" : "-";
+            Console.WriteLine($"│ {i + 1}  │ {tbl,-31} │ {srcRows,-13} │ {tgtRows,-13} │ {pct,-17} │");
+        }
+        
+        Console.WriteLine("├────┴─────────────────────────────────┴───────────────┴───────────────┴───────────────────┤");
+        Console.WriteLine("│  A=Sync All | R=Reset | B=Back                                                           │");
+        Console.WriteLine("│  Enter table number (1-9) to sync that table                                             │");
+        Console.WriteLine("└──────────────────────────────────────────────────────────────────────────────────────────┘");
+        Console.Write("\nSelect option: ");
+        
+        var input = Console.ReadLine()?.Trim().ToUpperInvariant();
+        
+        if (string.IsNullOrEmpty(input) || input == "B") break;
+        
         switch (input)
         {
-            case "S":
-                await ShowStatusDetailAsync(mover);
-                break;
-                
             case "A":
                 await SyncAllTablesAsync(mover, tableList, cts.Token);
                 break;
-                
             case "R":
                 await ResetTableStateAsync(syncState, tableList);
                 break;
-                
             default:
-                // Try to parse as table number
                 if (int.TryParse(input, out int tableNum) && tableNum >= 1 && tableNum <= tableList.Length)
                 {
                     await SyncTableByNameAsync(mover, tableList[tableNum - 1], cts.Token);
@@ -116,43 +158,144 @@ while (true)
                 }
                 break;
         }
+        
+        Console.WriteLine("\nPress any key to continue...");
+        Console.ReadKey(true);
     }
-    catch (OperationCanceledException)
-    {
-        Console.WriteLine("Operation cancelled. Progress has been saved.");
-        cts = new CancellationTokenSource(); // Reset for next operation
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"\nError: {ex.Message}");
-        Console.WriteLine("Progress has been saved. You can resume later.");
-    }
-    
-    Console.WriteLine("\nPress any key to continue...");
-    Console.ReadKey(true);
 }
 
-Console.WriteLine("\nGoodbye!");
-
-// Helper methods
-async Task ShowStatusDetailAsync(ChunkedDataMover mover)
+// ============================================================================
+// CSV Load Menu
+// ============================================================================
+async Task ShowCsvLoadMenu(GzipCsvLoader loader, SyncState syncState, CancellationTokenSource cts)
 {
-    Console.WriteLine("\nFetching detailed table status...\n");
-    var statuses = await mover.GetTableStatusAsync();
+    // Scan files once (fast - no DB queries)
+    Console.WriteLine($"\nScanning: {csvBasePath}");
+    var configs = CsvFileConfig.ScanDirectory(csvBasePath);
+    Console.WriteLine($"Found {configs.Count} tables.\n");
     
-    Console.WriteLine($"{"#",-3} {"Table",-35} {"Source",-15} {"Target",-15} {"Synced",-10} {"Status",-12}");
-    Console.WriteLine(new string('-', 95));
-    
-    int idx = 1;
-    foreach (var s in statuses)
+    while (true)
     {
-        string sourceStr = s.SourceRows >= 0 ? $"{s.SourceRows:N0}" : "N/A";
-        string targetStr = s.TargetRows >= 0 ? $"{s.TargetRows:N0}" : "N/A";
-        string pctStr = s.SourceRows > 0 ? $"{s.SyncPercentage:F1}%" : "-";
         
-        Console.WriteLine($"{idx,-3} {s.TableName,-35} {sourceStr,-15} {targetStr,-15} {pctStr,-10} {s.Status,-12}");
-        idx++;
+        // Pagination - show 20 at a time
+        int pageSize = 20;
+        int currentPage = 0;
+        int totalPages = (configs.Count + pageSize - 1) / pageSize;
+        
+        while (true)
+        {
+            Console.Clear();
+            Console.WriteLine($"\n┌────────────────────────────────────────────────────────────────────────────────────────────────────┐");
+            Console.WriteLine($"│  CSV LOADER - {configs.Count} tables found                                                   Page {currentPage + 1}/{totalPages}        │");
+            Console.WriteLine($"│  Path: {csvBasePath,-88} │");
+            Console.WriteLine("├────┬────────────────────────────────────────────────┬──────────┬───────────────┬────────────────────┤");
+            Console.WriteLine("│ #  │ Table Name                                     │ Parts    │ Size (MB)     │ Loaded             │");
+            Console.WriteLine("├────┼────────────────────────────────────────────────┼──────────┼───────────────┼────────────────────┤");
+            
+            int startIdx = currentPage * pageSize;
+            int endIdx = Math.Min(startIdx + pageSize, configs.Count);
+            
+            for (int i = startIdx; i < endIdx; i++)
+            {
+                var cfg = configs[i];
+                
+                // Fast: get file size from disk (no DB query)
+                double sizeMB = cfg.DataFiles.Sum(f => File.Exists(f) ? new FileInfo(f).Length / 1024.0 / 1024.0 : 0);
+                string parts = cfg.DataFiles.Count > 1 ? $"{cfg.DataFiles.Count} files" : "1 file";
+                string size = sizeMB > 0 ? $"{sizeMB:F1}" : "-";
+                
+                // Get sync progress from state file (fast, no DB)
+                var progress = syncState.GetProgress(cfg.TableName);
+                string loaded = progress.TotalRowsSynced > 0 
+                    ? $"{progress.TotalRowsSynced:N0} ({progress.Status})" 
+                    : "-";
+                
+                // Truncate long table names
+                string tableName = cfg.TableName.Length > 46 ? cfg.TableName.Substring(0, 43) + "..." : cfg.TableName;
+                
+                Console.WriteLine($"│ {i + 1,-2} │ {tableName,-46} │ {parts,-8} │ {size,-13} │ {loaded,-18} │");
+            }
+            
+            Console.WriteLine("├────┴────────────────────────────────────────────────┴──────────┴───────────────┴────────────────────┤");
+            Console.WriteLine("│  Commands:  N=Next Page  P=Prev Page  R=Reset table  T=Check target DB rows  B=Back                 │");
+            Console.WriteLine("├─────────────────────────────────────────────────────────────────────────────────────────────────────┤");
+            Console.WriteLine("│  Load:  Enter number (e.g. 5) or range (e.g. 1-5) to start loading                                  │");
+            Console.WriteLine("└─────────────────────────────────────────────────────────────────────────────────────────────────────┘");
+            Console.Write("\nSelect option: ");
+            
+            var input = Console.ReadLine()?.Trim().ToUpperInvariant();
+            
+            if (string.IsNullOrEmpty(input) || input == "B") return;
+            
+            if (input == "N" && currentPage < totalPages - 1)
+            {
+                currentPage++;
+                continue;
+            }
+            else if (input == "P" && currentPage > 0)
+            {
+                currentPage--;
+                continue;
+            }
+            else if (input == "T")
+            {
+                // Query target DB for row counts (slow but more informative)
+                Console.WriteLine("\nQuerying target database for row counts...");
+                var statuses = await loader.GetFileStatusAsync();
+                foreach (var st in statuses.Where(s => s.TargetRows > 0))
+                {
+                    Console.WriteLine($"  {st.TableName}: {st.TargetRows:N0} rows");
+                }
+                Console.WriteLine("\nPress any key to continue...");
+                Console.ReadKey(true);
+                continue;
+            }
+            else if (input == "R")
+            {
+                Console.Write("Enter table number to reset: ");
+                var resetInput = Console.ReadLine()?.Trim();
+                if (int.TryParse(resetInput, out int resetNum) && resetNum >= 1 && resetNum <= configs.Count)
+                {
+                    syncState.Reset(configs[resetNum - 1].TableName);
+                    Console.WriteLine($"Reset state for {configs[resetNum - 1].TableName}");
+                }
+                continue;
+            }
+            else if (input.Contains('-'))
+            {
+                // Range: 1-5
+                var parts = input.Split('-');
+                if (parts.Length == 2 && int.TryParse(parts[0], out int start) && int.TryParse(parts[1], out int end))
+                {
+                    start = Math.Max(1, start);
+                    end = Math.Min(configs.Count, end);
+                    Console.WriteLine($"\nLoading tables {start} to {end}...");
+                    for (int i = start; i <= end && !cts.Token.IsCancellationRequested; i++)
+                    {
+                        await LoadCsvTableAsync(loader, configs[i - 1], cts.Token);
+                    }
+                }
+            }
+            else if (int.TryParse(input, out int tableNum) && tableNum >= 1 && tableNum <= configs.Count)
+            {
+                await LoadCsvTableAsync(loader, configs[tableNum - 1], cts.Token);
+            }
+            else
+            {
+                Console.WriteLine("Invalid option.");
+            }
+            
+            Console.WriteLine("\nPress any key to continue...");
+            Console.ReadKey(true);
+        }
     }
+}
+
+async Task LoadCsvTableAsync(GzipCsvLoader loader, CsvFileConfig config, CancellationToken ct)
+{
+    Console.WriteLine($"\nStarting load for {config.TableName}...");
+    Console.WriteLine("Press Ctrl+C to cancel (progress will be saved).\n");
+    await loader.LoadFileAsync(config, ct);
 }
 
 async Task SyncTableByNameAsync(ChunkedDataMover mover, string tableName, CancellationToken ct)
@@ -165,7 +308,6 @@ async Task SyncTableByNameAsync(ChunkedDataMover mover, string tableName, Cancel
 
 async Task SyncAllTablesAsync(ChunkedDataMover mover, string[] tables, CancellationToken ct)
 {
-    // Sync in order of dependencies / size (smaller first)
     var orderedTables = new[]
     {
         "libgenli_publishers",
@@ -198,13 +340,8 @@ Task ResetTableStateAsync(SyncState state, string[] tables)
     
     if (int.TryParse(input, out int num) && num >= 1 && num <= tables.Length)
     {
-        var tableName = tables[num - 1];
-        state.Reset(tableName);
-        Console.WriteLine($"Reset sync state for {tableName}. Next sync will start from ID 0.");
-    }
-    else if (num != 0)
-    {
-        Console.WriteLine("Invalid selection.");
+        state.Reset(tables[num - 1]);
+        Console.WriteLine($"Reset sync state for {tables[num - 1]}. Next sync will start from line 0.");
     }
     
     return Task.CompletedTask;
@@ -212,7 +349,6 @@ Task ResetTableStateAsync(SyncState state, string[] tables)
 
 string MaskConnectionString(string connStr)
 {
-    // Simple masking of password
     return System.Text.RegularExpressions.Regex.Replace(
         connStr, 
         @"Password=([^;]+)", 
