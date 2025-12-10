@@ -8,6 +8,7 @@ builder.Services.AddEndpointsApiExplorer();
 //builder.Services.AddSwaggerGen();
 
 builder.Services.AddScoped<IImportService, ImportService>();
+builder.Services.AddSingleton<ITorrentService, TorrentService>();
 
 builder.Services.AddCors(options =>
 {

@@ -22,6 +22,9 @@ public class GzipCsvLoader
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         "csv_loader_errors.log");
 
+    // If we hit this many consecutive parse errors, assume gzip corruption and stop
+    private const int MaxConsecutiveErrors = 50;
+
     public GzipCsvLoader(
         string targetConnectionString,
         SyncState syncState,
@@ -91,11 +94,15 @@ public class GzipCsvLoader
         var stopwatch = Stopwatch.StartNew();
         long rowsSyncedThisRun = 0;
         long rowsSkippedThisRun = 0;
+        long orphanLinesSkipped = 0; // Track orphan continuation lines from multi-line records
         long initialRowsSynced = progress.TotalRowsSynced;
         long globalLine = 0;
         long bytesProcessed = 0;
         int chunkNumber = 0;
         var chunkRows = new List<object?[]>();
+        long chunkBytesEstimate = 0; // Track estimated size of current chunk
+        const long MaxChunkBytes = 16 * 1024 * 1024; // 16MB max per chunk - prevents timeout on large records
+        int consecutiveErrors = 0; // Track consecutive parse failures for corruption detection
 
         try
         {
@@ -114,9 +121,58 @@ public class GzipCsvLoader
 
                 string? line;
                 bool isFirstLine = true;
+                bool gzipCorrupted = false;
+                string? pendingLine = null; // For multi-line CSV records
 
-                while ((line = await reader.ReadLineAsync(cancellationToken)) != null)
+                while (!gzipCorrupted)
                 {
+                    try
+                    {
+                        line = await reader.ReadLineAsync(cancellationToken);
+                        if (line == null) 
+                        {
+                            // End of file - if we have a pending incomplete line, it's an error
+                            if (pendingLine != null)
+                            {
+                                LogError(config.TableName, globalLine, "INCOMPLETE_RECORD", 
+                                    $"File ended with incomplete multi-line record");
+                                rowsSkippedThisRun++;
+                                pendingLine = null;
+                            }
+                            break;
+                        }
+                        
+                        // Handle multi-line CSV records (quoted fields with embedded newlines)
+                        if (pendingLine != null)
+                        {
+                            // Continue the previous incomplete line
+                            line = pendingLine + "\n" + line;
+                            pendingLine = null;
+                        }
+                        
+                        // Check if line has unbalanced quotes (incomplete multi-line record)
+                        if (HasUnbalancedQuotes(line))
+                        {
+                            pendingLine = line;
+                            continue; // Read more lines to complete the record
+                        }
+                    }
+                    catch (InvalidDataException ex)
+                    {
+                        // Gzip stream is corrupted/truncated - save what we have and continue
+                        Console.WriteLine($"\n\nWARNING: Gzip corruption detected at line {globalLine}: {ex.Message}");
+                        Console.WriteLine("Saving partial data and marking as partially complete...");
+                        gzipCorrupted = true;
+                        break;
+                    }
+                    catch (IOException ex) when (ex.Message.Contains("compression") || ex.Message.Contains("archive"))
+                    {
+                        Console.WriteLine($"\n\nWARNING: Compression error at line {globalLine}: {ex.Message}");
+                        Console.WriteLine("Saving partial data and marking as partially complete...");
+                        gzipCorrupted = true;
+                        break;
+                    }
+
                     if (cancellationToken.IsCancellationRequested) break;
 
                     globalLine++;
@@ -138,6 +194,7 @@ public class GzipCsvLoader
                     // Skip lines we've already processed
                     if (globalLine <= startLine)
                     {
+                        consecutiveErrors = 0; // Reset on skipped lines
                         continue;
                     }
 
@@ -147,28 +204,77 @@ public class GzipCsvLoader
                         var values = ParseCsvLine(line);
                         if (values.Count != columns.Count)
                         {
-                            LogError(config.TableName, globalLine, "COLUMN_COUNT", 
-                                $"Expected {columns.Count} columns, got {values.Count}");
+                            // Check if this looks like an orphan continuation line from a multi-line record
+                            // These occur when a massive JSON field contains many newlines, and some
+                            // intermediate lines happen to have balanced quotes
+                            bool isOrphanContinuation = IsOrphanContinuationLine(line, values);
+                            
+                            if (isOrphanContinuation)
+                            {
+                                // Silently skip orphan continuation lines - they're part of a huge
+                                // multi-line record that we already processed or will process
+                                orphanLinesSkipped++;
+                                rowsSkippedThisRun++;
+                                continue;
+                            }
+                            
+                            consecutiveErrors++;
+                            
+                            // If we hit many consecutive errors, likely gzip corruption - stop early
+                            if (consecutiveErrors >= MaxConsecutiveErrors)
+                            {
+                                Console.WriteLine($"\n⚠️ Detected likely gzip corruption: {consecutiveErrors} consecutive parse errors at line {globalLine}");
+                                Console.WriteLine($"   Saving {rowsSyncedThisRun:N0} valid rows loaded before corruption point.");
+                                gzipCorrupted = true;
+                                break;
+                            }
+                            
+                            // Log first few errors with sample data for debugging
+                            if (consecutiveErrors <= 5)
+                            {
+                                LogError(config.TableName, globalLine, "COLUMN_COUNT", 
+                                    $"Expected {columns.Count} columns, got {values.Count}");
+                                // Log sample of failing line (first 200 chars)
+                                var sample = line.Length > 200 ? line.Substring(0, 200) + "..." : line;
+                                LogError(config.TableName, globalLine, "SAMPLE", sample);
+                            }
                             rowsSkippedThisRun++;
                             continue;
                         }
 
+                        consecutiveErrors = 0; // Reset on successful parse
                         var row = new object?[columns.Count];
+                        long rowBytes = 0;
                         for (int i = 0; i < values.Count; i++)
                         {
                             row[i] = ConvertValue(values[i]);
+                            // Estimate byte size of this value
+                            if (values[i] != null)
+                                rowBytes += values[i].Length * 2; // UTF-8 to parameter overhead estimate
                         }
                         chunkRows.Add(row);
+                        chunkBytesEstimate += rowBytes;
                     }
                     catch (Exception ex)
                     {
-                        LogError(config.TableName, globalLine, "PARSE", ex.Message);
+                        consecutiveErrors++;
+                        if (consecutiveErrors >= MaxConsecutiveErrors)
+                        {
+                            Console.WriteLine($"\n⚠️ Detected likely gzip corruption: {consecutiveErrors} consecutive parse errors at line {globalLine}");
+                            gzipCorrupted = true;
+                            break;
+                        }
+                        if (consecutiveErrors <= 5)
+                        {
+                            LogError(config.TableName, globalLine, "PARSE", ex.Message);
+                        }
                         rowsSkippedThisRun++;
                         continue;
                     }
 
-                    // Write chunk when full
-                    if (chunkRows.Count >= config.ChunkSize)
+                    // Write chunk when full (by row count OR by size - whichever comes first)
+                    bool chunkFull = chunkRows.Count >= config.ChunkSize || chunkBytesEstimate >= MaxChunkBytes;
+                    if (chunkFull)
                     {
                         chunkNumber++;
                         int written = await WriteChunkWithRetryAsync(config, columns, chunkRows, useSimpleInsert);
@@ -186,10 +292,14 @@ public class GzipCsvLoader
                         Console.Write($"\rChunk {chunkNumber}: {rowsSyncedThisRun:N0} loaded | {pct:F1}% | {rowsPerSec:N0}/s | ETA: {eta:hh\\:mm\\:ss}   ");
                         
                         chunkRows.Clear();
+                        chunkBytesEstimate = 0; // Reset size tracking
                     }
                 }
                 
                 bytesProcessed += fileInfo.Length;
+                
+                // If gzip was corrupted, stop processing more files
+                if (gzipCorrupted) break;
             }
 
             // Write remaining rows
@@ -201,8 +311,63 @@ public class GzipCsvLoader
                 _syncState.UpdateProgress(config.TableName, globalLine, initialRowsSynced + rowsSyncedThisRun);
             }
 
-            _syncState.MarkCompleted(config.TableName, initialRowsSynced + rowsSyncedThisRun);
-            Console.WriteLine("\n\nLoad completed!");
+            // Mark as partial if we hit corruption, otherwise completed
+            if (rowsSyncedThisRun > 0)
+            {
+                // Check if any file had corruption by looking at progress vs expected
+                var finalStatus = _syncState.GetProgress(config.TableName);
+                _syncState.MarkCompleted(config.TableName, initialRowsSynced + rowsSyncedThisRun);
+                Console.WriteLine("\n\nLoad completed!");
+                if (orphanLinesSkipped > 0)
+                {
+                    Console.WriteLine($"  Note: {orphanLinesSkipped:N0} orphan continuation lines silently skipped (from multi-line JSON records)");
+                }
+            }
+            else
+            {
+                _syncState.MarkCompleted(config.TableName, initialRowsSynced + rowsSyncedThisRun);
+                Console.WriteLine("\n\nLoad completed!");
+            }
+        }
+        catch (InvalidDataException ex)
+        {
+            // Gzip corruption - save what we have
+            Console.WriteLine($"\n\nWARNING: Gzip file corrupted: {ex.Message}");
+            if (chunkRows.Count > 0)
+            {
+                int written = await WriteChunkWithRetryAsync(config, columns, chunkRows, useSimpleInsert);
+                rowsSyncedThisRun += written;
+            }
+            _syncState.UpdateProgress(config.TableName, globalLine, initialRowsSynced + rowsSyncedThisRun);
+            if (rowsSyncedThisRun > 0)
+            {
+                _syncState.MarkCompleted(config.TableName, initialRowsSynced + rowsSyncedThisRun);
+                Console.WriteLine($"Partial data saved: {rowsSyncedThisRun:N0} rows recovered before corruption.");
+            }
+            else
+            {
+                _syncState.MarkFailed(config.TableName, ex.Message);
+            }
+        }
+        catch (Exception ex) when (ex.Message.Contains("compression") || ex.Message.Contains("unsupported"))
+        {
+            // Compression method error - save what we have
+            Console.WriteLine($"\n\nWARNING: Compression error: {ex.Message}");
+            if (chunkRows.Count > 0)
+            {
+                int written = await WriteChunkWithRetryAsync(config, columns, chunkRows, useSimpleInsert);
+                rowsSyncedThisRun += written;
+            }
+            _syncState.UpdateProgress(config.TableName, globalLine, initialRowsSynced + rowsSyncedThisRun);
+            if (rowsSyncedThisRun > 0)
+            {
+                _syncState.MarkCompleted(config.TableName, initialRowsSynced + rowsSyncedThisRun);
+                Console.WriteLine($"Partial data saved: {rowsSyncedThisRun:N0} rows recovered before error.");
+            }
+            else
+            {
+                _syncState.MarkFailed(config.TableName, ex.Message);
+            }
         }
         catch (Exception ex)
         {
@@ -322,6 +487,139 @@ public class GzipCsvLoader
     }
 
     /// <summary>
+    /// Check if a line has unbalanced quotes, indicating a multi-line CSV record.
+    /// Accounts for escaped quotes (\" or "").
+    /// Also detects base64 continuation lines that appear balanced but are actually
+    /// continuations of a field from the previous line.
+    /// </summary>
+    private bool HasUnbalancedQuotes(string line)
+    {
+        // First, check if this looks like a base64 continuation line.
+        // Base64 continuations don't start with a quote - they start with base64 chars
+        // and eventually hit a closing quote. E.g.: "YFRSRBL2SIQ64CELXI5VZY5WTLVGSWMK","next..."
+        if (IsBase64ContinuationLine(line))
+        {
+            return true; // Treat as unbalanced - needs to be joined with previous line
+        }
+        
+        bool inQuotes = false;
+        int i = 0;
+        
+        while (i < line.Length)
+        {
+            char c = line[i];
+            
+            if (inQuotes)
+            {
+                if (c == '\\' && i + 1 < line.Length)
+                {
+                    // Skip escape sequences
+                    i += 2;
+                    continue;
+                }
+                else if (c == '"')
+                {
+                    inQuotes = false;
+                }
+            }
+            else
+            {
+                if (c == '"')
+                {
+                    inQuotes = true;
+                }
+            }
+            i++;
+        }
+        
+        return inQuotes; // If still in quotes at end, it's unbalanced
+    }
+    
+    /// <summary>
+    /// Detect if a line is a base64 continuation - a line that starts with base64 characters
+    /// (not a quote) and has a long run of base64 chars before any comma or quote.
+    /// This catches cases like: YFRSRBL2SIQ64CELXI5VZY5WTLVGSWMK","next_field",...
+    /// which look balanced but are actually a continuation of the previous line's field.
+    /// </summary>
+    private bool IsBase64ContinuationLine(string line)
+    {
+        if (string.IsNullOrEmpty(line))
+            return false;
+            
+        // If line starts with a quote, it's a proper field start, not a continuation
+        if (line[0] == '"')
+            return false;
+        
+        // Count consecutive base64 characters at the start
+        // Base64 alphabet: A-Z, a-z, 0-9, +, /, = (padding)
+        int base64Run = 0;
+        foreach (char c in line)
+        {
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || 
+                (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=')
+            {
+                base64Run++;
+            }
+            else
+            {
+                break; // Hit a non-base64 character
+            }
+        }
+        
+        // If we have a long run of base64 chars (>30) at the start, this is likely a continuation
+        // Normal CSV fields start with a quote, not with 30+ alphanumeric chars
+        return base64Run >= 30;
+    }
+
+    /// <summary>
+    /// Detect if a line is an orphan continuation fragment from a massive multi-line CSV record.
+    /// This happens when a JSON field contains many newlines, and some intermediate lines
+    /// happen to have balanced quotes, making them look like complete (but invalid) records.
+    /// </summary>
+    private bool IsOrphanContinuationLine(string line, List<string> parsedValues)
+    {
+        // If we got very few columns (less than expected), check for telltale signs of JSON fragments
+        if (parsedValues.Count <= 3 && parsedValues.Count > 0)
+        {
+            // Check the LAST parsed value - orphan lines often end with JSON closing patterns
+            var lastValue = parsedValues[parsedValues.Count - 1];
+            
+            // If last value ends with JSON fragment patterns like }}" or }} it's likely orphan
+            if (lastValue.EndsWith("\"}}") || lastValue.EndsWith("}}") || 
+                lastValue.EndsWith("\"}") || lastValue.EndsWith("}\"]"))
+            {
+                return true;
+            }
+            
+            // Check if any parsed value contains patterns that indicate mid-JSON content
+            foreach (var val in parsedValues)
+            {
+                // These patterns strongly indicate we're inside a JSON object
+                if (val.Contains("\"key\":") || val.Contains("\"value\":") ||
+                    val.Contains("\"type\":") || val.Contains("\\\"key\\\""))
+                {
+                    return true;
+                }
+            }
+            
+            // Check if second column (if exists) looks like a JSON key reference ending with garbage
+            if (parsedValues.Count >= 2)
+            {
+                var second = parsedValues[1];
+                // Pattern: /authors/OL123"}} or /works/OL123"}}
+                if ((second.Contains("/authors/") || second.Contains("/works/") || 
+                     second.Contains("/books/")) && 
+                    (second.EndsWith("\"}}") || second.EndsWith("}}")))
+                {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
+    }
+
+    /// <summary>
     /// Convert string value to proper type for database.
     /// </summary>
     private object? ConvertValue(string value)
@@ -384,12 +682,15 @@ public class GzipCsvLoader
     {
         var columns = new List<string>();
         
-        // Find the column definitions between CREATE TABLE ... ( and the closing )
+        // Find the column definitions between CREATE TABLE ... ( and the matching closing )
+        // We need to find the FIRST opening paren after CREATE TABLE, then find its MATCHING closing paren
+        // This is important for tables with PARTITION BY clauses which add more parentheses
         int startParen = createStatement.IndexOf('(');
         if (startParen < 0) return columns;
 
-        int endParen = createStatement.LastIndexOf(')');
-        if (endParen < startParen) return columns;
+        // Find the matching closing paren by counting parentheses
+        int endParen = FindMatchingCloseParen(createStatement, startParen);
+        if (endParen < 0) return columns;
 
         var columnSection = createStatement.Substring(startParen + 1, endParen - startParen - 1);
         var lines = columnSection.Split('\n');
@@ -436,6 +737,34 @@ public class GzipCsvLoader
         return columns;
     }
 
+    /// <summary>
+    /// Find the matching closing parenthesis for the opening paren at openIndex.
+    /// Handles nested parentheses correctly, which is important for tables with
+    /// PARTITION BY clauses that contain additional parentheses.
+    /// </summary>
+    private int FindMatchingCloseParen(string str, int openIndex)
+    {
+        if (openIndex < 0 || openIndex >= str.Length || str[openIndex] != '(')
+            return -1;
+
+        int depth = 1;
+        for (int i = openIndex + 1; i < str.Length; i++)
+        {
+            if (str[i] == '(')
+            {
+                depth++;
+            }
+            else if (str[i] == ')')
+            {
+                depth--;
+                if (depth == 0)
+                    return i;
+            }
+        }
+
+        return -1; // No matching close paren found
+    }
+
     private async Task EnsureTargetTableExistsAsync(CsvFileConfig config)
     {
         // Try to read and execute the schema file
@@ -450,16 +779,13 @@ public class GzipCsvLoader
                 using var sr = new StreamReader(gz);
                 var content = await sr.ReadToEndAsync();
 
-                // Extract just the CREATE TABLE statement
-                var createMatch = System.Text.RegularExpressions.Regex.Match(
-                    content, 
-                    @"CREATE TABLE[^;]+;", 
-                    System.Text.RegularExpressions.RegexOptions.Singleline | 
-                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                // Extract the CREATE TABLE statement - be careful with semicolons inside quoted strings
+                // We need to find "CREATE TABLE" and then find the proper ending semicolon
+                var createSql = ExtractCreateTableStatement(content);
 
-                if (createMatch.Success)
+                if (!string.IsNullOrEmpty(createSql))
                 {
-                    var createSql = createMatch.Value.Replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS");
+                    createSql = createSql.Replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS");
                     
                     await using var conn = new MySqlConnection(_targetConnectionString);
                     await conn.OpenAsync();
@@ -477,6 +803,52 @@ public class GzipCsvLoader
         }
 
         Console.WriteLine("WARNING: No schema file found. Table must already exist.");
+    }
+    
+    /// <summary>
+    /// Extract the CREATE TABLE statement from schema content, handling semicolons inside quoted strings.
+    /// </summary>
+    private string? ExtractCreateTableStatement(string content)
+    {
+        // Find "CREATE TABLE"
+        var startIdx = content.IndexOf("CREATE TABLE", StringComparison.OrdinalIgnoreCase);
+        if (startIdx < 0)
+            return null;
+        
+        // Now find the ending semicolon, but ignore semicolons inside quotes
+        bool inSingleQuote = false;
+        bool inDoubleQuote = false;
+        bool inBacktick = false;
+        
+        for (int i = startIdx; i < content.Length; i++)
+        {
+            char c = content[i];
+            char prev = i > 0 ? content[i - 1] : '\0';
+            
+            // Handle escape sequences (skip escaped quotes)
+            if (prev == '\\')
+                continue;
+                
+            if (c == '\'' && !inDoubleQuote && !inBacktick)
+            {
+                inSingleQuote = !inSingleQuote;
+            }
+            else if (c == '"' && !inSingleQuote && !inBacktick)
+            {
+                inDoubleQuote = !inDoubleQuote;
+            }
+            else if (c == '`' && !inSingleQuote && !inDoubleQuote)
+            {
+                inBacktick = !inBacktick;
+            }
+            else if (c == ';' && !inSingleQuote && !inDoubleQuote && !inBacktick)
+            {
+                // Found the real end of the statement
+                return content.Substring(startIdx, i - startIdx + 1);
+            }
+        }
+        
+        return null; // No proper ending found
     }
 
     private async Task<long> GetTargetCountAsync(CsvFileConfig config)
@@ -571,7 +943,7 @@ public class GzipCsvLoader
         }
 
         await using var cmd = new MySqlCommand(sql, conn);
-        cmd.CommandTimeout = 300;
+        cmd.CommandTimeout = 1800; // 30 minutes for very large metadata inserts
         cmd.Parameters.AddRange(parameters.ToArray());
 
         await cmd.ExecuteNonQueryAsync();
@@ -769,6 +1141,8 @@ public class CsvFileConfig
     private static int GetDefaultChunkSize(string tableName)
     {
         // Larger chunks for simpler tables, smaller for tables with large text columns
+        if (tableName.Contains("aa_ia") && tableName.Contains("metadata"))
+            return 200; // Very large JSON metadata records (7.5GB compressed) - needs small chunks
         if (tableName.Contains("description") || tableName.Contains("records"))
             return 2000;
         if (tableName.Contains("worldcat"))

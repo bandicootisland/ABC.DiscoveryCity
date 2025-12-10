@@ -1,0 +1,663 @@
+@page "/book-viewer"
+@page "/book-viewer/{FileId:guid}"
+@inject HttpClient Http
+@inject NavigationManager Navigation
+
+<h3>📚 HathiTrust Book Viewer</h3>
+
+@if (loading)
+{
+    <div class="alert alert-info">
+        <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+        Loading...
+    </div>
+}
+else if (errorMessage != null)
+{
+    <div class="alert alert-danger">@errorMessage</div>
+}
+
+@if (FileId == null)
+{
+    <!-- Book List View -->
+    <div class="mb-3">
+        <div class="d-flex gap-2 align-items-center">
+            <TelerikButton OnClick="@RefreshSummary" Icon="@SvgIcon.ArrowRotateCw">Refresh</TelerikButton>
+            
+            <TelerikSplitButton OnClick="@(() => LinkFilesAsync(false))" Enabled="@(!linking)">
+                <SplitButtonContent>
+                    @if (linking)
+                    {
+                        <TelerikLoader Size="@ThemeConstants.Loader.Size.Small" Visible="true" />
+                        <span class="ms-1">Linking...</span>
+                    }
+                    else
+                    {
+                        <span>Link Unlinked</span>
+                    }
+                </SplitButtonContent>
+                <SplitButtonItems>
+                    <SplitButtonItem OnClick="@(() => LinkFilesAsync(false))">Link Unlinked Only</SplitButtonItem>
+                    <SplitButtonItem OnClick="@(() => LinkFilesAsync(true))">Re-link All Files</SplitButtonItem>
+                    <SplitButtonItem OnClick="@CheckLinkStatus">Check Status</SplitButtonItem>
+                </SplitButtonItems>
+            </TelerikSplitButton>
+            
+            <TelerikCheckBox @bind-Value="@linkedOnly" Id="linkedOnlyCheck" />
+            <label for="linkedOnlyCheck" class="ms-1">Linked Only</label>
+            
+            <TelerikButton OnClick="@LoadBooks" ThemeColor="@ThemeConstants.Button.ThemeColor.Info">Load</TelerikButton>
+        </div>
+    </div>
+
+    @if (linkStatus != null && (linkStatus.IsRunning || linkStatus.CompletedAt != null))
+    {
+        <div class="alert @(linkStatus.IsRunning ? "alert-info" : (linkStatus.Error != null ? "alert-danger" : "alert-success")) mb-3">
+            @if (linkStatus.IsRunning)
+            {
+                <strong>🔗 Linking in progress...</strong>
+                <div class="progress mt-2" style="height: 20px;">
+                    @{
+                        var pct = linkStatus.Total > 0 ? (linkStatus.Current * 100 / linkStatus.Total) : 0;
+                    }
+                    <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                         role="progressbar" style="width: @(pct)%">
+                        @linkStatus.Current.ToString("N0") / @linkStatus.Total.ToString("N0")
+                    </div>
+                </div>
+                <small class="text-muted mt-1 d-block">
+                    Linked: @linkStatus.Linked.ToString("N0") | Failed: @linkStatus.Failed.ToString("N0") | Skipped: @linkStatus.Skipped.ToString("N0")
+                    @if (linkStatus.RelinkAll) { <span class="badge bg-secondary ms-2">Re-link All</span> }
+                </small>
+            }
+            else if (linkStatus.Error != null)
+            {
+                <strong>❌ Linking failed:</strong> @linkStatus.Error
+            }
+            else
+            {
+                <strong>✅ Linking complete!</strong>
+                <span class="ms-2">
+                    Linked: <strong>@linkStatus.Linked.ToString("N0")</strong> |
+                    Failed: <strong>@linkStatus.Failed.ToString("N0")</strong> |
+                    Skipped: <strong>@linkStatus.Skipped.ToString("N0")</strong>
+                </span>
+                @if (linkStatus.CompletedAt.HasValue)
+                {
+                    <small class="text-muted ms-2">at @linkStatus.CompletedAt.Value.ToLocalTime().ToString("HH:mm:ss")</small>
+                }
+                <button class="btn btn-sm btn-outline-secondary ms-2" @onclick="() => linkStatus = null">Dismiss</button>
+            }
+        </div>
+    }
+
+    @if (summary != null)
+    {
+        <div class="row mb-3">
+            <div class="col-md-2">
+                <div class="card text-bg-primary">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">@summary.TotalFiles.ToString("N0")</h5>
+                        <p class="card-text mb-0">Total Files</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card text-bg-success">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">@summary.LinkedFiles.ToString("N0")</h5>
+                        <p class="card-text mb-0">Linked</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card text-bg-warning">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">@summary.UnlinkedFiles.ToString("N0")</h5>
+                        <p class="card-text mb-0">Unlinked</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card text-bg-info">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">@summary.WithMetadata.ToString("N0")</h5>
+                        <p class="card-text mb-0">With Metadata</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card text-bg-secondary">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">@summary.TotalPages.ToString("N0")</h5>
+                        <p class="card-text mb-0">Total Pages</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-2">
+                <div class="card text-bg-dark">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">@summary.TotalSizeGB.ToString("N2") GB</h5>
+                        <p class="card-text mb-0">Total Size</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    <TelerikGrid Data="@books"
+                 Pageable="true"
+                 PageSize="50"
+                 Sortable="true"
+                 FilterMode="@GridFilterMode.FilterRow"
+                 Resizable="true"
+                 Height="600px">
+        <GridToolBarTemplate>
+            <GridSearchBox DebounceDelay="300" />
+        </GridToolBarTemplate>
+        <GridColumns>
+            <GridColumn Field="@nameof(HathiTrustBookListItem.Title)" Title="Title / Filename" Width="300px">
+                <Template>
+                    @{
+                        var book = (HathiTrustBookListItem)context;
+                    }
+                    <strong>@(book.Title ?? book.FileName)</strong>
+                    @if (book.Htid != null)
+                    {
+                        <br /><small class="text-muted">@book.Htid</small>
+                    }
+                </Template>
+            </GridColumn>
+            <GridColumn Field="@nameof(HathiTrustBookListItem.Author)" Title="Author" Width="200px" />
+            <GridColumn Field="@nameof(HathiTrustBookListItem.Language)" Title="Lang" Width="80px" />
+            <GridColumn Field="@nameof(HathiTrustBookListItem.PageCount)" Title="Pages" Width="100px" TextAlign="@ColumnTextAlign.Right" />
+            <GridColumn Field="@nameof(HathiTrustBookListItem.IsLinked)" Title="Linked" Width="90px">
+                <Template>
+                    @{
+                        var book = (HathiTrustBookListItem)context;
+                    }
+                    @if (book.IsLinked)
+                    {
+                        <span class="badge bg-success">✓ Yes</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-secondary">No</span>
+                    }
+                </Template>
+            </GridColumn>
+            <GridColumn Field="@nameof(HathiTrustBookListItem.Access)" Title="Access" Width="100px">
+                <Template>
+                    @{
+                        var book = (HathiTrustBookListItem)context;
+                    }
+                    @if (book.Access == "allow")
+                    {
+                        <span class="badge bg-success">Public</span>
+                    }
+                    else if (book.Access == "deny")
+                    {
+                        <span class="badge bg-danger">Restricted</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-secondary">@(book.Access ?? "?")</span>
+                    }
+                </Template>
+            </GridColumn>
+            <GridColumn Field="@nameof(HathiTrustBookListItem.HasMetadata)" Title="Metadata" Width="100px">
+                <Template>
+                    @{
+                        var book = (HathiTrustBookListItem)context;
+                    }
+                    @if (book.HasMetadata)
+                    {
+                        <span class="badge bg-success">Yes</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-warning">No</span>
+                    }
+                </Template>
+            </GridColumn>
+            <GridColumn Title="Actions" Width="180px" Filterable="false" Sortable="false">
+                <Template>
+                    @{
+                        var book = (HathiTrustBookListItem)context;
+                    }
+                    <TelerikButton OnClick="@(() => OpenBook(book.FileId))" Size="@ThemeConstants.Button.Size.Small" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary">
+                        📖 Read
+                    </TelerikButton>
+                    @if (book.PublicUrl != null)
+                    {
+                        <a href="@book.PublicUrl" target="_blank" class="k-button k-button-sm k-button-outline k-button-outline-base ms-1">
+                            🔗 HathiTrust
+                        </a>
+                    }
+                </Template>
+            </GridColumn>
+        </GridColumns>
+    </TelerikGrid>
+}
+else
+{
+    <!-- Single Book Reader View -->
+    @if (bookInfo != null)
+    {
+        <div class="mb-3">
+            <TelerikButton OnClick="@BackToList" Icon="@SvgIcon.ArrowLeft">Back to List</TelerikButton>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0">@(bookInfo.Title ?? bookInfo.FileName)</h5>
+                    @if (bookInfo.Author != null)
+                    {
+                        <small>by @bookInfo.Author</small>
+                    }
+                </div>
+                @if (bookInfo.PublicUrl != null)
+                {
+                    <a href="@bookInfo.PublicUrl" target="_blank" class="btn btn-light btn-sm">
+                        🔗 View on HathiTrust
+                    </a>
+                }
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <dl class="row mb-0">
+                            <dt class="col-sm-4">HTID</dt>
+                            <dd class="col-sm-8"><code>@(bookInfo.Htid ?? "Not linked")</code></dd>
+                            
+                            <dt class="col-sm-4">Pages</dt>
+                            <dd class="col-sm-8">@bookInfo.PageCount</dd>
+                            
+                            <dt class="col-sm-4">Language</dt>
+                            <dd class="col-sm-8">@(bookInfo.Language ?? "-")</dd>
+                            
+                            <dt class="col-sm-4">Access</dt>
+                            <dd class="col-sm-8">@(bookInfo.Access ?? "-") / @(bookInfo.Rights ?? "-")</dd>
+                        </dl>
+                    </div>
+                    <div class="col-md-6">
+                        <dl class="row mb-0">
+                            <dt class="col-sm-4">ISBN</dt>
+                            <dd class="col-sm-8">@(bookInfo.Isbn ?? "-")</dd>
+                            
+                            <dt class="col-sm-4">OCLC</dt>
+                            <dd class="col-sm-8">@(bookInfo.OclcNum ?? "-")</dd>
+                            
+                            <dt class="col-sm-4">Imprint</dt>
+                            <dd class="col-sm-8">@(bookInfo.Imprint ?? "-")</dd>
+                            
+                            <dt class="col-sm-4">File Size</dt>
+                            <dd class="col-sm-8">@FormatSize(bookInfo.FileSize)</dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Page Navigation -->
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <button class="btn btn-primary" @onclick="PreviousBookPage" disabled="@(currentBookPage <= 1)">
+                ← Previous Page
+            </button>
+            <div class="d-flex align-items-center gap-2">
+                <span>Page</span>
+                <input type="number" class="form-control" style="width: 80px;" min="1" max="@bookInfo.PageCount"
+                       @bind="currentBookPage" @bind:after="LoadCurrentPage" />
+                <span>of @bookInfo.PageCount</span>
+            </div>
+            <button class="btn btn-primary" @onclick="NextBookPage" disabled="@(currentBookPage >= bookInfo.PageCount)">
+                Next Page →
+            </button>
+        </div>
+
+        <!-- Page Content -->
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Page @currentBookPage</span>
+                @if (pageContent?.PageImageUrl != null)
+                {
+                    <a href="@pageContent.PageImageUrl" target="_blank" class="btn btn-sm btn-outline-info">
+                        🖼️ View Page Image (HathiTrust)
+                    </a>
+                }
+            </div>
+            <div class="card-body">
+                @if (loadingPage)
+                {
+                    <div class="text-center p-4">
+                        <div class="spinner-border" role="status"></div>
+                        <p class="mt-2">Loading page...</p>
+                    </div>
+                }
+                else if (pageContent != null)
+                {
+                    <pre class="book-page-content" style="white-space: pre-wrap; font-family: 'Georgia', serif; font-size: 1.1rem; line-height: 1.8; max-height: 600px; overflow-y: auto;">@pageContent.Text</pre>
+                }
+                else
+                {
+                    <p class="text-muted">No content available for this page.</p>
+                }
+            </div>
+        </div>
+    }
+}
+
+@if (linkResult != null)
+{
+    <div class="modal fade show d-block" tabindex="-1" style="background: rgba(0,0,0,0.5);">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Linking Complete</h5>
+                    <button type="button" class="btn-close" @onclick="() => linkResult = null"></button>
+                </div>
+                <div class="modal-body">
+                    <p><strong>Linked:</strong> @linkResult.Linked files</p>
+                    <p><strong>Failed:</strong> @linkResult.Failed files</p>
+                    <p><strong>Skipped:</strong> @linkResult.Skipped files</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" @onclick="() => { linkResult = null; RefreshSummary(); }">
+                        OK
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter]
+    public Guid? FileId { get; set; }
+
+    private List<HathiTrustBookListItem> books = new();
+    private HathiTrustSummary? summary;
+    private HathiTrustBookInfo? bookInfo;
+    private PageContent? pageContent;
+    private LinkResult? linkResult;
+    private LinkJobStatus? linkStatus;
+
+    private bool loading = false;
+    private bool loadingPage = false;
+    private bool linking = false;
+    private string? errorMessage;
+    private bool linkedOnly = false;
+    private int currentBookPage = 1;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (FileId.HasValue)
+        {
+            await LoadBookInfo();
+        }
+        else
+        {
+            await LoadBooks();
+            await RefreshSummary();
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (FileId.HasValue && (bookInfo == null || bookInfo.FileId != FileId.Value))
+        {
+            await LoadBookInfo();
+        }
+    }
+
+    private async Task LoadBooks()
+    {
+        loading = true;
+        errorMessage = null;
+        try
+        {
+            // Load up to 1000 records for client-side grid filtering/sorting
+            var url = $"api/bookviewer/hathitrust?page=1&pageSize=1000&linkedOnly={linkedOnly}";
+            books = await Http.GetFromJsonAsync<List<HathiTrustBookListItem>>(url) ?? new();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to load books: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task RefreshSummary()
+    {
+        try
+        {
+            summary = await Http.GetFromJsonAsync<HathiTrustSummary>("api/bookviewer/hathitrust/summary");
+        }
+        catch { }
+    }
+
+    private async Task LoadBookInfo()
+    {
+        if (!FileId.HasValue) return;
+        
+        loading = true;
+        errorMessage = null;
+        try
+        {
+            bookInfo = await Http.GetFromJsonAsync<HathiTrustBookInfo>($"api/bookviewer/hathitrust/{FileId}");
+            currentBookPage = 1;
+            await LoadCurrentPage();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to load book: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task LoadCurrentPage()
+    {
+        if (!FileId.HasValue) return;
+        
+        loadingPage = true;
+        try
+        {
+            pageContent = await Http.GetFromJsonAsync<PageContent>($"api/bookviewer/hathitrust/{FileId}/page/{currentBookPage}");
+        }
+        catch
+        {
+            pageContent = null;
+        }
+        finally
+        {
+            loadingPage = false;
+        }
+    }
+
+    private async Task LinkFilesAsync(bool relinkAll)
+    {
+        linking = true;
+        linkStatus = null;
+        linkResult = null;
+        errorMessage = null;
+
+        try
+        {
+            // Start the linking process
+            var response = await Http.PostAsync($"api/bookviewer/hathitrust/link?relinkAll={relinkAll}", null);
+            
+            if (response.IsSuccessStatusCode)
+            {
+                // Start polling for status while it's running
+                await StartStatusPolling();
+            }
+            else
+            {
+                var error = await response.Content.ReadAsStringAsync();
+                errorMessage = $"Linking failed: {error}";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Linking failed: {ex.Message}";
+            linking = false;
+        }
+    }
+
+    private async Task StartStatusPolling()
+    {
+        // Poll every 2 seconds while linking
+        while (linking)
+        {
+            await Task.Delay(2000);
+            await CheckLinkStatus();
+            
+            if (linkStatus != null && !linkStatus.IsRunning)
+            {
+                linking = false;
+                await RefreshSummary();
+                await LoadBooks();
+            }
+            StateHasChanged();
+        }
+    }
+
+    private async Task CheckLinkStatus()
+    {
+        try
+        {
+            linkStatus = await Http.GetFromJsonAsync<LinkJobStatus>("api/bookviewer/hathitrust/link/status");
+        }
+        catch
+        {
+            // Ignore errors when checking status
+        }
+    }
+
+    private void OpenBook(Guid fileId)
+    {
+        Navigation.NavigateTo($"/book-viewer/{fileId}");
+    }
+
+    private void BackToList()
+    {
+        Navigation.NavigateTo("/book-viewer");
+    }
+
+    private async Task PreviousBookPage()
+    {
+        if (currentBookPage > 1)
+        {
+            currentBookPage--;
+            await LoadCurrentPage();
+        }
+    }
+
+    private async Task NextBookPage()
+    {
+        if (bookInfo != null && currentBookPage < bookInfo.PageCount)
+        {
+            currentBookPage++;
+            await LoadCurrentPage();
+        }
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            size /= 1024;
+        }
+        return $"{size:N2} {sizes[order]}";
+    }
+
+    // DTOs
+    public class HathiTrustBookListItem
+    {
+        public Guid FileId { get; set; }
+        public string FileName { get; set; } = "";
+        public long FileSize { get; set; }
+        public string? Htid { get; set; }
+        public string? Title { get; set; }
+        public string? Author { get; set; }
+        public string? Language { get; set; }
+        public string? Access { get; set; }
+        public string? PublicUrl { get; set; }
+        public int PageCount { get; set; }
+        public bool HasMetadata { get; set; }
+        
+        // Computed property for easy filtering
+        public bool IsLinked => !string.IsNullOrEmpty(Htid);
+    }
+
+    public class HathiTrustBookInfo
+    {
+        public Guid FileId { get; set; }
+        public string FilePath { get; set; } = "";
+        public string FileName { get; set; } = "";
+        public long FileSize { get; set; }
+        public string? Htid { get; set; }
+        public string? Title { get; set; }
+        public string? Author { get; set; }
+        public string? Imprint { get; set; }
+        public string? Isbn { get; set; }
+        public string? OclcNum { get; set; }
+        public string? Language { get; set; }
+        public string? Access { get; set; }
+        public string? Rights { get; set; }
+        public string? PublicUrl { get; set; }
+        public int PageCount { get; set; }
+    }
+
+    public class PageContent
+    {
+        public int PageNumber { get; set; }
+        public int TotalPages { get; set; }
+        public string Text { get; set; } = "";
+        public string? Htid { get; set; }
+        public string? PageImageUrl { get; set; }
+        public string? PublicUrl { get; set; }
+    }
+
+    public class HathiTrustSummary
+    {
+        public int TotalFiles { get; set; }
+        public int LinkedFiles { get; set; }
+        public int UnlinkedFiles { get; set; }
+        public int WithMetadata { get; set; }
+        public long TotalPages { get; set; }
+        public double TotalSizeGB { get; set; }
+    }
+
+    public class LinkResult
+    {
+        public int Linked { get; set; }
+        public int Failed { get; set; }
+        public int Skipped { get; set; }
+    }
+
+    public class LinkJobStatus
+    {
+        public bool IsRunning { get; set; }
+        public DateTime? StartedAt { get; set; }
+        public DateTime? CompletedAt { get; set; }
+        public int Current { get; set; }
+        public int Total { get; set; }
+        public int Linked { get; set; }
+        public int Failed { get; set; }
+        public int Skipped { get; set; }
+        public bool RelinkAll { get; set; }
+        public string? Error { get; set; }
+    }
+}

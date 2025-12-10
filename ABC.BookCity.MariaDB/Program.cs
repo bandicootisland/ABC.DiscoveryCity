@@ -34,6 +34,7 @@ Console.WriteLine();
 var syncState = new SyncState(stateFile);
 var mover = new ChunkedDataMover(sourceConnectionString, targetConnectionString, syncState, maxRetries, retryDelayMs);
 var csvLoader = new GzipCsvLoader(targetConnectionString, syncState, csvBasePath, maxRetries, retryDelayMs);
+var fastLoader = new FastCsvLoader(targetConnectionString, syncState, csvBasePath, maxRetries, retryDelayMs);
 
 // Cancellation support
 var cts = new CancellationTokenSource();
@@ -50,7 +51,8 @@ while (true)
     Console.WriteLine("║                     MAIN MENU                                ║");
     Console.WriteLine("╠══════════════════════════════════════════════════════════════╣");
     Console.WriteLine("║  1. Sync from Source MariaDB (libgenli tables)               ║");
-    Console.WriteLine("║  2. Load from CSV/GZ files                                   ║");
+    Console.WriteLine("║  2. Load from CSV/GZ files (original loader)                 ║");
+    Console.WriteLine("║  3. Load from CSV/GZ files (FAST loader - schema-aware)      ║");
     Console.WriteLine($"║     [{csvBasePath}]");
     Console.WriteLine("║  Q. Quit                                                     ║");
     Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
@@ -68,7 +70,10 @@ while (true)
                 await ShowMariaDBSyncMenu(mover, syncState, cts);
                 break;
             case "2":
-                await ShowCsvLoadMenu(csvLoader, syncState, cts);
+                await ShowCsvLoadMenu(csvLoader, syncState, cts, "Original");
+                break;
+            case "3":
+                await ShowFastCsvLoadMenu(fastLoader, syncState, cts);
                 break;
             default:
                 Console.WriteLine("Invalid option.");
@@ -165,9 +170,9 @@ async Task ShowMariaDBSyncMenu(ChunkedDataMover mover, SyncState syncState, Canc
 }
 
 // ============================================================================
-// CSV Load Menu
+// CSV Load Menu (Original GzipCsvLoader)
 // ============================================================================
-async Task ShowCsvLoadMenu(GzipCsvLoader loader, SyncState syncState, CancellationTokenSource cts)
+async Task ShowCsvLoadMenu(GzipCsvLoader loader, SyncState syncState, CancellationTokenSource cts, string loaderName)
 {
     // Scan files once (fast - no DB queries)
     Console.WriteLine($"\nScanning: {csvBasePath}");
@@ -186,7 +191,7 @@ async Task ShowCsvLoadMenu(GzipCsvLoader loader, SyncState syncState, Cancellati
         {
             Console.Clear();
             Console.WriteLine($"\n┌────────────────────────────────────────────────────────────────────────────────────────────────────┐");
-            Console.WriteLine($"│  CSV LOADER - {configs.Count} tables found                                                   Page {currentPage + 1}/{totalPages}        │");
+            Console.WriteLine($"│  CSV LOADER ({loaderName}) - {configs.Count} tables found                                     Page {currentPage + 1}/{totalPages}        │");
             Console.WriteLine($"│  Path: {csvBasePath,-88} │");
             Console.WriteLine("├────┬────────────────────────────────────────────────┬──────────┬───────────────┬────────────────────┤");
             Console.WriteLine("│ #  │ Table Name                                     │ Parts    │ Size (MB)     │ Loaded             │");
@@ -217,7 +222,7 @@ async Task ShowCsvLoadMenu(GzipCsvLoader loader, SyncState syncState, Cancellati
             }
             
             Console.WriteLine("├────┴────────────────────────────────────────────────┴──────────┴───────────────┴────────────────────┤");
-            Console.WriteLine("│  Commands:  N=Next Page  P=Prev Page  R=Reset table  T=Check target DB rows  B=Back                 │");
+            Console.WriteLine("│  Commands:  N/PgDn=Next  P/PgUp=Prev  R=Reset table  T=Check target DB rows  B=Back                │");
             Console.WriteLine("├─────────────────────────────────────────────────────────────────────────────────────────────────────┤");
             Console.WriteLine("│  Load:  Enter number (e.g. 5) or range (e.g. 1-5) to start loading                                  │");
             Console.WriteLine("└─────────────────────────────────────────────────────────────────────────────────────────────────────┘");
@@ -227,12 +232,12 @@ async Task ShowCsvLoadMenu(GzipCsvLoader loader, SyncState syncState, Cancellati
             
             if (string.IsNullOrEmpty(input) || input == "B") return;
             
-            if (input == "N" && currentPage < totalPages - 1)
+            if ((input == "N" || input == "PAGEDOWN" || input == "PGDN") && currentPage < totalPages - 1)
             {
                 currentPage++;
                 continue;
             }
-            else if (input == "P" && currentPage > 0)
+            else if ((input == "P" || input == "PAGEUP" || input == "PGUP") && currentPage > 0)
             {
                 currentPage--;
                 continue;
@@ -353,4 +358,108 @@ string MaskConnectionString(string connStr)
         connStr, 
         @"Password=([^;]+)", 
         "Password=***");
+}
+
+// ============================================================================
+// Fast CSV Load Menu (FastCsvLoader - schema-aware, handles embedded newlines)
+// ============================================================================
+async Task ShowFastCsvLoadMenu(FastCsvLoader loader, SyncState syncState, CancellationTokenSource cts)
+{
+    // Scan files
+    Console.WriteLine($"\nScanning: {csvBasePath}");
+    var configs = CsvFileConfig.ScanDirectory(csvBasePath);
+    Console.WriteLine($"Found {configs.Count} tables.\n");
+    
+    int pageSize = 20;
+    int currentPage = 0;
+    int totalPages = (configs.Count + pageSize - 1) / pageSize;
+    
+    while (true)
+    {
+        Console.Clear();
+        Console.WriteLine($"\n┌────────────────────────────────────────────────────────────────────────────────────────────────────┐");
+        Console.WriteLine($"│  FAST CSV LOADER (schema-aware) - {configs.Count} tables                                  Page {currentPage + 1}/{totalPages}        │");
+        Console.WriteLine($"│  Path: {csvBasePath,-88} │");
+        Console.WriteLine("├────┬────────────────────────────────────────────────┬──────────┬───────────────┬────────────────────┤");
+        Console.WriteLine("│ #  │ Table Name                                     │ Parts    │ Size (MB)     │ Loaded             │");
+        Console.WriteLine("├────┼────────────────────────────────────────────────┼──────────┼───────────────┼────────────────────┤");
+        
+        int startIdx = currentPage * pageSize;
+        int endIdx = Math.Min(startIdx + pageSize, configs.Count);
+        
+        for (int i = startIdx; i < endIdx; i++)
+        {
+            var cfg = configs[i];
+            double sizeMB = cfg.DataFiles.Sum(f => File.Exists(f) ? new FileInfo(f).Length / 1024.0 / 1024.0 : 0);
+            string parts = cfg.DataFiles.Count > 1 ? $"{cfg.DataFiles.Count} files" : "1 file";
+            string size = sizeMB > 0 ? $"{sizeMB:F1}" : "-";
+            
+            var progress = syncState.GetProgress(cfg.TableName);
+            string loaded = progress.TotalRowsSynced > 0 
+                ? $"{progress.TotalRowsSynced:N0} ({progress.Status})" 
+                : "-";
+            
+            string tableName = cfg.TableName.Length > 46 ? cfg.TableName.Substring(0, 43) + "..." : cfg.TableName;
+            Console.WriteLine($"│ {i + 1,-2} │ {tableName,-46} │ {parts,-8} │ {size,-13} │ {loaded,-18} │");
+        }
+        
+        Console.WriteLine("├────┴────────────────────────────────────────────────┴──────────┴───────────────┴────────────────────┤");
+        Console.WriteLine("│  N/PgDn=Next  P/PgUp=Prev  R=Reset table  B=Back                                                    │");
+        Console.WriteLine("│  Enter number (e.g. 5) or range (e.g. 1-5) to load                                                  │");
+        Console.WriteLine("└─────────────────────────────────────────────────────────────────────────────────────────────────────┘");
+        Console.Write("\nSelect option: ");
+        
+        var input = Console.ReadLine()?.Trim().ToUpperInvariant();
+        
+        if (string.IsNullOrEmpty(input) || input == "B") return;
+        
+        if ((input == "N" || input == "PAGEDOWN" || input == "PGDN") && currentPage < totalPages - 1)
+        {
+            currentPage++;
+            continue;
+        }
+        else if ((input == "P" || input == "PAGEUP" || input == "PGUP") && currentPage > 0)
+        {
+            currentPage--;
+            continue;
+        }
+        else if (input == "R")
+        {
+            Console.Write("Enter table number to reset: ");
+            var resetInput = Console.ReadLine()?.Trim();
+            if (int.TryParse(resetInput, out int resetNum) && resetNum >= 1 && resetNum <= configs.Count)
+            {
+                syncState.Reset(configs[resetNum - 1].TableName);
+                Console.WriteLine($"Reset state for {configs[resetNum - 1].TableName}");
+            }
+            continue;
+        }
+        else if (input.Contains('-'))
+        {
+            var parts = input.Split('-');
+            if (parts.Length == 2 && int.TryParse(parts[0], out int start) && int.TryParse(parts[1], out int end))
+            {
+                start = Math.Max(1, start);
+                end = Math.Min(configs.Count, end);
+                Console.WriteLine($"\nLoading tables {start} to {end} with FastCsvLoader...");
+                for (int i = start; i <= end && !cts.Token.IsCancellationRequested; i++)
+                {
+                    Console.WriteLine($"\nStarting load for {configs[i - 1].TableName}...");
+                    await loader.LoadTableAsync(configs[i - 1], cts.Token);
+                }
+            }
+        }
+        else if (int.TryParse(input, out int tableNum) && tableNum >= 1 && tableNum <= configs.Count)
+        {
+            Console.WriteLine($"\nStarting load for {configs[tableNum - 1].TableName} with FastCsvLoader...");
+            await loader.LoadTableAsync(configs[tableNum - 1], cts.Token);
+        }
+        else
+        {
+            Console.WriteLine("Invalid option.");
+        }
+        
+        Console.WriteLine("\nPress any key to continue...");
+        Console.ReadKey(true);
+    }
 }

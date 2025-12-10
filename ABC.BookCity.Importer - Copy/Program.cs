@@ -1105,8 +1105,6 @@ static async Task HandleFileCatalogMenu(string connectionString)
         Console.WriteLine("2. Scan specific folder");
         Console.WriteLine("3. View collection statistics");
         Console.WriteLine("4. List available collections");
-        Console.WriteLine("5. Link HathiTrust files (extract HTID from ZIPs)");
-        Console.WriteLine("6. View HathiTrust linking summary");
         Console.WriteLine("Q. Return to main menu");
         Console.WriteLine();
         
@@ -1153,21 +1151,6 @@ static async Task HandleFileCatalogMenu(string connectionString)
                 Console.WriteLine("\nPress any key to continue...");
                 Console.ReadKey();
                 break;
-                
-            case "5":
-                Console.WriteLine("\nLinking HathiTrust files to catalog entries...");
-                Console.WriteLine("This will extract HTID from each ZIP file and update the database.\n");
-                var linker = new HathiTrustLinker(connectionString);
-                await linker.LinkFilesAsync();
-                Console.WriteLine("\nPress any key to continue...");
-                Console.ReadKey();
-                break;
-                
-            case "6":
-                await ShowHathiTrustSummary(connectionString);
-                Console.WriteLine("\nPress any key to continue...");
-                Console.ReadKey();
-                break;
         }
     }
 }
@@ -1199,70 +1182,5 @@ static async Task ShowCollectionStats(string connectionString)
         var sizeGb = reader.GetDecimal(3);
         
         Console.WriteLine($"{code,-20} {name,-30} {fileCount,10:N0} {sizeGb,12:N2}");
-    }
-}
-
-static async Task ShowHathiTrustSummary(string connectionString)
-{
-    using var conn = new MySqlConnector.MySqlConnection(connectionString);
-    await conn.OpenAsync();
-    
-    // First check if the view exists, if not provide basic stats
-    var sql = @"
-        SELECT 
-            COUNT(*) AS TotalFiles,
-            SUM(CASE WHEN SourceIdType = 'htid' THEN 1 ELSE 0 END) AS LinkedFiles,
-            SUM(CASE WHEN SourceIdType = 'aacid' OR SourceIdType IS NULL THEN 1 ELSE 0 END) AS UnlinkedFiles,
-            ROUND(SUM(FileSize) / 1024 / 1024 / 1024, 2) AS TotalSizeGB
-        FROM bookcityfile f
-        INNER JOIN bookcitycollection c ON f.CollectionId = c.CollectionId
-        WHERE c.CollectionCode = 'hathitrust'";
-    
-    using var cmd = new MySqlConnector.MySqlCommand(sql, conn);
-    using var reader = await cmd.ExecuteReaderAsync();
-    
-    Console.WriteLine("\n=== HathiTrust Linking Summary ===");
-    Console.WriteLine("─────────────────────────────────────────────────────────────");
-    
-    if (await reader.ReadAsync())
-    {
-        var total = reader.GetInt64(0);
-        var linked = reader.GetInt64(1);
-        var unlinked = reader.GetInt64(2);
-        var sizeGb = reader.GetDecimal(3);
-        var pct = total > 0 ? (linked * 100.0 / total) : 0;
-        
-        Console.WriteLine($"Total HathiTrust Files:  {total:N0}");
-        Console.WriteLine($"Linked (HTID extracted): {linked:N0} ({pct:N1}%)");
-        Console.WriteLine($"Unlinked (needs work):   {unlinked:N0}");
-        Console.WriteLine($"Total Size:              {sizeGb:N2} GB");
-    }
-    
-    await reader.CloseAsync();
-    
-    // Show sample of linked books with metadata
-    var sampleSql = @"
-        SELECT f.SourceId, h.title, h.author, f.ResourcePath
-        FROM bookcityfile f
-        INNER JOIN bookcitycollection c ON f.CollectionId = c.CollectionId
-        LEFT JOIN hathitrust_records h ON f.SourceId = h.htid
-        WHERE c.CollectionCode = 'hathitrust' AND f.SourceIdType = 'htid'
-        LIMIT 5";
-    
-    using var cmd2 = new MySqlConnector.MySqlCommand(sampleSql, conn);
-    using var reader2 = await cmd2.ExecuteReaderAsync();
-    
-    Console.WriteLine("\n--- Sample Linked Books ---");
-    while (await reader2.ReadAsync())
-    {
-        var htid = reader2.IsDBNull(0) ? "?" : reader2.GetString(0);
-        var title = reader2.IsDBNull(1) ? "(no metadata)" : reader2.GetString(1);
-        var author = reader2.IsDBNull(2) ? "" : reader2.GetString(2);
-        var url = reader2.IsDBNull(3) ? "" : reader2.GetString(3);
-        
-        Console.WriteLine($"\n  HTID:   {htid}");
-        if (!string.IsNullOrEmpty(title)) Console.WriteLine($"  Title:  {(title.Length > 60 ? title[..60] + "..." : title)}");
-        if (!string.IsNullOrEmpty(author)) Console.WriteLine($"  Author: {author}");
-        if (!string.IsNullOrEmpty(url)) Console.WriteLine($"  URL:    {url}");
     }
 }
