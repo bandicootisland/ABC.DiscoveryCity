@@ -10,8 +10,14 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      - H:/_DOCKER-DATA/mariadb:/var/lib/mysql
+      - E:/_DOCKER-DATA/mariadb:/var/lib/mysql
       - H:/Developer.BookCity/aa-data-import--temp-dir:/imports
+    command:
+      - --innodb-buffer-pool-size=1G
+      - --innodb-log-file-size=256M
+      - --innodb-flush-log-at-trx-commit=2
+      - --innodb-flush-method=O_DIRECT
+      - --max-allowed-packet=64M
     restart: unless-stopped
 
   bookcity-elastic:

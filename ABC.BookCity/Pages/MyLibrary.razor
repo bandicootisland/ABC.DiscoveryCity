@@ -1,0 +1,323 @@
+@page "/my-library"
+@inject IJSRuntime JS
+@inject HttpClient Http
+@inject NavigationManager Navigation
+
+<h3>📚 My Library</h3>
+
+@if (loading)
+{
+    <div class="alert alert-info">
+        <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+        Loading library...
+    </div>
+}
+else if (errorMessage != null)
+{
+    <div class="alert alert-danger">@errorMessage</div>
+}
+
+<!-- Stats Cards -->
+<div class="row mb-4">
+    <div class="col-md-3">
+        <div class="card text-bg-primary">
+            <div class="card-body text-center">
+                <h4 class="card-title mb-0">@stats.TotalBooks</h4>
+                <small>Books Saved</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-bg-success">
+            <div class="card-body text-center">
+                <h4 class="card-title mb-0">@stats.BooksWithPdf</h4>
+                <small>PDFs Downloaded</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-bg-info">
+            <div class="card-body text-center">
+                <h4 class="card-title mb-0">@FormatBytes(stats.TotalPdfSize)</h4>
+                <small>Storage Used</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3">
+        <div class="card text-bg-secondary">
+            <div class="card-body text-center">
+                <h4 class="card-title mb-0">@books.Count(b => b.LastRead != null)</h4>
+                <small>Books Read</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Filter/Sort -->
+<div class="d-flex gap-2 mb-3">
+    <TelerikButton OnClick="@RefreshLibrary" Icon="@SvgIcon.ArrowRotateCw">Refresh</TelerikButton>
+    
+    <div class="btn-group">
+        <button class="btn @(sortBy == "added" ? "btn-primary" : "btn-outline-primary")" @onclick="@(() => SortBy("added"))">
+            Recently Added
+        </button>
+        <button class="btn @(sortBy == "read" ? "btn-primary" : "btn-outline-primary")" @onclick="@(() => SortBy("read"))">
+            Recently Read
+        </button>
+        <button class="btn @(sortBy == "title" ? "btn-primary" : "btn-outline-primary")" @onclick="@(() => SortBy("title"))">
+            Title
+        </button>
+    </div>
+    
+    <div class="form-check form-switch ms-auto d-flex align-items-center">
+        <input class="form-check-input" type="checkbox" id="showPdfOnly" @bind="showPdfOnly" @bind:after="ApplyFilter">
+        <label class="form-check-label ms-2" for="showPdfOnly">Downloaded Only</label>
+    </div>
+</div>
+
+@if (!books.Any())
+{
+    <div class="alert alert-secondary text-center py-5">
+        <h4>📚 Your Library is Empty</h4>
+        <p class="mb-3">Browse the HathiTrust catalog and add books to your library!</p>
+        <a href="/hathi-library" class="btn btn-primary">Browse Catalog</a>
+    </div>
+}
+else
+{
+    <div class="row">
+        @foreach (var book in filteredBooks)
+        {
+            <div class="col-md-6 col-lg-4 mb-3">
+                <div class="card h-100 @(book.HasPdf ? "border-success" : "")">
+                    <div class="card-header d-flex justify-content-between align-items-start">
+                        <div style="flex: 1; min-width: 0;">
+                            <h6 class="card-title mb-1 text-truncate" title="@book.Title">
+                                @(TruncateText(book.Title, 50) ?? "(No title)")
+                            </h6>
+                            @if (!string.IsNullOrEmpty(book.Author))
+                            {
+                                <small class="text-muted text-truncate d-block">@TruncateText(book.Author, 40)</small>
+                            }
+                        </div>
+                        @if (book.Access == "allow")
+                        {
+                            <span class="badge bg-success ms-2">Public</span>
+                        }
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="d-flex justify-content-between text-muted small mb-2">
+                            <span>@(book.Lang ?? "-") | @(book.RightsDateUsed ?? "-")</span>
+                            @if (book.HasPdf)
+                            {
+                                <span class="text-success">📥 @FormatBytes(book.PdfSize ?? 0)</span>
+                            }
+                        </div>
+                        
+                        @if (book.ReadProgress > 0)
+                        {
+                            <div class="progress mb-2" style="height: 6px;">
+                                <div class="progress-bar" role="progressbar" style="width: @(book.ReadProgress)%"></div>
+                            </div>
+                            <small class="text-muted">
+                                @book.ReadProgress% • Page @(book.CurrentPage ?? 0)/@(book.TotalPages ?? 0)
+                            </small>
+                        }
+                        
+                        @if (book.LastRead != null)
+                        {
+                            <small class="text-muted d-block">
+                                Last read: @FormatDate(book.LastRead)
+                            </small>
+                        }
+                    </div>
+                    <div class="card-footer bg-transparent">
+                        <div class="btn-group w-100">
+                            @if (book.HasPdf)
+                            {
+                                <button class="btn btn-success btn-sm" @onclick="@(() => OpenLocalPdf(book.Htid))">
+                                    📖 Read Offline
+                                </button>
+                            }
+                            else if (book.Access == "allow")
+                            {
+                                <a href="@GetPdfDownloadUrl(book.Htid)" target="_blank" class="btn btn-outline-success btn-sm" title="Download from HathiTrust">
+                                    📥 Get PDF
+                                </a>
+                            }
+                            
+                            <a href="/hathi-library/@Uri.EscapeDataString(book.Htid)" class="btn btn-outline-primary btn-sm">
+                                👁️ View
+                            </a>
+                            
+                            <a href="@GetHathiTrustUrl(book.Htid)" target="_blank" class="btn btn-outline-secondary btn-sm">
+                                🔗
+                            </a>
+                            
+                            <button class="btn btn-outline-danger btn-sm" @onclick="@(() => RemoveBook(book.Htid))" title="Remove from library">
+                                🗑️
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<LibraryBook> books = new();
+    private List<LibraryBook> filteredBooks = new();
+    private LibraryStats stats = new();
+    
+    private bool loading = true;
+    private string? errorMessage;
+    private string sortBy = "added";
+    private bool showPdfOnly = false;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await RefreshLibrary();
+            StateHasChanged();
+        }
+    }
+
+    private async Task RefreshLibrary()
+    {
+        loading = true;
+        errorMessage = null;
+        
+        try
+        {
+            // Get all books from IndexedDB
+            var jsBooks = await JS.InvokeAsync<List<LibraryBook>>("myLibrary.getAllBooks");
+            books = jsBooks ?? new List<LibraryBook>();
+            
+            // Get stats
+            var jsStats = await JS.InvokeAsync<LibraryStats>("myLibrary.getStats");
+            stats = jsStats ?? new LibraryStats();
+            
+            ApplyFilter();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to load library: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void ApplyFilter()
+    {
+        var result = books.AsEnumerable();
+        
+        if (showPdfOnly)
+        {
+            result = result.Where(b => b.HasPdf);
+        }
+        
+        result = sortBy switch
+        {
+            "read" => result.OrderByDescending(b => b.LastRead ?? DateTime.MinValue.ToString("o")),
+            "title" => result.OrderBy(b => b.Title ?? ""),
+            _ => result.OrderByDescending(b => b.AddedDate ?? DateTime.MinValue.ToString("o"))
+        };
+        
+        filteredBooks = result.ToList();
+    }
+
+    private void SortBy(string sort)
+    {
+        sortBy = sort;
+        ApplyFilter();
+    }
+
+    private async Task RemoveBook(string htid)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("myLibrary.removeBook", htid);
+            await RefreshLibrary();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to remove book: {ex.Message}";
+        }
+    }
+
+    private async Task OpenLocalPdf(string htid)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("myLibrary.openPdf", htid);
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to open PDF: {ex.Message}";
+        }
+    }
+
+    private static string GetHathiTrustUrl(string htid) =>
+        $"https://babel.hathitrust.org/cgi/pt?id={Uri.EscapeDataString(htid)}";
+
+    private static string GetPdfDownloadUrl(string htid) =>
+        $"https://babel.hathitrust.org/cgi/pt?id={Uri.EscapeDataString(htid)}&view=plaintext&seq=1"; // Links to download options
+
+    private static string? TruncateText(string? text, int maxLength)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return text.Length <= maxLength ? text : text.Substring(0, maxLength) + "...";
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        if (bytes < 1024 * 1024 * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        return $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
+    }
+
+    private static string FormatDate(string? isoDate)
+    {
+        if (string.IsNullOrEmpty(isoDate)) return "-";
+        if (DateTime.TryParse(isoDate, out var dt))
+        {
+            var diff = DateTime.Now - dt;
+            if (diff.TotalMinutes < 60) return $"{(int)diff.TotalMinutes}m ago";
+            if (diff.TotalHours < 24) return $"{(int)diff.TotalHours}h ago";
+            if (diff.TotalDays < 7) return $"{(int)diff.TotalDays}d ago";
+            return dt.ToString("MMM d");
+        }
+        return "-";
+    }
+
+    // DTOs matching JS structure
+    public class LibraryBook
+    {
+        public string Htid { get; set; } = "";
+        public string? Title { get; set; }
+        public string? Author { get; set; }
+        public string? Access { get; set; }
+        public string? Rights { get; set; }
+        public string? Lang { get; set; }
+        public string? RightsDateUsed { get; set; }
+        public string? AddedDate { get; set; }
+        public string? LastRead { get; set; }
+        public int ReadProgress { get; set; }
+        public int? CurrentPage { get; set; }
+        public int? TotalPages { get; set; }
+        public bool HasPdf { get; set; }
+        public long? PdfSize { get; set; }
+    }
+
+    public class LibraryStats
+    {
+        public int TotalBooks { get; set; }
+        public int BooksWithPdf { get; set; }
+        public long TotalPdfSize { get; set; }
+    }
+}

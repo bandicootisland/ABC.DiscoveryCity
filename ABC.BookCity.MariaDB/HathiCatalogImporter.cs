@@ -153,10 +153,11 @@ public class HathiCatalogImporter
     public async Task<(int imported, int updated, int skipped)> ImportFileAsync(
         string fileName,
         bool isFullLoad = false,
+        bool resumeImport = false,
         IProgress<(int processed, int imported)>? progress = null,
         CancellationToken ct = default)
     {
-        await using var connection = new MySqlConnection(_connectionString);
+        var connection = new MySqlConnection(_connectionString);
         await connection.OpenAsync(ct);
         
         // Get local path
@@ -168,6 +169,7 @@ public class HathiCatalogImporter
         if (string.IsNullOrEmpty(localPath) || !File.Exists(localPath))
         {
             Console.WriteLine($"[HathiCatalog] File not downloaded or not found: {fileName}");
+            await connection.DisposeAsync();
             return (0, 0, 0);
         }
         
@@ -178,12 +180,12 @@ public class HathiCatalogImporter
         
         int imported = 0, updated = 0, skipped = 0, processed = 0;
         var batch = new List<HathiCatalogRow>();
-        const int batchSize = 5000; // Larger batches for bulk insert performance
+        const int batchSize = 1000; // Smaller batches for reliability
         
         try
         {
-            // If full load, optimize for speed
-            if (isFullLoad)
+            // If full load and NOT resuming, truncate and disable indexes
+            if (isFullLoad && !resumeImport)
             {
                 Console.WriteLine("[HathiCatalog] Full load - truncating table and disabling indexes for speed");
                 await using var setupCmd = new MySqlCommand(@"
@@ -194,6 +196,10 @@ public class HathiCatalogImporter
                 ", connection);
                 setupCmd.CommandTimeout = 120;
                 await setupCmd.ExecuteNonQueryAsync(ct);
+            }
+            else if (resumeImport)
+            {
+                Console.WriteLine("[HathiCatalog] Resume mode - will use INSERT IGNORE to skip existing records");
             }
             
             // Open gzipped file
@@ -218,9 +224,32 @@ public class HathiCatalogImporter
                 
                 if (batch.Count >= batchSize)
                 {
-                    var (batchImported, batchUpdated) = await InsertBatchAsync(connection, batch, isFullLoad, ct);
-                    imported += batchImported;
-                    updated += batchUpdated;
+                    // Reconnect if connection is broken - create new connection
+                    if (connection.State != System.Data.ConnectionState.Open)
+                    {
+                        Console.WriteLine("[HathiCatalog] Connection lost, creating new connection...");
+                        try { await connection.DisposeAsync(); } catch { }
+                        connection = new MySqlConnection(_connectionString);
+                        await connection.OpenAsync(ct);
+                    }
+                    
+                    try
+                    {
+                        var (batchImported, batchUpdated) = await InsertBatchAsync(connection, batch, isFullLoad || resumeImport, ct);
+                        imported += batchImported;
+                        updated += batchUpdated;
+                    }
+                    catch (MySqlException ex) when (ex.Message.Contains("Connection") || ex.Message.Contains("Broken"))
+                    {
+                        // Connection error - retry with new connection
+                        Console.WriteLine($"[HathiCatalog] Connection error, retrying batch: {ex.Message}");
+                        try { await connection.DisposeAsync(); } catch { }
+                        connection = new MySqlConnection(_connectionString);
+                        await connection.OpenAsync(ct);
+                        var (batchImported, batchUpdated) = await InsertBatchAsync(connection, batch, isFullLoad || resumeImport, ct);
+                        imported += batchImported;
+                        updated += batchUpdated;
+                    }
                     batch.Clear();
                     
                     progress?.Report((processed, imported));
@@ -235,7 +264,7 @@ public class HathiCatalogImporter
             // Final batch
             if (batch.Count > 0)
             {
-                var (batchImported, batchUpdated) = await InsertBatchAsync(connection, batch, isFullLoad, ct);
+                var (batchImported, batchUpdated) = await InsertBatchAsync(connection, batch, isFullLoad || resumeImport, ct);
                 imported += batchImported;
                 updated += batchUpdated;
             }
@@ -259,11 +288,13 @@ public class HathiCatalogImporter
             await UpdateImportStatsAsync(connection, fileName, imported, updated, skipped, ct);
             
             Console.WriteLine($"[HathiCatalog] Import complete: {imported:N0} imported, {updated:N0} updated, {skipped:N0} skipped");
+            await connection.DisposeAsync();
             return (imported, updated, skipped);
         }
         catch (Exception ex)
         {
-            await UpdateImportStatusAsync(connection, fileName, "failed", ex.Message, ct);
+            try { await UpdateImportStatusAsync(connection, fileName, "failed", ex.Message, ct); } catch { }
+            try { await connection.DisposeAsync(); } catch { }
             Console.WriteLine($"[HathiCatalog] Import failed: {ex.Message}");
             throw;
         }
@@ -423,14 +454,16 @@ public class HathiCatalogImporter
     private async Task<(int imported, int updated)> InsertBatchAsync(
         MySqlConnection connection, 
         List<HathiCatalogRow> batch,
-        bool isFullLoad,
+        bool useInsertIgnore,
         CancellationToken ct)
     {
         if (batch.Count == 0) return (0, 0);
         
         // Build a multi-row INSERT statement for much better performance
+        // Use INSERT IGNORE for full load/resume to skip duplicates silently
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine(@"INSERT INTO hathi_catalog (
+        var insertCmd = useInsertIgnore ? "INSERT IGNORE INTO" : "INSERT INTO";
+        sb.AppendLine($@"{insertCmd} hathi_catalog (
             htid, access, rights, ht_bib_key, description, source, source_bib_num,
             oclc_num, isbn, issn, lccn, title, imprint, rights_reason_code,
             rights_timestamp, us_gov_doc_flag, rights_date_used, pub_place, lang,
@@ -473,9 +506,9 @@ public class HathiCatalogImporter
             sb.Append(")");
         }
 
-        // For full load (truncated table), skip duplicate handling for speed
-        // For updates, use ON DUPLICATE KEY UPDATE for upsert
-        if (!isFullLoad)
+        // For full load or resume (using INSERT IGNORE), skip duplicate handling for speed
+        // For regular updates, use ON DUPLICATE KEY UPDATE for upsert
+        if (!useInsertIgnore)
         {
             sb.AppendLine(@" ON DUPLICATE KEY UPDATE
                 access = VALUES(access),
@@ -489,7 +522,7 @@ public class HathiCatalogImporter
         }
 
         await using var cmd = new MySqlCommand(sb.ToString(), connection);
-        cmd.CommandTimeout = 300; // 5 minutes for large batches
+        cmd.CommandTimeout = 600; // 10 minutes for large batches
         
         var result = await cmd.ExecuteNonQueryAsync(ct);
         

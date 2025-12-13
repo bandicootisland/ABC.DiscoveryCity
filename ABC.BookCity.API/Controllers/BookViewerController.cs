@@ -398,9 +398,10 @@ public class BookViewerController : ControllerBase
     /// <summary>
     /// Imports a downloaded HathiTrust catalog file into the database.
     /// Runs in background - poll status endpoint for progress.
+    /// Use resume=true to continue a stopped import (uses INSERT IGNORE).
     /// </summary>
     [HttpPost("hathitrust/catalog/import")]
-    public ActionResult ImportCatalogFile([FromQuery] string fileName, [FromQuery] bool isFullLoad = false)
+    public ActionResult ImportCatalogFile([FromQuery] string fileName, [FromQuery] bool isFullLoad = false, [FromQuery] bool resume = false)
     {
         try
         {
@@ -414,7 +415,7 @@ public class BookViewerController : ControllerBase
                 _currentCatalogJob = new CatalogImportJobStatus
                 {
                     IsRunning = true,
-                    Operation = "import",
+                    Operation = resume ? "import-resume" : "import",
                     FileName = fileName,
                     StartedAt = DateTime.UtcNow
                 };
@@ -432,6 +433,7 @@ public class BookViewerController : ControllerBase
                     var (imported, updated, skipped) = await importer.ImportFileAsync(
                         fileName,
                         isFullLoad,
+                        resume,
                         new Progress<(int processed, int imported)>(p =>
                         {
                             lock (_catalogLockObj)
