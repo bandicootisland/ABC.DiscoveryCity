@@ -162,6 +162,15 @@ window.myLibrary = {
         });
     },
     
+    // Get a blob URL for inline PDF viewing
+    getPdfObjectUrl: async function(htid) {
+        const pdfBlob = await this.getPdf(htid);
+        if (pdfBlob) {
+            return URL.createObjectURL(pdfBlob);
+        }
+        return null;
+    },
+    
     hasPdf: async function(htid) {
         const pdf = await this.getPdf(htid);
         return pdf !== null;
@@ -228,5 +237,120 @@ window.myLibrary = {
             tx.oncomplete = () => resolve(true);
             tx.onerror = () => reject(tx.error);
         });
+    },
+
+    // Browse for a PDF file and import it into IndexedDB
+    browsePdf: async function(htid) {
+        try {
+            // Open file picker for PDF
+            const [fileHandle] = await window.showOpenFilePicker({
+                types: [{
+                    description: 'PDF Files',
+                    accept: { 'application/pdf': ['.pdf'] }
+                }],
+                multiple: false
+            });
+            
+            const file = await fileHandle.getFile();
+            const blob = await file.arrayBuffer().then(ab => new Blob([ab], { type: 'application/pdf' }));
+            
+            // Save to IndexedDB
+            await this.savePdf(htid, blob);
+            
+            return { success: true, fileName: file.name, size: file.size };
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                return { success: false, cancelled: true };
+            }
+            throw err;
+        }
+    },
+
+    // Store handle to the books catalog folder
+    _booksFolderHandle: null,
+
+    // Pick a folder for cataloging books
+    pickBooksFolder: async function() {
+        try {
+            this._booksFolderHandle = await window.showDirectoryPicker({
+                mode: 'readwrite',
+                startIn: 'documents'
+            });
+            
+            // Store folder name for display
+            localStorage.setItem('booksFolderName', this._booksFolderHandle.name);
+            
+            return { success: true, folderName: this._booksFolderHandle.name };
+        } catch (err) {
+            if (err.name === 'AbortError') {
+                return { success: false, cancelled: true };
+            }
+            throw err;
+        }
+    },
+
+    // Get the saved books folder name
+    getBooksFolderName: function() {
+        return localStorage.getItem('booksFolderName') || null;
+    },
+
+    // Catalog a PDF - copy from IndexedDB to the books folder with proper naming
+    catalogPdf: async function(htid, title, author) {
+        if (!this._booksFolderHandle) {
+            // Try to pick folder if not set
+            const result = await this.pickBooksFolder();
+            if (!result.success) {
+                return { success: false, error: 'No books folder selected' };
+            }
+        }
+
+        // Get PDF from IndexedDB
+        const pdfBlob = await this.getPdf(htid);
+        if (!pdfBlob) {
+            return { success: false, error: 'No PDF found for this book' };
+        }
+
+        // Create a safe filename from title and author
+        const safeTitle = (title || 'Unknown').replace(/[<>:"/\\|?*]/g, '_').substring(0, 100);
+        const safeAuthor = (author || 'Unknown').replace(/[<>:"/\\|?*]/g, '_').substring(0, 50);
+        const fileName = `${safeAuthor} - ${safeTitle}.pdf`;
+
+        try {
+            // Request permission again if needed
+            const permission = await this._booksFolderHandle.requestPermission({ mode: 'readwrite' });
+            if (permission !== 'granted') {
+                return { success: false, error: 'Permission denied to write to folder' };
+            }
+
+            // Create file in the books folder
+            const fileHandle = await this._booksFolderHandle.getFileHandle(fileName, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(pdfBlob);
+            await writable.close();
+
+            return { success: true, fileName: fileName };
+        } catch (err) {
+            return { success: false, error: err.message };
+        }
+    },
+
+    // Browse, import, AND catalog in one step
+    browseAndCatalog: async function(htid, title, author) {
+        // First browse for the PDF
+        const browseResult = await this.browsePdf(htid);
+        if (!browseResult.success) {
+            return browseResult;
+        }
+
+        // Then catalog it
+        const catalogResult = await this.catalogPdf(htid, title, author);
+        
+        return {
+            success: true,
+            imported: true,
+            cataloged: catalogResult.success,
+            fileName: catalogResult.fileName || browseResult.fileName,
+            catalogError: catalogResult.error
+        };
     }
 };

@@ -66,6 +66,8 @@ var createResponse = await elastic.Indices.CreateAsync(indexName, c => c
             .Keyword(t => t.Htid!)
             .Text(t => t.Title!)
             .Text(t => t.Author!)
+            .Keyword(t => t.TitleSort!)
+            .Keyword(t => t.AuthorSort!)
             .Keyword(t => t.Access!)
             .Keyword(t => t.Rights!)
             .Keyword(t => t.Lang!)
@@ -124,6 +126,9 @@ while (true)
     await using var reader = await cmd.ExecuteReaderAsync();
     while (await reader.ReadAsync())
     {
+        var title = reader.IsDBNull(11) ? null : reader.GetString(11);
+        var author = reader.IsDBNull(25) ? null : reader.GetString(25);
+
         var doc = new HathiDoc
         {
             Htid = reader.GetString(0),
@@ -137,7 +142,8 @@ while (true)
             Isbn = reader.IsDBNull(8) ? null : reader.GetString(8),
             Issn = reader.IsDBNull(9) ? null : reader.GetString(9),
             Lccn = reader.IsDBNull(10) ? null : reader.GetString(10),
-            Title = reader.IsDBNull(11) ? null : reader.GetString(11),
+            Title = title,
+            TitleSort = title?.Trim().ToLowerInvariant(),
             Imprint = reader.IsDBNull(12) ? null : reader.GetString(12),
             RightsReasonCode = reader.IsDBNull(13) ? null : reader.GetString(13),
             RightsTimestamp = reader.IsDBNull(14) ? null : reader.GetDateTime(14),
@@ -151,7 +157,8 @@ while (true)
             ResponsibleEntityCode = reader.IsDBNull(22) ? null : reader.GetString(22),
             DigitizationAgentCode = reader.IsDBNull(23) ? null : reader.GetString(23),
             AccessProfileCode = reader.IsDBNull(24) ? null : reader.GetString(24),
-            Author = reader.IsDBNull(25) ? null : reader.GetString(25)
+            Author = author,
+            AuthorSort = author?.Trim().ToLowerInvariant()
         };
         batch.Add(doc);
         lastHtid = doc.Htid;
@@ -264,6 +271,9 @@ public class HathiDoc
     
     [JsonPropertyName("title")]
     public string? Title { get; set; }
+
+    [JsonPropertyName("title_sort")]
+    public string? TitleSort { get; set; }
     
     [JsonPropertyName("imprint")]
     public string? Imprint { get; set; }
@@ -306,4 +316,7 @@ public class HathiDoc
     
     [JsonPropertyName("author")]
     public string? Author { get; set; }
+
+    [JsonPropertyName("author_sort")]
+    public string? AuthorSort { get; set; }
 }

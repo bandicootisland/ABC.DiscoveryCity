@@ -9,6 +9,8 @@ builder.Services.AddEndpointsApiExplorer();
 
 builder.Services.AddMemoryCache();
 
+builder.Services.AddHttpClient();
+
 builder.Services.AddScoped<IImportService, ImportService>();
 builder.Services.AddSingleton<ITorrentService, TorrentService>();
 

@@ -1,10 +1,10 @@
-@page "/hathi-library"
-@page "/hathi-library/{Htid}"
+@page "/hathi-searcher"
+@page "/hathi-searcher/{Htid}"
 @inject HttpClient Http
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
 
-<h3>📚 HathiTrust Library</h3>
+<h3>🔎 Hathi Searcher</h3>
 
 @if (errorMessage != null)
 {
@@ -15,8 +15,7 @@
 }
 
 @if (Htid == null)
-{
-    <!-- Library List View -->
+{    
     @if (_pageStateReady)
     {
         <TelerikGrid @ref="@_gridRef"
@@ -97,7 +96,7 @@
                 <span class="text-muted small ms-2">Showing: @totalCount.ToString("N0")</span>
             </GridToolBarTemplate>
             <GridColumns>
-                <GridColumn Field="@nameof(HathiCatalogItem.Title)" Title="Title" Width="350px">
+                <GridColumn Field="@nameof(HathiCatalogItem.Title)" Title="Title" Width="350px" Sortable="true">
                     <Template>
                         @{
                             var book = (HathiCatalogItem)context;
@@ -106,7 +105,7 @@
                         <br /><small class="text-muted">@book.Htid</small>
                     </Template>
                 </GridColumn>
-                <GridColumn Field="@nameof(HathiCatalogItem.Author)" Title="Author" Width="200px">
+                <GridColumn Field="@nameof(HathiCatalogItem.Author)" Title="Author" Width="200px" Sortable="true">
                     <Template>
                         @{
                             var book = (HathiCatalogItem)context;
@@ -303,7 +302,7 @@ else
 }
 
 @code {
-    private const string PageStateStorageKey = "pageState:hathi-library";
+    private const string PageStateStorageKey = "pageState:hathi-searcher";
 
     private CancellationTokenSource? _readItemsCts;
     private List<HathiCatalogItem> _lastGridItems = new();
@@ -339,7 +338,7 @@ else
         _gridRef?.Rebind();
     }
 
-    private sealed class HathiLibraryPageState
+    private sealed class HathiSearcherPageState
     {
         public int Page { get; set; } = 1;
         public int PageSize { get; set; } = 50;
@@ -356,7 +355,7 @@ else
             var json = await JS.InvokeAsync<string?>("pageState.get", PageStateStorageKey);
             if (string.IsNullOrWhiteSpace(json)) return;
 
-            var state = System.Text.Json.JsonSerializer.Deserialize<HathiLibraryPageState>(json);
+            var state = System.Text.Json.JsonSerializer.Deserialize<HathiSearcherPageState>(json);
             if (state == null) return;
 
             if (state.PageSize > 0) pageSize = state.PageSize;
@@ -382,7 +381,7 @@ else
             var searchToSave = (_persistedSearchTerm ?? "").Trim();
             if (searchToSave.Length < 3) searchToSave = "";
 
-            var state = new HathiLibraryPageState
+            var state = new HathiSearcherPageState
             {
                 Page = currentPage < 1 ? 1 : currentPage,
                 PageSize = pageSize < 1 ? 50 : pageSize,
@@ -619,7 +618,6 @@ else
 
             if (!string.IsNullOrEmpty(searchTerm) && searchTerm.Length < 3)
             {
-                // Prevent expensive server-side LIKE scans for very short inputs.
                 // Keep the grid stable by returning the last successful page.
                 args.Data = _lastGridItems;
                 args.Total = _lastGridTotal;
@@ -627,7 +625,7 @@ else
                 return;
             }
             
-            var url = $"api/hathilibrary?page={page}&pageSize={pageSize}";
+            var url = $"api/hathisearch?page={page}&pageSize={pageSize}";
             if (!string.IsNullOrEmpty(searchTerm))
             {
                 url += $"&search={Uri.EscapeDataString(searchTerm)}";
@@ -692,7 +690,7 @@ else
     {
         try
         {
-            summary = await Http.GetFromJsonAsync<HathiCatalogSummary>("api/hathilibrary/summary");
+            summary = await Http.GetFromJsonAsync<HathiCatalogSummary>("api/hathisearch/summary");
         }
         catch { }
     }
@@ -705,7 +703,7 @@ else
         errorMessage = null;
         try
         {
-            bookInfo = await Http.GetFromJsonAsync<HathiCatalogItem>($"api/hathilibrary/{Uri.EscapeDataString(Htid)}");
+            bookInfo = await Http.GetFromJsonAsync<HathiCatalogItem>($"api/hathisearch/{Uri.EscapeDataString(Htid)}");
         }
         catch (Exception ex)
         {
@@ -719,12 +717,12 @@ else
 
     private void OpenReader(string htid)
     {
-        Navigation.NavigateTo($"/hathi-library/{Uri.EscapeDataString(htid)}");
+        Navigation.NavigateTo($"/hathi-searcher/{Uri.EscapeDataString(htid)}");
     }
 
     private void BackToList()
     {
-        Navigation.NavigateTo("/hathi-library");
+        Navigation.NavigateTo("/hathi-searcher");
     }
 
     private static string GetHathiTrustUrl(string htid)

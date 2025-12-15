@@ -1,0 +1,878 @@
+@page "/book-files"
+@inject IJSRuntime JS
+
+<h3>📁 Book File Manager</h3>
+
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <div class="alert alert-danger alert-dismissible">
+        @errorMessage
+        <button type="button" class="btn-close" @onclick="@(() => errorMessage = null)"></button>
+    </div>
+}
+
+@if (!string.IsNullOrEmpty(successMessage))
+{
+    <div class="alert alert-success alert-dismissible">
+        @successMessage
+        <button type="button" class="btn-close" @onclick="@(() => successMessage = null)"></button>
+    </div>
+}
+
+<!-- Folder Selection Buttons -->
+<div class="row mb-3">
+    <div class="col-md-6">
+        <div class="card @(hasDownloadsAccess ? "border-success" : "")">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <strong>📥 Downloads Folder:</strong>
+                    <span class="ms-2 @(hasDownloadsAccess ? "text-success" : "text-muted")">
+                        @(downloadsFolderName ?? "Not selected")
+                    </span>
+                </div>
+                <button class="btn @(hasDownloadsAccess ? "btn-outline-success" : "btn-primary")" 
+                        @onclick="@(() => PickFolder("downloads"))">
+                    @(hasDownloadsAccess ? "✓ Connected" : "Select Folder")
+                </button>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card @(hasLibraryAccess ? "border-success" : "")">
+            <div class="card-body d-flex justify-content-between align-items-center">
+                <div>
+                    <strong>📚 Library Folder:</strong>
+                    <span class="ms-2 @(hasLibraryAccess ? "text-success" : "text-muted")">
+                        @(libraryFolderName ?? "Not selected")
+                    </span>
+                </div>
+                <button class="btn @(hasLibraryAccess ? "btn-outline-success" : "btn-primary")" 
+                        @onclick="@(() => PickFolder("library"))">
+                    @(hasLibraryAccess ? "✓ Connected" : "Select Folder")
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Source Selector -->
+<div class="mb-3">
+    <div class="btn-group">
+        <button class="btn @(currentSource == "downloads" ? "btn-primary" : "btn-outline-primary")"
+                @onclick="@(() => SwitchSource("downloads"))"
+                disabled="@(!hasDownloadsAccess)">
+            📥 Downloads
+        </button>
+        <button class="btn @(currentSource == "library" ? "btn-primary" : "btn-outline-primary")"
+                @onclick="@(() => SwitchSource("library"))"
+                disabled="@(!hasLibraryAccess)">
+            📚 Library
+        </button>
+    </div>
+    
+    @if (selectedFile != null && !selectedFile.IsDirectory)
+    {
+        <div class="btn-group ms-3">
+            @if (currentSource == "downloads" && hasLibraryAccess)
+            {
+                <button class="btn btn-success" @onclick="MoveToLibrary">
+                    📂 Move to Library
+                </button>
+                <button class="btn btn-outline-success" @onclick="CopyToLibrary">
+                    📋 Copy to Library
+                </button>
+            }
+            <button class="btn btn-warning" @onclick="ShowMoveToFolderDialog">
+                📁 Move to Folder
+            </button>
+            @if (selectedFile.Extension?.ToLower() == ".pdf")
+            {
+                <button class="btn btn-info" @onclick="ViewPdf">
+                    👁️ View PDF
+                </button>
+            }
+        </div>
+    }
+</div>
+
+@if (loading)
+{
+    <div class="d-flex justify-content-center my-5">
+        <TelerikLoader Size="@ThemeConstants.Loader.Size.Large" />
+    </div>
+}
+else if (fileManagerData.Count > 0)
+{
+    <div id="file-manager-container" @oncontextmenu="@ShowContextMenu" @oncontextmenu:preventDefault="true">
+        <TelerikFileManager @ref="@fileManagerRef"
+                            Data="@fileManagerData"
+                            @bind-Path="@currentPath"
+                            Height="calc(100vh - 300px)"
+                            View="@FileManagerViewType.Grid"
+                            IdField="@nameof(FileEntry.Id)"
+                            ParentIdField="@nameof(FileEntry.ParentId)"
+                            NameField="@nameof(FileEntry.Name)"
+                            SizeField="@nameof(FileEntry.Size)"
+                            PathField="@nameof(FileEntry.Path)"
+                            ExtensionField="@nameof(FileEntry.Extension)"
+                            IsDirectoryField="@nameof(FileEntry.IsDirectory)"
+                            HasDirectoriesField="@nameof(FileEntry.HasDirectories)"
+                            DateCreatedField="@nameof(FileEntry.DateCreated)"
+                            DateCreatedUtcField="@nameof(FileEntry.DateCreatedUtc)"
+                            DateModifiedField="@nameof(FileEntry.DateModified)"
+                            DateModifiedUtcField="@nameof(FileEntry.DateModifiedUtc)"
+                            OnDelete="@OnDeleteHandler"
+                            OnUpdate="@OnUpdateHandler"
+                            OnCreate="@OnCreateHandler"
+                            OnModelInit="@OnModelInitHandler"
+                            OnDownload="@OnDownloadHandler"
+                            SelectedItems="@selectedItems"
+                            SelectedItemsChanged="@((IEnumerable<FileEntry> items) => OnSelectionChanged(items))">
+        </TelerikFileManager>
+    </div>
+}
+else if (hasDownloadsAccess || hasLibraryAccess)
+{
+    <div class="alert alert-info">
+        <TelerikLoader Size="@ThemeConstants.Loader.Size.Small" /> Loading files...
+    </div>
+}
+else
+{
+    <div class="alert alert-warning">
+        <h5>📁 Select folders to get started</h5>
+        <p>Click the buttons above to grant access to your book folders.</p>
+        <div class="alert alert-info mb-2">
+            <strong>⚠️ Note:</strong> Browsers block direct access to system folders like Downloads.
+            Create subfolders instead:
+            <ul class="mb-0 mt-1">
+                <li><code>Downloads\HathiBooks</code> - for downloaded PDFs</li>
+                <li><code>Documents\MyLibrary</code> - for your organized collection</li>
+            </ul>
+        </div>
+        <ul>
+            <li><strong>Downloads/Source:</strong> Where you save PDFs from HathiTrust</li>
+            <li><strong>Library:</strong> Your organized book collection</li>
+        </ul>
+    </div>
+}
+
+<!-- PDF Viewer -->
+@if (pdfViewerData != null && pdfViewerData.Length > 0)
+{
+    <div class="mt-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h5 class="mb-0">📖 @pdfViewerTitle</h5>
+            <TelerikButton OnClick="@ClosePdfViewer" ThemeColor="@ThemeConstants.Button.ThemeColor.Base">
+                ✕ Close
+            </TelerikButton>
+        </div>
+        <TelerikPdfViewer Data="@pdfViewerData"
+                          Height="700px"
+                          Width="100%">
+        </TelerikPdfViewer>
+    </div>
+}
+else if (!string.IsNullOrEmpty(pdfViewerUrl))
+{
+    <!-- Large file fallback using iframe -->
+    <div class="mt-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h5 class="mb-0">📖 @pdfViewerTitle <small class="text-muted">(Large file - using browser viewer)</small></h5>
+            <TelerikButton OnClick="@ClosePdfViewer" ThemeColor="@ThemeConstants.Button.ThemeColor.Base">
+                ✕ Close
+            </TelerikButton>
+        </div>
+        <iframe src="@pdfViewerUrl" style="width: 100%; height: 700px; border: 1px solid #ddd; border-radius: 4px;"></iframe>
+    </div>
+}
+
+<!-- Move to Folder Dialog -->
+@if (showMoveToFolderDialog && selectedFile != null)
+{
+    <TelerikWindow @bind-Visible="@showMoveToFolderDialog" Modal="true" Width="500px">
+        <WindowTitle>
+            📁 Move "@selectedFile.Name" to Folder
+        </WindowTitle>
+        <WindowContent>
+            <div class="mb-3">
+                <label class="form-label">Select destination folder:</label>
+                <TelerikDropDownList Data="@availableFolders"
+                                     @bind-Value="@selectedDestinationFolder"
+                                     TextField="Name"
+                                     ValueField="Path"
+                                     DefaultText="Select a folder..."
+                                     Width="100%">
+                </TelerikDropDownList>
+            </div>
+            <div class="alert alert-info">
+                <small>Only existing folders are shown. Create a new folder first if needed.</small>
+            </div>
+            <div class="d-flex justify-content-end gap-2 mt-3">
+                <TelerikButton OnClick="@CloseMoveToFolderDialog" ThemeColor="@ThemeConstants.Button.ThemeColor.Base">
+                    Cancel
+                </TelerikButton>
+                <TelerikButton OnClick="@ExecuteMoveToFolder" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                               Enabled="@(!string.IsNullOrEmpty(selectedDestinationFolder))">
+                    OK
+                </TelerikButton>
+            </div>
+        </WindowContent>
+    </TelerikWindow>
+}
+
+<!-- Custom Context Menu for files -->
+<TelerikContextMenu @ref="@contextMenuRef" 
+                    Data="@contextMenuItems"
+                    TextField="Text"
+                    OnClick="@((ContextMenuItem item) => OnContextMenuClick(item))">
+</TelerikContextMenu>
+
+@code {
+    private TelerikFileManager<FileEntry>? fileManagerRef;
+    private List<FileEntry> fileManagerData = new();
+    private IEnumerable<FileEntry> selectedItems = Enumerable.Empty<FileEntry>();
+    private FileEntry? selectedFile;
+    
+    private string currentPath = "";
+    private string currentSource = "downloads";
+    private bool loading = false;
+    
+    private string? downloadsFolderName;
+    private string? libraryFolderName;
+    private bool hasDownloadsAccess = false;
+    private bool hasLibraryAccess = false;
+    
+    private string? errorMessage;
+    private string? successMessage;
+    
+    private byte[]? pdfViewerData;
+    private string? pdfViewerUrl;  // For large files - uses blob URL
+    private string? pdfViewerTitle;
+    private const long MaxPdfSizeForTelerik = 50 * 1024 * 1024; // 50MB limit for TelerikPdfViewer
+    
+    // Move to folder dialog
+    private bool showMoveToFolderDialog = false;
+    private List<FileEntry> availableFolders = new();
+    private string? selectedDestinationFolder;
+    
+    // Context menu
+    private TelerikContextMenu<ContextMenuItem>? contextMenuRef;
+    private List<ContextMenuItem> contextMenuItems = new()
+    {
+        new ContextMenuItem { Text = "📁 Move to Folder", CommandName = "move" },
+        new ContextMenuItem { Text = "👁️ View PDF", CommandName = "view" }
+    };
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            // Load stored folder names
+            downloadsFolderName = await JS.InvokeAsync<string?>("fileSystemAccess.getStoredFolderName", "downloads");
+            libraryFolderName = await JS.InvokeAsync<string?>("fileSystemAccess.getStoredFolderName", "library");
+            StateHasChanged();
+        }
+    }
+
+    private async Task PickFolder(string folderType)
+    {
+        try
+        {
+            errorMessage = null;
+            var result = await JS.InvokeAsync<FolderPickResult>("fileSystemAccess.pickFolder", folderType);
+            
+            if (result.Success)
+            {
+                if (folderType == "downloads")
+                {
+                    downloadsFolderName = result.FolderName;
+                    hasDownloadsAccess = true;
+                }
+                else
+                {
+                    libraryFolderName = result.FolderName;
+                    hasLibraryAccess = true;
+                }
+                
+                successMessage = $"Connected to '{result.FolderName}'";
+                
+                // Load the files if this is the current source or first connection
+                if (currentSource == folderType || (!hasDownloadsAccess && !hasLibraryAccess))
+                {
+                    currentSource = folderType;
+                    await LoadFiles();
+                }
+            }
+            else if (!result.Cancelled)
+            {
+                errorMessage = result.Error ?? "Failed to select folder";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error selecting folder: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private async Task SwitchSource(string source)
+    {
+        if (currentSource == source) return;
+        
+        currentSource = source;
+        await LoadFiles();
+    }
+
+    private async Task LoadFiles()
+    {
+        loading = true;
+        errorMessage = null;
+        StateHasChanged();
+        
+        try
+        {
+            var result = await JS.InvokeAsync<DirectoryReadResult>("fileSystemAccess.readDirectoryStructure", currentSource, 5);
+            
+            if (result.Success && result.Files != null)
+            {
+                Console.WriteLine($"Loaded {result.Files.Count} files from JS");
+                
+                fileManagerData = result.Files
+                    .Where(f => !string.IsNullOrEmpty(f.Name) && !string.IsNullOrEmpty(f.Id))
+                    .Select(f => {
+                        var created = DateTime.TryParse(f.DateCreated, out var dc) ? dc : DateTime.Now;
+                        var modified = DateTime.TryParse(f.DateModified, out var dm) ? dm : DateTime.Now;
+                        return new FileEntry
+                        {
+                            Id = f.Id!,
+                            ParentId = string.IsNullOrEmpty(f.ParentId) ? null : f.ParentId,
+                            Name = f.Name!,
+                            Path = f.Path ?? f.Name!,
+                            IsDirectory = f.IsDirectory,
+                            HasDirectories = f.HasDirectories,
+                            Size = f.Size,
+                            Extension = f.Extension ?? "",
+                            DateCreated = created,
+                            DateCreatedUtc = created.ToUniversalTime(),
+                            DateModified = modified,
+                            DateModifiedUtc = modified.ToUniversalTime()
+                        };
+                    }).ToList();
+                
+                Console.WriteLine($"Processed {fileManagerData.Count} valid entries");
+                foreach (var entry in fileManagerData.Take(3))
+                {
+                    Console.WriteLine($"  Entry: Id={entry.Id}, Name={entry.Name}, IsDir={entry.IsDirectory}, ParentId={entry.ParentId ?? "(null)"}");
+                }
+                
+                currentPath = result.RootPath ?? "";
+            }
+            else
+            {
+                errorMessage = result.Error ?? "Failed to read directory";
+                fileManagerData = new();
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error loading files: {ex.Message}";
+            fileManagerData = new();
+        }
+        
+        loading = false;
+        StateHasChanged();
+    }
+
+    private void OnSelectionChanged(IEnumerable<FileEntry> items)
+    {
+        selectedItems = items;
+        selectedFile = items.FirstOrDefault();
+    }
+
+    private async Task ShowContextMenu(MouseEventArgs args)
+    {
+        // Only show context menu if a file (not folder) is selected
+        if (selectedFile != null && !selectedFile.IsDirectory && contextMenuRef != null)
+        {
+            await contextMenuRef.ShowAsync(args.ClientX, args.ClientY);
+        }
+    }
+
+    private async Task ViewPdf()
+    {
+        if (selectedFile == null || selectedFile.IsDirectory) return;
+        
+        // Clear any previous viewer state
+        pdfViewerData = null;
+        pdfViewerUrl = null;
+        
+        try
+        {
+            Console.WriteLine($"Loading PDF: {selectedFile.Path}, Size: {selectedFile.Size} bytes");
+            
+            // For large files (>50MB), use blob URL approach to avoid memory issues
+            if (selectedFile.Size > MaxPdfSizeForTelerik)
+            {
+                Console.WriteLine("Large file detected - using iframe with blob URL");
+                var result = await JS.InvokeAsync<PdfUrlResult>("fileSystemAccess.getPdfUrl", currentSource, selectedFile.Path);
+                
+                if (result.Success)
+                {
+                    pdfViewerUrl = result.Url;
+                    pdfViewerTitle = selectedFile.Name;
+                }
+                else
+                {
+                    errorMessage = result.Error ?? "Failed to open PDF";
+                }
+            }
+            else
+            {
+                // For smaller files, use TelerikPdfViewer
+                var result = await JS.InvokeAsync<PdfBytesResult>("fileSystemAccess.getPdfBytes", currentSource, selectedFile.Path);
+                
+                if (result.Success && !string.IsNullOrEmpty(result.Data))
+                {
+                    Console.WriteLine($"PDF loaded: {result.Size} bytes");
+                    pdfViewerData = Convert.FromBase64String(result.Data);
+                    pdfViewerTitle = selectedFile.Name;
+                }
+                else
+                {
+                    errorMessage = result.Error ?? "Failed to open PDF - file may be empty or unreadable";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PDF load error: {ex.Message}");
+            errorMessage = $"Error opening PDF: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private void ClosePdfViewer()
+    {
+        if (!string.IsNullOrEmpty(pdfViewerUrl))
+        {
+            JS.InvokeVoidAsync("URL.revokeObjectURL", pdfViewerUrl);
+        }
+        pdfViewerData = null;
+        pdfViewerUrl = null;
+        pdfViewerTitle = null;
+        StateHasChanged();
+    }
+
+    private void ShowMoveToFolderDialog()
+    {
+        if (selectedFile == null || selectedFile.IsDirectory) return;
+        
+        // Get all folders from current data (excluding the file's current parent)
+        availableFolders = fileManagerData
+            .Where(f => f.IsDirectory && f.Path != selectedFile.ParentId)
+            .OrderBy(f => f.Path)
+            .ToList();
+        
+        // Add root folder option
+        var rootPath = fileManagerData.FirstOrDefault()?.Path.Split('/').FirstOrDefault() ?? currentPath;
+        if (!availableFolders.Any(f => f.Path == rootPath))
+        {
+            availableFolders.Insert(0, new FileEntry
+            {
+                Id = rootPath,
+                Name = "📁 Root (" + rootPath + ")",
+                Path = rootPath,
+                IsDirectory = true
+            });
+        }
+        
+        selectedDestinationFolder = null;
+        showMoveToFolderDialog = true;
+        StateHasChanged();
+    }
+
+    private void CloseMoveToFolderDialog()
+    {
+        showMoveToFolderDialog = false;
+        selectedDestinationFolder = null;
+    }
+
+    private async Task OnContextMenuClick(ContextMenuItem item)
+    {
+        if (selectedFile == null) return;
+        
+        switch (item.CommandName)
+        {
+            case "move":
+                ShowMoveToFolderDialog();
+                break;
+            case "view":
+                if (selectedFile.Extension?.ToLower() == ".pdf")
+                {
+                    await ViewPdf();
+                }
+                break;
+        }
+    }
+
+    private async Task ExecuteMoveToFolder()
+    {
+        if (selectedFile == null || string.IsNullOrEmpty(selectedDestinationFolder)) return;
+        
+        try
+        {
+            var result = await JS.InvokeAsync<FileOperationResult>(
+                "fileSystemAccess.moveFileToFolder",
+                currentSource,
+                selectedFile.Path,
+                selectedDestinationFolder,
+                selectedFile.Name);
+            
+            if (result.Success)
+            {
+                successMessage = $"Moved '{selectedFile.Name}' to folder";
+                showMoveToFolderDialog = false;
+                selectedDestinationFolder = null;
+                await LoadFiles(); // Refresh
+            }
+            else
+            {
+                errorMessage = result.Error ?? "Failed to move file";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error moving file: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private async Task MoveToLibrary()
+    {
+        if (selectedFile == null || selectedFile.IsDirectory) return;
+        
+        try
+        {
+            var result = await JS.InvokeAsync<FileOperationResult>(
+                "fileSystemAccess.moveFile", 
+                "downloads", 
+                selectedFile.Path, 
+                "library", 
+                selectedFile.Name);
+            
+            if (result.Success)
+            {
+                successMessage = $"Moved '{selectedFile.Name}' to Library";
+                await LoadFiles(); // Refresh
+            }
+            else
+            {
+                errorMessage = result.Error ?? "Failed to move file";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error moving file: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private async Task CopyToLibrary()
+    {
+        if (selectedFile == null || selectedFile.IsDirectory) return;
+        
+        try
+        {
+            var result = await JS.InvokeAsync<FileOperationResult>(
+                "fileSystemAccess.copyFile", 
+                "downloads", 
+                selectedFile.Path, 
+                "library", 
+                selectedFile.Name);
+            
+            if (result.Success)
+            {
+                successMessage = $"Copied '{selectedFile.Name}' to Library";
+            }
+            else
+            {
+                errorMessage = result.Error ?? "Failed to copy file";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error copying file: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private async Task OnDeleteHandler(FileManagerDeleteEventArgs args)
+    {
+        var item = (FileEntry)args.Item;
+        
+        try
+        {
+            var result = await JS.InvokeAsync<FileOperationResult>(
+                "fileSystemAccess.deleteFile", 
+                currentSource, 
+                item.Path);
+            
+            if (result.Success)
+            {
+                fileManagerData.RemoveAll(f => f.Id == item.Id);
+                fileManagerData = new List<FileEntry>(fileManagerData);
+                successMessage = $"Deleted '{item.Name}'";
+            }
+            else
+            {
+                errorMessage = result.Error ?? "Failed to delete";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error deleting: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private async Task OnUpdateHandler(FileManagerUpdateEventArgs args)
+    {
+        var item = (FileEntry)args.Item;
+        
+        // Find the original item to detect what changed
+        var original = fileManagerData.FirstOrDefault(f => f.Id == item.Id);
+        if (original == null) return;
+        
+        try
+        {
+            // Check if ParentId changed (this is a move operation)
+            if (original.ParentId != item.ParentId)
+            {
+                // This is a move operation
+                var destFolderPath = item.ParentId ?? currentPath;
+                
+                var result = await JS.InvokeAsync<FileOperationResult>(
+                    "fileSystemAccess.moveFileToFolder", 
+                    currentSource, 
+                    original.Path,
+                    destFolderPath,
+                    item.Name);
+                
+                if (result.Success)
+                {
+                    successMessage = $"Moved '{item.Name}' to folder";
+                    // Refresh to get updated paths
+                    await LoadFiles();
+                }
+                else
+                {
+                    errorMessage = result.Error ?? "Failed to move file";
+                }
+            }
+            else if (original.Name != item.Name)
+            {
+                // Handle rename
+                var result = await JS.InvokeAsync<FileOperationResult>(
+                    "fileSystemAccess.renameFile", 
+                    currentSource, 
+                    original.Path,
+                    item.Name);
+                
+                if (result.Success)
+                {
+                    // Update local data
+                    original.Name = item.Name;
+                    // Update path
+                    var pathParts = original.Path.Split('/');
+                    pathParts[^1] = item.Name;
+                    original.Path = string.Join("/", pathParts);
+                    original.Id = original.Path; // Id is based on path
+                    
+                    fileManagerData = new List<FileEntry>(fileManagerData);
+                    successMessage = $"Renamed to '{item.Name}'";
+                }
+                else
+                {
+                    errorMessage = result.Error ?? "Failed to rename";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error updating: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private async Task OnCreateHandler(FileManagerCreateEventArgs args)
+    {
+        var item = (FileEntry)args.Item;
+        
+        try
+        {
+            var result = await JS.InvokeAsync<FileOperationResult>(
+                "fileSystemAccess.createFolder", 
+                currentSource, 
+                currentPath,
+                item.Name);
+            
+            if (result.Success)
+            {
+                // Add to local data
+                item.Id = $"{currentPath}/{item.Name}";
+                item.Path = $"{currentPath}/{item.Name}";
+                item.ParentId = currentPath;
+                fileManagerData.Add(item);
+                fileManagerData = new List<FileEntry>(fileManagerData);
+                successMessage = $"Created folder '{item.Name}'";
+            }
+            else
+            {
+                errorMessage = result.Error ?? "Failed to create folder";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error creating folder: {ex.Message}";
+        }
+        
+        StateHasChanged();
+    }
+
+    private FileEntry OnModelInitHandler()
+    {
+        return new FileEntry
+        {
+            Id = Guid.NewGuid().ToString(),
+            Name = "New Folder",
+            Path = $"{currentPath}/New Folder",
+            IsDirectory = true,
+            HasDirectories = false,
+            Size = 0,
+            Extension = "",
+            DateCreated = DateTime.Now,
+            DateModified = DateTime.Now
+        };
+    }
+
+    private async Task OnDownloadHandler(FileManagerDownloadEventArgs args)
+    {
+        var item = (FileEntry)args.Item;
+        
+        if (item.IsDirectory)
+        {
+            args.IsCancelled = true;
+            return;
+        }
+
+        try
+        {
+            var result = await JS.InvokeAsync<PdfUrlResult>(
+                "fileSystemAccess.getPdfUrl", 
+                currentSource, 
+                item.Path);
+            
+            if (result.Success && !string.IsNullOrEmpty(result.Url))
+            {
+                // Trigger download via JS
+                await JS.InvokeVoidAsync("triggerFileDownload", result.Url, item.Name);
+            }
+            else
+            {
+                errorMessage = result.Error ?? "Failed to download";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error downloading: {ex.Message}";
+        }
+        
+        args.IsCancelled = true; // We handle the download ourselves
+        StateHasChanged();
+    }
+
+    // DTOs for JS interop
+    public class FolderPickResult
+    {
+        public bool Success { get; set; }
+        public bool Cancelled { get; set; }
+        public string? FolderName { get; set; }
+        public string? Error { get; set; }
+    }
+
+    public class DirectoryReadResult
+    {
+        public bool Success { get; set; }
+        public string? Error { get; set; }
+        public string? RootPath { get; set; }
+        public List<FileEntryDto>? Files { get; set; }
+    }
+
+    public class FileEntryDto
+    {
+        public string? Id { get; set; }
+        public string? ParentId { get; set; }
+        public string? Name { get; set; }
+        public string? Path { get; set; }
+        public bool IsDirectory { get; set; }
+        public bool HasDirectories { get; set; }
+        public long Size { get; set; }
+        public string? Extension { get; set; }
+        public string? DateCreated { get; set; }
+        public string? DateModified { get; set; }
+    }
+
+    public class PdfUrlResult
+    {
+        public bool Success { get; set; }
+        public string? Url { get; set; }
+        public string? Error { get; set; }
+    }
+
+    public class PdfBytesResult
+    {
+        public bool Success { get; set; }
+        public string? Data { get; set; }
+        public int Size { get; set; }
+        public string? Error { get; set; }
+    }
+
+    public class FileOperationResult
+    {
+        public bool Success { get; set; }
+        public string? Error { get; set; }
+        public string? Warning { get; set; }
+        public string? FileName { get; set; }
+    }
+
+    // FileManager data model - must match Telerik's expected structure
+    public class FileEntry
+    {
+        public string Id { get; set; } = "";
+        public string? ParentId { get; set; }
+        public string Name { get; set; } = "";
+        public string Path { get; set; } = "";
+        public bool IsDirectory { get; set; }
+        public bool HasDirectories { get; set; }
+        public long Size { get; set; }
+        public string Extension { get; set; } = "";
+        public DateTime DateCreated { get; set; } = DateTime.Now;
+        public DateTime DateCreatedUtc { get; set; } = DateTime.UtcNow;
+        public DateTime DateModified { get; set; } = DateTime.Now;
+        public DateTime DateModifiedUtc { get; set; } = DateTime.UtcNow;
+    }
+    
+    public class ContextMenuItem
+    {
+        public string Text { get; set; } = "";
+        public string CommandName { get; set; } = "";
+    }
+}
