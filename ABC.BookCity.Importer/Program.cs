@@ -262,9 +262,9 @@ while (true)
     
     if (input.ToLower() == "o")
     {
-        Console.WriteLine("\n=== OpenLibrary Import ===");
+        Console.WriteLine("\n=== OpenLibrary Import (Span-based) ===");
         Console.WriteLine("This imports OpenLibrary dump from ol_dump_latest.txt");
-        Console.WriteLine("Table: allthethings.ol_base (type, ol_key, revision, last_modified, json)");
+        Console.WriteLine("Tables: ol_base, ol_authors, ol_works, ol_editions");
         Console.WriteLine("\nDefault path: H:\\BookCity\\Books\\ol_dump_latest.txt\\ol_dump_latest.txt");
         Console.WriteLine("\nEnter path to OpenLibrary TSV file (or press Enter for default):");
         var olPath = Console.ReadLine()?.Trim();
@@ -285,6 +285,59 @@ while (true)
         var fileInfo = new FileInfo(olPath);
         Console.WriteLine($"\nFile: {olPath}");
         Console.WriteLine($"Size: {fileInfo.Length / 1024.0 / 1024.0 / 1024.0:F2} GB");
+        
+        // First, run the schema creation
+        Console.WriteLine("\nCreating OpenLibrary database schema...");
+        var olSchemaPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", 
+            "DataImports", "openlibrary", "create_openlibrary_tables.sql");
+        
+        // If relative path doesn't work, try absolute
+        if (!File.Exists(olSchemaPath))
+        {
+            olSchemaPath = @"H:\Developer.BookCity\ABC.BookCity\DataImports\openlibrary\create_openlibrary_tables.sql";
+        }
+        
+        if (File.Exists(olSchemaPath))
+        {
+            var schemaSql = await File.ReadAllTextAsync(olSchemaPath);
+            try
+            {
+                using var schemaConn = new MySqlConnector.MySqlConnection(connectionString);
+                await schemaConn.OpenAsync();
+                
+                // Split by semicolon and execute each statement
+                var statements = schemaSql.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var stmt in statements)
+                {
+                    var trimmed = stmt.Trim();
+                    if (string.IsNullOrWhiteSpace(trimmed) || trimmed.StartsWith("--")) continue;
+                    
+                    try
+                    {
+                        using var cmd = new MySqlConnector.MySqlCommand(trimmed + ";", schemaConn);
+                        await cmd.ExecuteNonQueryAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        // Ignore "already exists" errors
+                        if (!ex.Message.Contains("already exists"))
+                        {
+                            Console.WriteLine($"Schema warning: {ex.Message}");
+                        }
+                    }
+                }
+                Console.WriteLine("Schema created/verified.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Schema error: {ex.Message}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Schema file not found: {olSchemaPath}");
+            Console.WriteLine("Continuing anyway (tables may already exist)...");
+        }
         
         // Check current row count
         try
@@ -312,8 +365,8 @@ while (true)
             continue;
         }
         
-        // Run the loader
-        var olLoader = new ABC.BookCity.MariaDB.OpenLibraryLoader(connectionString, olPath, batchSize: 3000);
+        // Run the Span-based loader (high-performance)
+        var olLoader = new ABC.BookCity.MariaDB.OpenLibraryLoaderSpan(connectionString, olPath, batchSize: 2000);
         var (olProcessed, olInserted, olSkipped) = await olLoader.LoadAsync(skipRows);
         
         Console.WriteLine($"\nImport complete!");

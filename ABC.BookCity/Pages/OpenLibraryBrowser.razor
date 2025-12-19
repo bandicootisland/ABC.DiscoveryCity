@@ -1,0 +1,949 @@
+@page "/openlibrary"
+@page "/openlibrary/{OlKey}"
+@inject HttpClient Http
+@inject NavigationManager Navigation
+@inject IJSRuntime JS
+
+<h3>📚 Open Library Browser</h3>
+
+@if (errorMessage != null)
+{
+    <div class="alert alert-danger alert-dismissible">
+        @errorMessage
+        <button type="button" class="btn-close" @onclick="@(() => errorMessage = null)"></button>
+    </div>
+}
+
+@if (OlKey == null)
+{
+    <!-- List/Search View -->
+    @if (_pageStateReady)
+    {
+        <div class="mb-3">
+            <div class="btn-group" role="group">
+                <button type="button" class="btn @(selectedType == "edition" ? "btn-primary" : "btn-outline-primary")" 
+                        @onclick="@(() => ChangeType("edition"))">
+                    📖 Editions (@summary?.TotalEditions.ToString("N0"))
+                </button>
+                <button type="button" class="btn @(selectedType == "work" ? "btn-primary" : "btn-outline-primary")" 
+                        @onclick="@(() => ChangeType("work"))">
+                    📚 Works (@summary?.TotalWorks.ToString("N0"))
+                </button>
+                <button type="button" class="btn @(selectedType == "author" ? "btn-primary" : "btn-outline-primary")" 
+                        @onclick="@(() => ChangeType("author"))">
+                    ✍️ Authors (@summary?.TotalAuthors.ToString("N0"))
+                </button>
+            </div>
+        </div>
+
+        <TelerikGrid @ref="@_gridRef"
+                     TItem="OpenLibraryItem"
+                     OnRead="@ReadItems"
+                     Pageable="true"
+                     PageSize="@pageSize"
+                     PageSizeChanged="@OnPageSizeChanged"
+                     @bind-Page="@currentPage"
+                     Sortable="true"
+                     FilterMode="@GridFilterMode.FilterRow"
+                     Resizable="true"
+                     Height="85vh"
+                     OnRowExpand="@OnRowExpand"
+                     OnStateInit="@OnGridStateInit">
+            <GridSettings>
+                <GridPagerSettings InputType="PagerInputType.Input"
+                                   PageSizes="@(new List<int?> { 25, 50, 100, 200 })"
+                                   ButtonCount="5"
+                                   Position="PagerPosition.Top" />
+            </GridSettings>
+            <DetailTemplate>
+                @{
+                    var item = (OpenLibraryItem)context;
+                }
+                <div class="p-3" style="background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px;">
+                    <TelerikTabStrip>
+                        <TabStripTab Title="Overview">
+                            <div class="row mt-2">
+                                <div class="col-md-2 text-center">
+                                    @if (!string.IsNullOrEmpty(item.CoverId))
+                                    {
+                                        <img src="https://covers.openlibrary.org/b/id/@(item.CoverId)-M.jpg" 
+                                             alt="Cover" style="max-width: 100%; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);" />
+                                    }
+                                    else
+                                    {
+                                        <div class="bg-light d-flex align-items-center justify-content-center" style="height: 150px; border: 1px dashed #ccc;">
+                                            <span class="text-muted">No Cover</span>
+                                        </div>
+                                    }
+                                </div>
+                                <div class="col-md-10">
+                                    <h5 class="text-primary">@(item.Title ?? item.Name)</h5>
+                                    <p class="text-muted small">@item.OlKey</p>
+                                    
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <dl class="row mb-0">
+                                                <dt class="col-sm-4">Type</dt>
+                                                <dd class="col-sm-8"><span class="badge bg-secondary">@item.Type.Replace("/type/", "")</span></dd>
+                                                
+                                                @if (item.Publishers?.Any() == true)
+                                                {
+                                                    <dt class="col-sm-4">Publisher</dt>
+                                                    <dd class="col-sm-8">@string.Join(", ", item.Publishers)</dd>
+                                                }
+                                                
+                                                @if (!string.IsNullOrEmpty(item.PublishDate))
+                                                {
+                                                    <dt class="col-sm-4">Date</dt>
+                                                    <dd class="col-sm-8">@item.PublishDate</dd>
+                                                }
+                                            </dl>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <dl class="row mb-0">
+                                                @if (item.Isbn13?.Any() == true)
+                                                {
+                                                    <dt class="col-sm-4">ISBN-13</dt>
+                                                    <dd class="col-sm-8">@item.Isbn13.First()</dd>
+                                                }
+                                                @if (item.NumberOfPages.HasValue)
+                                                {
+                                                    <dt class="col-sm-4">Pages</dt>
+                                                    <dd class="col-sm-8">@item.NumberOfPages</dd>
+                                                }
+                                                @if (!string.IsNullOrEmpty(item.InternetArchiveId))
+                                                {
+                                                    <dt class="col-sm-4">IA ID</dt>
+                                                    <dd class="col-sm-8"><code>@item.InternetArchiveId</code></dd>
+                                                }
+                                                @if (!string.IsNullOrEmpty(item.PhysicalFormat))
+                                                {
+                                                    <dt class="col-sm-4">Format</dt>
+                                                    <dd class="col-sm-8">@item.PhysicalFormat</dd>
+                                                }
+                                                <dt class="col-sm-4">Revision</dt>
+                                                <dd class="col-sm-8">@item.Revision</dd>
+                                            </dl>
+                                        </div>
+                                    </div>
+                                    
+                                    @if (item.Subjects?.Any() == true)
+                                    {
+                                        <div class="mt-2">
+                                            <strong>Subjects:</strong>
+                                            <div class="mt-1">
+                                                @foreach (var subject in item.Subjects.Take(10))
+                                                {
+                                                    <span class="badge bg-light text-dark border me-1 mb-1">@subject</span>
+                                                }
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        </TabStripTab>
+                        
+                        @if (!string.IsNullOrEmpty(item.InternetArchiveId))
+                        {
+                            <TabStripTab Title="Reader">
+                                <div class="mt-2">
+                                    <iframe src="https://archive.org/embed/@item.InternetArchiveId" 
+                                            style="width: 100%; height: 600px; border: none;"
+                                            allowfullscreen="true"
+                                            title="Internet Archive Reader">
+                                    </iframe>
+                                </div>
+                            </TabStripTab>
+                        }
+                        
+                        <TabStripTab Title="Raw JSON">
+                            <div class="mt-2">
+                                <pre class="p-2 bg-dark text-light rounded" style="max-height: 400px; overflow-y: auto; font-size: 0.85rem;">
+                                    @item.RawJson
+                                </pre>
+                            </div>
+                        </TabStripTab>
+                    </TelerikTabStrip>
+                </div>
+            </DetailTemplate>
+            <GridToolBarTemplate>
+                <TelerikTextBox @bind-Value="@_searchBoxValue"
+                                Placeholder="Search titles, authors, ISBNs..."
+                                Width="350px"
+                                DebounceDelay="500"
+                                OnChange="@OnSearchBoxChanged" />
+                <span class="k-toolbar-spacer"></span>
+                @if (summary != null)
+                {
+                    <span class="badge bg-primary me-1">@summary.Total.ToString("N0") total</span>
+                }
+                <span class="text-muted small">Showing: @totalCount.ToString("N0")</span>
+            </GridToolBarTemplate>
+            <GridColumns>
+                @if (selectedType == "author")
+                {
+                    <!-- Author columns -->
+                    <GridColumn Field="@nameof(OpenLibraryItem.Name)" Title="Name" Width="300px">
+                        <Template>
+                            @{
+                                var item = (OpenLibraryItem)context;
+                            }
+                            <strong>@(item.Name ?? "(Unknown)")</strong>
+                            <br /><small class="text-muted">@item.OlKey</small>
+                        </Template>
+                    </GridColumn>
+                    <GridColumn Field="@nameof(OpenLibraryItem.BirthDate)" Title="Born" Width="120px" />
+                    <GridColumn Field="@nameof(OpenLibraryItem.DeathDate)" Title="Died" Width="120px" />
+                    <GridColumn Title="Bio" Width="300px">
+                        <Template>
+                            @{
+                                var item = (OpenLibraryItem)context;
+                            }
+                            @(TruncateText(item.Bio, 100))
+                        </Template>
+                    </GridColumn>
+                }
+                else
+                {
+                    <!-- Edition/Work columns -->
+                    <GridColumn Title="Cover" Width="80px" Filterable="false" Sortable="false">
+                        <Template>
+                            @{
+                                var item = (OpenLibraryItem)context;
+                            }
+                            @if (!string.IsNullOrEmpty(item.CoverId))
+                            {
+                                <img src="https://covers.openlibrary.org/b/id/@(item.CoverId)-S.jpg" 
+                                     alt="Cover" style="max-height: 50px; max-width: 40px;"
+                                     loading="lazy" />
+                            }
+                            else
+                            {
+                                <span class="text-muted">📕</span>
+                            }
+                        </Template>
+                    </GridColumn>
+                    <GridColumn Field="@nameof(OpenLibraryItem.Title)" Title="Title" Width="350px">
+                        <Template>
+                            @{
+                                var item = (OpenLibraryItem)context;
+                            }
+                            <strong>@(TruncateText(item.Title, 70) ?? "(No title)")</strong>
+                            <br /><small class="text-muted">@item.OlKey</small>
+                        </Template>
+                    </GridColumn>
+                    @if (selectedType == "edition")
+                    {
+                        <GridColumn Field="@nameof(OpenLibraryItem.Publishers)" Title="Publisher" Width="150px">
+                            <Template>
+                                @{
+                                    var item = (OpenLibraryItem)context;
+                                }
+                                @(TruncateText(item.Publishers?.FirstOrDefault(), 25))
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(OpenLibraryItem.PublishDate)" Title="Date" Width="100px" />
+                        <GridColumn Field="@nameof(OpenLibraryItem.PhysicalFormat)" Title="Format" Width="100px" />
+                        <GridColumn Title="ISBN" Width="140px">
+                            <Template>
+                                @{
+                                    var item = (OpenLibraryItem)context;
+                                }
+                                @if (item.Isbn13?.Any() == true)
+                                {
+                                    <small>@item.Isbn13.First()</small>
+                                }
+                                else if (item.Isbn10?.Any() == true)
+                                {
+                                    <small>@item.Isbn10.First()</small>
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(OpenLibraryItem.NumberOfPages)" Title="Pages" Width="80px" />
+                    }
+                    else
+                    {
+                        <!-- Work-specific columns -->
+                        <GridColumn Title="Subjects" Width="250px">
+                            <Template>
+                                @{
+                                    var item = (OpenLibraryItem)context;
+                                }
+                                @if (item.Subjects?.Any() == true)
+                                {
+                                    <small>@string.Join(", ", item.Subjects.Take(3))</small>
+                                }
+                            </Template>
+                        </GridColumn>
+                    }
+                }
+                <GridColumn Title="Access" Width="180px" Filterable="false" Sortable="false">
+                    <Template>
+                        @{
+                            var item = (OpenLibraryItem)context;
+                        }
+                        @if (!string.IsNullOrEmpty(item.InternetArchiveId))
+                        {
+                            <span class="badge bg-success me-1" title="Available on Internet Archive">📖 IA</span>
+                        }
+                        @if (!string.IsNullOrEmpty(item.CoverId))
+                        {
+                            <span class="badge bg-info me-1" title="Has cover image">🖼️</span>
+                        }
+                    </Template>
+                </GridColumn>
+                <GridColumn Title="Actions" Width="200px" Filterable="false" Sortable="false">
+                    <Template>
+                        @{
+                            var item = (OpenLibraryItem)context;
+                        }
+                        @if (IsInLibrary(item.OlKey))
+                        {
+                            <TelerikButton OnClick="@(() => RemoveFromLibrary(item))" Size="@ThemeConstants.Button.Size.Small" ThemeColor="@ThemeConstants.Button.ThemeColor.Success" title="In My Library">
+                                ❤️
+                            </TelerikButton>
+                        }
+                        else
+                        {
+                            <TelerikButton OnClick="@(() => AddToLibrary(item))" Size="@ThemeConstants.Button.Size.Small" ThemeColor="@ThemeConstants.Button.ThemeColor.Light" title="Add to Library">
+                                🤍
+                            </TelerikButton>
+                        }
+                        <a href="@item.OpenLibraryUrl" target="_blank" class="btn btn-sm btn-outline-primary ms-1" title="View on OpenLibrary">
+                            🔗
+                        </a>
+                        @if (!string.IsNullOrEmpty(item.InternetArchiveId))
+                        {
+                            <a href="@item.InternetArchiveUrl" target="_blank" class="btn btn-sm btn-outline-success ms-1" title="Read on Internet Archive">
+                                📖
+                            </a>
+                        }
+                        <TelerikButton OnClick="@(() => ViewDetails(item))" Size="@ThemeConstants.Button.Size.Small" ThemeColor="@ThemeConstants.Button.ThemeColor.Info" title="View Details">
+                            👁️
+                        </TelerikButton>
+                    </Template>
+                </GridColumn>
+            </GridColumns>
+        </TelerikGrid>
+    }
+}
+else
+{
+    <!-- Detail View -->
+    @if (loading)
+    {
+        <div class="text-center p-5">
+            <TelerikLoader Visible="true" Size="@ThemeConstants.Loader.Size.Large" />
+            <p class="mt-2">Loading...</p>
+        </div>
+    }
+    else if (currentItem != null)
+    {
+        <div class="mb-3 d-flex gap-2 flex-wrap">
+            <TelerikButton OnClick="@BackToList" Icon="@SvgIcon.ArrowLeft">Back to List</TelerikButton>
+            
+            @if (IsInLibrary(currentItem.OlKey))
+            {
+                <TelerikButton OnClick="@(() => RemoveFromLibraryDetail())" ThemeColor="@ThemeConstants.Button.ThemeColor.Success">
+                    ❤️ In My Library
+                </TelerikButton>
+            }
+            else
+            {
+                <TelerikButton OnClick="@(() => AddToLibraryDetail())" ThemeColor="@ThemeConstants.Button.ThemeColor.Light">
+                    🤍 Add to Library
+                </TelerikButton>
+            }
+            
+            <a href="@currentItem.OpenLibraryUrl" target="_blank" class="btn btn-outline-primary">
+                🔗 View on OpenLibrary
+            </a>
+            
+            @if (!string.IsNullOrEmpty(currentItem.InternetArchiveId))
+            {
+                <a href="https://archive.org/details/@currentItem.InternetArchiveId" target="_blank" class="btn btn-success">
+                    📖 Read on Internet Archive
+                </a>
+                <a href="https://archive.org/download/@currentItem.InternetArchiveId" target="_blank" class="btn btn-outline-success">
+                    📥 Download Options
+                </a>
+            }
+        </div>
+
+        <div class="row">
+            <div class="col-md-9">
+                <div class="card mb-3">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0">
+                            @if (currentItem.Type == "/type/author")
+                            {
+                                <span>✍️ @(currentItem.Name ?? "Unknown Author")</span>
+                            }
+                            else
+                            {
+                                <span>📚 @(currentItem.Title ?? "Untitled")</span>
+                            }
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <dl class="row mb-0">
+                                    <dt class="col-sm-4">Key</dt>
+                                    <dd class="col-sm-8"><code>@currentItem.OlKey</code></dd>
+                                    
+                                    <dt class="col-sm-4">Type</dt>
+                                    <dd class="col-sm-8">
+                                        <span class="badge bg-secondary">@currentItem.Type.Replace("/type/", "")</span>
+                                    </dd>
+                                    
+                                    @if (!string.IsNullOrEmpty(currentItem.PublishDate))
+                                    {
+                                        <dt class="col-sm-4">Published</dt>
+                                        <dd class="col-sm-8">@currentItem.PublishDate</dd>
+                                    }
+                                    
+                                    @if (currentItem.Publishers?.Any() == true)
+                                    {
+                                        <dt class="col-sm-4">Publisher</dt>
+                                        <dd class="col-sm-8">@string.Join(", ", currentItem.Publishers)</dd>
+                                    }
+                                    
+                                    @if (!string.IsNullOrEmpty(currentItem.PhysicalFormat))
+                                    {
+                                        <dt class="col-sm-4">Format</dt>
+                                        <dd class="col-sm-8">@currentItem.PhysicalFormat</dd>
+                                    }
+                                    
+                                    @if (currentItem.NumberOfPages.HasValue)
+                                    {
+                                        <dt class="col-sm-4">Pages</dt>
+                                        <dd class="col-sm-8">@currentItem.NumberOfPages</dd>
+                                    }
+                                </dl>
+                            </div>
+                            <div class="col-md-6">
+                                <dl class="row mb-0">
+                                    @if (currentItem.Isbn13?.Any() == true)
+                                    {
+                                        <dt class="col-sm-4">ISBN-13</dt>
+                                        <dd class="col-sm-8">@string.Join(", ", currentItem.Isbn13)</dd>
+                                    }
+                                    @if (currentItem.Isbn10?.Any() == true)
+                                    {
+                                        <dt class="col-sm-4">ISBN-10</dt>
+                                        <dd class="col-sm-8">@string.Join(", ", currentItem.Isbn10)</dd>
+                                    }
+                                    @if (!string.IsNullOrEmpty(currentItem.WorkKey))
+                                    {
+                                        <dt class="col-sm-4">Work</dt>
+                                        <dd class="col-sm-8">
+                                            <a href="/openlibrary/@(currentItem.WorkKey.TrimStart('/'))">@currentItem.WorkKey</a>
+                                        </dd>
+                                    }
+                                    @if (!string.IsNullOrEmpty(currentItem.InternetArchiveId))
+                                    {
+                                        <dt class="col-sm-4">IA ID</dt>
+                                        <dd class="col-sm-8">
+                                            <code>@currentItem.InternetArchiveId</code>
+                                        </dd>
+                                    }
+                                    
+                                    <dt class="col-sm-4">Revision</dt>
+                                    <dd class="col-sm-8">@currentItem.Revision</dd>
+                                    
+                                    <dt class="col-sm-4">Modified</dt>
+                                    <dd class="col-sm-8">@currentItem.LastModified.ToString("yyyy-MM-dd")</dd>
+                                </dl>
+                            </div>
+                        </div>
+                        
+                        @if (currentItem.Subjects?.Any() == true)
+                        {
+                            <div class="mt-3">
+                                <strong>Subjects:</strong>
+                                <div class="mt-1">
+                                    @foreach (var subject in currentItem.Subjects.Take(15))
+                                    {
+                                        <span class="badge bg-light text-dark me-1 mb-1">@subject</span>
+                                    }
+                                </div>
+                            </div>
+                        }
+                        
+                        @if (!string.IsNullOrEmpty(currentItem.Bio))
+                        {
+                            <div class="mt-3">
+                                <strong>Biography:</strong>
+                                <p class="mt-1">@currentItem.Bio</p>
+                            </div>
+                        }
+                        
+                        @if (!string.IsNullOrEmpty(currentItem.BirthDate) || !string.IsNullOrEmpty(currentItem.DeathDate))
+                        {
+                            <div class="mt-3">
+                                <strong>Life:</strong>
+                                @currentItem.BirthDate - @(currentItem.DeathDate ?? "present")
+                            </div>
+                        }
+                    </div>
+                </div>
+                
+                <!-- Internet Archive Embed if available -->
+                @if (!string.IsNullOrEmpty(currentItem.InternetArchiveId))
+                {
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span>📖 Internet Archive Reader</span>
+                            <a href="https://archive.org/details/@currentItem.InternetArchiveId" target="_blank" class="btn btn-sm btn-outline-primary">
+                                Open Full Reader 🔗
+                            </a>
+                        </div>
+                        <div class="card-body p-0">
+                            <iframe src="https://archive.org/embed/@currentItem.InternetArchiveId" 
+                                    style="width: 100%; height: 600px; border: none;"
+                                    allowfullscreen="true"
+                                    title="Internet Archive Reader">
+                            </iframe>
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="alert alert-info">
+                        <h5>📚 Access Options</h5>
+                        <p>This item is not directly available on Internet Archive, but you may be able to:</p>
+                        <ul class="mb-0">
+                            <li><a href="@currentItem.OpenLibraryUrl" target="_blank">Borrow from OpenLibrary</a> (may require free account)</li>
+                            @if (currentItem.Isbn13?.Any() == true || currentItem.Isbn10?.Any() == true)
+                            {
+                                <li>Search your local library using ISBN: <code>@(currentItem.Isbn13?.FirstOrDefault() ?? currentItem.Isbn10?.FirstOrDefault())</code></li>
+                            }
+                            <li>Search for digital copies using the book title and author</li>
+                        </ul>
+                    </div>
+                }
+            </div>
+            <div class="col-md-3">
+                <!-- Cover and quick links -->
+                @if (!string.IsNullOrEmpty(currentItem.CoverId))
+                {
+                    <div class="card mb-3">
+                        <img src="https://covers.openlibrary.org/b/id/@(currentItem.CoverId)-L.jpg" 
+                             class="card-img-top" alt="Cover" 
+                             style="max-height: 400px; object-fit: contain; background: #f8f9fa;" />
+                    </div>
+                }
+                
+                @if (currentLinks != null)
+                {
+                    <div class="card">
+                        <div class="card-header">Quick Links</div>
+                        <div class="list-group list-group-flush">
+                            @if (!string.IsNullOrEmpty(currentLinks.InternetArchiveReadUrl))
+                            {
+                                <a href="@currentLinks.InternetArchiveReadUrl" target="_blank" class="list-group-item list-group-item-action">
+                                    📖 Read Online
+                                </a>
+                            }
+                            @if (!string.IsNullOrEmpty(currentLinks.InternetArchiveDownloadUrl))
+                            {
+                                <a href="@currentLinks.InternetArchiveDownloadUrl" target="_blank" class="list-group-item list-group-item-action">
+                                    📥 Download Files
+                                </a>
+                            }
+                            <a href="@currentLinks.BorrowUrl" target="_blank" class="list-group-item list-group-item-action">
+                                🏛️ Borrow from OL
+                            </a>
+                            @if (currentLinks.Isbn13?.Any() == true)
+                            {
+                                <a href="https://www.worldcat.org/isbn/@(currentLinks.Isbn13.First())" target="_blank" class="list-group-item list-group-item-action">
+                                    🌍 Find in WorldCat
+                                </a>
+                            }
+                        </div>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+}
+
+@code {
+    private const string PageStateStorageKey = "pageState:openlibrary";
+    private const string LibraryStorageKey = "openlibrary:library";
+    
+    [Parameter]
+    public string? OlKey { get; set; }
+
+    private TelerikGrid<OpenLibraryItem>? _gridRef;
+    private OpenLibrarySummary? summary;
+    private OpenLibraryItem? currentItem;
+    private OpenLibraryLinks? currentLinks;
+    
+    private string selectedType = "edition";
+    private string _searchBoxValue = "";
+    private string _persistedSearchTerm = "";
+    private int currentPage = 1;
+    private int pageSize = 50;
+    private long totalCount = 0;
+    private bool _pageStateReady;
+    private bool loading;
+    private string? errorMessage;
+    
+    private HashSet<string> libraryKeys = new();
+    private HashSet<string> expandedOlKeys = new();
+    private List<OpenLibraryItem> _lastGridItems = new();
+    private int _lastGridTotal;
+    private CancellationTokenSource? _readItemsCts;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RestorePageStateAsync();
+        await RefreshSummary();
+        
+        if (!string.IsNullOrEmpty(OlKey))
+        {
+            await LoadItemDetail();
+        }
+    }
+
+    private void OnRowExpand(GridRowExpandEventArgs args)
+    {
+        var item = (OpenLibraryItem)args.Item;
+        expandedOlKeys.Add(item.OlKey);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await RestorePageStateAsync();
+            await LoadLibraryState();
+            _pageStateReady = true;
+            StateHasChanged();
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!string.IsNullOrEmpty(OlKey) && (currentItem == null || !currentItem.OlKey.EndsWith(OlKey)))
+        {
+            await LoadItemDetail();
+        }
+    }
+
+    private async Task LoadLibraryState()
+    {
+        try
+        {
+            var json = await JS.InvokeAsync<string?>("localStorage.getItem", LibraryStorageKey);
+            if (!string.IsNullOrEmpty(json))
+            {
+                var keys = System.Text.Json.JsonSerializer.Deserialize<List<string>>(json);
+                libraryKeys = keys?.ToHashSet() ?? new HashSet<string>();
+            }
+        }
+        catch { }
+    }
+
+    private async Task SaveLibraryState()
+    {
+        try
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(libraryKeys.ToList());
+            await JS.InvokeVoidAsync("localStorage.setItem", LibraryStorageKey, json);
+        }
+        catch { }
+    }
+
+    private bool IsInLibrary(string key) => libraryKeys.Contains(key);
+
+    private async Task AddToLibrary(OpenLibraryItem item)
+    {
+        libraryKeys.Add(item.OlKey);
+        await SaveLibraryState();
+    }
+
+    private async Task RemoveFromLibrary(OpenLibraryItem item)
+    {
+        libraryKeys.Remove(item.OlKey);
+        await SaveLibraryState();
+    }
+
+    private async Task AddToLibraryDetail()
+    {
+        if (currentItem != null) await AddToLibrary(currentItem);
+    }
+
+    private async Task RemoveFromLibraryDetail()
+    {
+        if (currentItem != null) await RemoveFromLibrary(currentItem);
+    }
+
+    private sealed class OpenLibraryPageState
+    {
+        public int Page { get; set; } = 1;
+        public int PageSize { get; set; } = 50;
+        public string Type { get; set; } = "edition";
+        public string SearchTerm { get; set; } = "";
+    }
+
+    private async Task RestorePageStateAsync()
+    {
+        try
+        {
+            var json = await JS.InvokeAsync<string?>("localStorage.getItem", PageStateStorageKey);
+            if (string.IsNullOrWhiteSpace(json)) return;
+
+            var state = System.Text.Json.JsonSerializer.Deserialize<OpenLibraryPageState>(json);
+            if (state == null) return;
+
+            if (state.PageSize > 0) pageSize = state.PageSize;
+            if (state.Page > 0) currentPage = state.Page;
+            selectedType = state.Type ?? "edition";
+            _persistedSearchTerm = state.SearchTerm ?? "";
+            _searchBoxValue = _persistedSearchTerm;
+        }
+        catch { }
+    }
+
+    private async Task SavePageStateAsync()
+    {
+        try
+        {
+            var state = new OpenLibraryPageState
+            {
+                Page = currentPage,
+                PageSize = pageSize,
+                Type = selectedType,
+                SearchTerm = _persistedSearchTerm
+            };
+            var json = System.Text.Json.JsonSerializer.Serialize(state);
+            await JS.InvokeVoidAsync("localStorage.setItem", PageStateStorageKey, json);
+        }
+        catch { }
+    }
+
+    private void OnPageSizeChanged(int newPageSize)
+    {
+        if (newPageSize < 1) return;
+        pageSize = newPageSize;
+        _ = SavePageStateAsync();
+    }
+
+    private async Task OnSearchBoxChanged(object? value)
+    {
+        _persistedSearchTerm = _searchBoxValue?.Trim() ?? "";
+        currentPage = 1;
+        await SavePageStateAsync();
+        _gridRef?.Rebind();
+    }
+
+    private async Task ChangeType(string type)
+    {
+        selectedType = type;
+        currentPage = 1;
+        _persistedSearchTerm = "";
+        _searchBoxValue = "";
+        await SavePageStateAsync();
+        _gridRef?.Rebind();
+    }
+
+    private void OnGridStateInit(GridStateEventArgs<OpenLibraryItem> args)
+    {
+        args.GridState.Page = currentPage;
+    }
+
+    private async Task ReadItems(GridReadEventArgs args)
+    {
+        try
+        {
+            _readItemsCts?.Cancel();
+            _readItemsCts?.Dispose();
+            _readItemsCts = new CancellationTokenSource();
+            var ct = _readItemsCts.Token;
+
+            var page = args.Request.Page;
+            var reqPageSize = args.Request.PageSize;
+            if (reqPageSize > 0 && reqPageSize != pageSize) pageSize = reqPageSize;
+            currentPage = page;
+
+            var searchTerm = (_persistedSearchTerm ?? "").Trim();
+            await SavePageStateAsync();
+
+            if (!string.IsNullOrEmpty(searchTerm) && searchTerm.Length < 3)
+            {
+                args.Data = _lastGridItems;
+                args.Total = _lastGridTotal;
+                return;
+            }
+
+            var offset = (page - 1) * pageSize;
+            var url = $"api/openlibrary?page={page}&pageSize={pageSize}&type={selectedType}";
+            
+            if (!string.IsNullOrEmpty(searchTerm))
+            {
+                url += $"&search={Uri.EscapeDataString(searchTerm)}";
+            }
+
+            if (args.Request.Sorts?.Count > 0)
+            {
+                var sort = args.Request.Sorts[0];
+                if (!string.IsNullOrWhiteSpace(sort.Member))
+                {
+                    url += $"&sortField={Uri.EscapeDataString(sort.Member)}";
+                    url += $"&sortDir={(sort.SortDirection == Telerik.DataSource.ListSortDirection.Descending ? "desc" : "asc")}";
+                }
+            }
+
+            var response = await Http.GetAsync(url, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var err = await response.Content.ReadAsStringAsync();
+                errorMessage = $"API error: {response.StatusCode}";
+                args.Data = new List<OpenLibraryItem>();
+                args.Total = 0;
+                return;
+            }
+
+            var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var result = await response.Content.ReadFromJsonAsync<PagedOpenLibraryResult>(options, ct);
+
+            if (result != null)
+            {
+                args.Data = result.Items;
+                args.Total = (int)Math.Min(result.TotalCount, int.MaxValue);
+                totalCount = result.TotalCount;
+                _lastGridItems = result.Items;
+                _lastGridTotal = args.Total;
+                errorMessage = null;
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to load: {ex.Message}";
+            args.Data = new List<OpenLibraryItem>();
+            args.Total = 0;
+        }
+    }
+
+    private async Task RefreshSummary()
+    {
+        try
+        {
+            summary = await Http.GetFromJsonAsync<OpenLibrarySummary>("api/openlibrary/summary");
+        }
+        catch { }
+    }
+
+    private void ViewDetails(OpenLibraryItem item)
+    {
+        var key = item.OlKey.TrimStart('/');
+        Navigation.NavigateTo($"/openlibrary/{key}");
+    }
+
+    private void BackToList()
+    {
+        currentItem = null;
+        currentLinks = null;
+        Navigation.NavigateTo("/openlibrary");
+    }
+
+    private async Task LoadItemDetail()
+    {
+        if (string.IsNullOrEmpty(OlKey)) return;
+        
+        loading = true;
+        StateHasChanged();
+
+        try
+        {
+            currentItem = await Http.GetFromJsonAsync<OpenLibraryItem>($"api/openlibrary/{OlKey}");
+            
+            if (currentItem != null && currentItem.Type == "/type/edition")
+            {
+                currentLinks = await Http.GetFromJsonAsync<OpenLibraryLinks>($"api/openlibrary/links/{OlKey}");
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to load item: {ex.Message}";
+        }
+        finally
+        {
+            loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private static string? TruncateText(string? text, int maxLength)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        return text.Length <= maxLength ? text : text[..maxLength] + "...";
+    }
+
+    // DTOs (matching API)
+    public class OpenLibraryItem
+    {
+        public string OlKey { get; set; } = "";
+        public string Type { get; set; } = "";
+        public int Revision { get; set; }
+        public DateTime LastModified { get; set; }
+        public string? RawJson { get; set; }
+        public string? Title { get; set; }
+        public string? Name { get; set; }
+        public List<string>? Publishers { get; set; }
+        public string? PublishDate { get; set; }
+        public List<string>? Isbn10 { get; set; }
+        public List<string>? Isbn13 { get; set; }
+        public string? CoverId { get; set; }
+        public List<string>? Subjects { get; set; }
+        public List<string>? AuthorKeys { get; set; }
+        public string? WorkKey { get; set; }
+        public string? InternetArchiveId { get; set; }
+        public int? NumberOfPages { get; set; }
+        public string? PhysicalFormat { get; set; }
+        public string? BirthDate { get; set; }
+        public string? DeathDate { get; set; }
+        public string? Bio { get; set; }
+        public string OpenLibraryUrl => $"https://openlibrary.org{OlKey}";
+        public string? InternetArchiveUrl => !string.IsNullOrEmpty(InternetArchiveId) 
+            ? $"https://archive.org/details/{InternetArchiveId}" : null;
+    }
+
+    public class PagedOpenLibraryResult
+    {
+        public List<OpenLibraryItem> Items { get; set; } = new();
+        public long TotalCount { get; set; }
+        public int Page { get; set; }
+        public int PageSize { get; set; }
+    }
+
+    public class OpenLibrarySummary
+    {
+        public long TotalEditions { get; set; }
+        public long TotalWorks { get; set; }
+        public long TotalAuthors { get; set; }
+        public long Total => TotalEditions + TotalWorks + TotalAuthors;
+    }
+
+    public class OpenLibraryLinks
+    {
+        public string OlKey { get; set; } = "";
+        public List<string>? Isbn10 { get; set; }
+        public List<string>? Isbn13 { get; set; }
+        public List<string>? OclcNumbers { get; set; }
+        public string? InternetArchiveId { get; set; }
+        public List<long>? CoverIds { get; set; }
+        public string? OpenLibraryUrl { get; set; }
+        public string? InternetArchiveUrl { get; set; }
+        public string? InternetArchiveReadUrl { get; set; }
+        public string? InternetArchiveDownloadUrl { get; set; }
+        public string? BorrowUrl { get; set; }
+        public string? CoverUrlSmall { get; set; }
+        public string? CoverUrlMedium { get; set; }
+        public string? CoverUrlLarge { get; set; }
+    }
+}

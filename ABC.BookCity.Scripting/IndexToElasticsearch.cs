@@ -1,5 +1,6 @@
 #:package MySqlConnector@2.3.7
 #:package Elastic.Clients.Elasticsearch@8.11.0
+#:property JsonSerializerIsReflectionEnabledByDefault=true
 
 // Index HathiTrust catalog from MariaDB to Elasticsearch
 // Run: dotnet run
@@ -46,7 +47,7 @@ await using (var countCmd = new MySqlCommand("SELECT COUNT(*) FROM hathi_catalog
 Console.WriteLine($"Total records in MariaDB: {totalRecords:N0}");
 
 // Check existing ES count
-var countResponse = await elastic.CountAsync<HathiDoc>(c => c.Index(indexName));
+var countResponse = await elastic.CountAsync<HathiDoc>(c => c.Indices(indexName));
 var existingCount = countResponse.Count;
 Console.WriteLine($"Existing records in Elasticsearch: {existingCount:N0}");
 
@@ -197,7 +198,7 @@ Console.WriteLine("Refreshing index...");
 await elastic.Indices.RefreshAsync(indexName);
 
 // Final stats
-var finalCount = await elastic.CountAsync<HathiDoc>(c => c.Index(indexName));
+var finalCount = await elastic.CountAsync<HathiDoc>(c => c.Indices(indexName));
 var totalTime = DateTime.Now - startTime;
 
 Console.WriteLine();
