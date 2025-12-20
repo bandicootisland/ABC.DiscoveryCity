@@ -3,84 +3,169 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Net;
 using Telerik.Windows.Documents.Fixed.FormatProviders.Pdf;
 using Telerik.Windows.Documents.Fixed.Model;
 using Telerik.Windows.Documents.Fixed.Model.Text;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace ABC.BookCity.API.Services
 {
     public class PdfMetadataService
     {
-        public string ExtractAbstract(byte[] pdfData)
+        public string ExtractAbstract(byte[] pdfData, string folder, string filename)
         {
             if (pdfData == null || pdfData.Length == 0) return "[Empty Data]";
+            var converter = new DocumentConverter();
+            string fullText = "";
+            RadFixedDocument? document = null;
 
             try
             {
                 PdfFormatProvider provider = new PdfFormatProvider();
                 using var ms = new MemoryStream(pdfData);
-
-                RadFixedDocument document;
-                try 
+                try
                 {
-                    // Use the recommended overload with timeout
                     document = provider.Import(ms, TimeSpan.FromSeconds(30));
                 }
                 catch (Exception ex)
                 {
-                    return $"[Extraction Error: {ex.Message}]";
+                    Console.WriteLine($"Telerik Import Error for {filename}: {ex.Message}");
                 }
 
-                if (document.Pages.Count == 0) return "[No Pages Found]";
-
-                StringBuilder sb = new StringBuilder();
-                int pagesToScan = Math.Min(document.Pages.Count, 5);
-                
-                for (int i = 0; i < pagesToScan; i++)
-                {
-                    try 
-                    {
-                        var page = document.Pages[i];
-                        ExtractTextBasic(page, sb);
-                    }
-                    catch (Exception) { /* Skip problematic page */ }
-
-                    if (sb.Length > 15000) break;
-                }
-
-                string fullText = sb.ToString();
-
-                // --- TESTING BLOCK ---
-                bool enableDebugExport = false; // Set to true to enable file exports for debugging
-                if (enableDebugExport)
+                if (document != null && document.Pages.Count > 0)
                 {
                     try
                     {
-                        string debugDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "debug_exports");
-                        if (!Directory.Exists(debugDir)) Directory.CreateDirectory(debugDir);
-                        
-                        string fileName = $"extract_{DateTime.Now.Ticks}";
-                        
-                        // 1. Export raw extracted text
-                        File.WriteAllText(Path.Combine(debugDir, $"{fileName}.txt"), fullText);
-
-                        // 2. Export to HTML (Requires Telerik.Documents.Fixed.FormatProviders.Html NuGet)
-                        // var htmlProvider = new Telerik.Windows.Documents.Fixed.FormatProviders.Html.HtmlFormatProvider();
-                        // using (var htmlStream = File.Create(Path.Combine(debugDir, $"{fileName}.html")))
-                        // {
-                        //     htmlProvider.Export(document, htmlStream);
-                        // }
+                        fullText = converter.ExtractText(document);
                     }
-                    catch (Exception) { /* Ignore debug export errors */ }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Telerik Extract Error for {filename}: {ex.Message}");
+                    }
                 }
-                // ----------------------
-
-                return ParseAbstractFromText(fullText);
             }
             catch (Exception ex)
             {
-                return $"[Extraction Error: {ex.Message}]";
+                Console.WriteLine($"General Telerik Error for {filename}: {ex.Message}");
             }
+
+            // Fallback if Telerik failed to get meaningful text
+            if (string.IsNullOrWhiteSpace(fullText) || fullText.Length < 100)
+            {
+                string fallback = ExtractTextRawFallback(pdfData);
+                Console.WriteLine(fallback);
+                if (!string.IsNullOrWhiteSpace(fallback) && fallback.Length > 50)
+                {
+                    fullText = fallback;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(fullText))
+            {
+                return "[Extraction Error: Could not extract text via Telerik or Fallback]";
+            }
+
+            // Create a subfolder for the file (without .pdf) inside the provided folder
+            string fileWithoutExt = filename;
+            if (fileWithoutExt.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                fileWithoutExt = fileWithoutExt.Substring(0, fileWithoutExt.Length - 4);
+
+            string targetDir = Path.Combine(folder, fileWithoutExt);
+
+            try
+            {
+                if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
+
+                // 1. Save full text
+                File.WriteAllText(Path.Combine(targetDir, "extracted_text.txt"), fullText);
+
+                // 2. Save thumbnails (images) if document was loaded
+                if (document != null && document.Pages.Count > 0)
+                {
+                    converter.ExportThumbnails(document, Path.Combine(targetDir, "images"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Export error: {ex.Message}");
+            }
+
+            return ParseAbstractFromText(fullText);
+        }
+
+        private string ExtractTextRawFallback(byte[] data)
+        {
+            try
+            {
+                // 1. Try to find XMP Metadata (often contains abstract/description)
+                // We search for the XMP packet which is usually uncompressed
+                string xmp = ExtractXmpMetadata(data);
+                if (!string.IsNullOrEmpty(xmp))
+                {
+                    // Look for description or abstract tags
+                    var match = Regex.Match(xmp, @"<dc:description[^>]*>.*?<rdf:li[^>]*>(.*?)</rdf:li>.*?</dc:description>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+                    if (match.Success) return System.Net.WebUtility.HtmlDecode(match.Groups[1].Value);
+
+                    match = Regex.Match(xmp, @"(?i)<(?:dc:description|description|abstract)[^>]*>(.*?)</(?:dc:description|description|abstract)>", RegexOptions.Singleline);
+                    if (match.Success) return System.Net.WebUtility.HtmlDecode(match.Groups[1].Value);
+                }
+
+                // 2. Brute force: extract printable ASCII strings
+                // This is a last resort. We look for long sequences of printable characters.
+                StringBuilder sb = new StringBuilder();
+                int start = -1;
+                for (int i = 0; i < Math.Min(data.Length, 500000); i++) // Limit to first 500KB for performance
+                {
+                    byte b = data[i];
+                    if (b >= 32 && b <= 126) 
+                    {
+                        if (start == -1) start = i;
+                    }
+                    else
+                    {
+                        if (start != -1)
+                        {
+                            int len = i - start;
+                            if (len > 100)
+                            {
+                                string s = Encoding.ASCII.GetString(data, start, len);
+                                // Only keep strings that look like sentences or contain keywords
+                                //if (s.Contains(" ") && (s.Contains("Abstract") || s.Contains("abstract") || s.Contains("Introduction") || sb.Length > 0))
+                                //{
+                                    sb.Append(s);
+                                //}
+                            }
+                            start = -1;
+                        }
+                        
+                    }
+                }
+                return sb.ToString();
+            }
+            catch { return ""; }
+        }
+
+        private string ExtractXmpMetadata(byte[] data)
+        {
+            try
+            {
+                // Search for XMP packet markers in the first 1MB
+                int searchLimit = Math.Min(data.Length, 1024 * 1024);
+                string head = Encoding.ASCII.GetString(data, 0, searchLimit);
+                
+                int start = head.IndexOf("<?xpacket begin");
+                if (start != -1)
+                {
+                    int end = head.IndexOf("<?xpacket end", start);
+                    if (end != -1)
+                    {
+                        return head.Substring(start, end - start);
+                    }
+                }
+            }
+            catch { }
+            return "";
         }
 
         private void ExtractTextBasic(RadFixedPage page, StringBuilder sb)

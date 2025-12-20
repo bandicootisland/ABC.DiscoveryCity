@@ -11,6 +11,8 @@ using System.Net.Http.Headers;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Elastic.Clients.Elasticsearch;
 using Elastic.Transport;
 using MySqlConnector;
@@ -25,11 +27,11 @@ var batchSize = 100;
 // ---------------------
 
 using var httpClient = new HttpClient();
-httpClient.Timeout = TimeSpan.FromSeconds(30);
+httpClient.Timeout = TimeSpan.FromMinutes(5);
 
-Console.WriteLine("╔══════════════════════════════════════════════════════════════╗");
+Console.WriteLine( "╔══════════════════════════════════════════════════════════════╗");
 Console.WriteLine($"║    Scimag Elasticsearch Indexer - {Path.GetFileName(folderPath)} ║");
-Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
+Console.WriteLine( "╚══════════════════════════════════════════════════════════════╝");
 
 if (!Directory.Exists(folderPath))
 {
@@ -98,8 +100,10 @@ var batch = new List<ScimagRecord>();
 
 foreach (var zipPath in zipFiles)
 {
+ 
     var zipName = Path.GetFileName(zipPath);
-    Console.WriteLine($"Processing {zipName}...");
+    var folderName = Path.GetFileNameWithoutExtension(zipName);
+    Console.WriteLine($"Processing {zipName}");
     
     try
     {
@@ -121,7 +125,7 @@ foreach (var zipPath in zipFiles)
                     InternalPath = entry.FullName,
                     Filesize = entry.Length
                 };
-
+                
                 // Attempt to enrich from MariaDB if connected
                 if (conn.State == System.Data.ConnectionState.Open)
                 {
@@ -143,16 +147,21 @@ foreach (var zipPath in zipFiles)
                         using var entryStream = entry.Open();
                         using var ms = new MemoryStream();
                         await entryStream.CopyToAsync(ms);
-                        ms.Position = 0;
+                        
+                        var requestData = new PdfExtractRequest {
+                            Folder = Path.Combine(folderPath, folderName),
+                            FileName = entry.FullName,
+                            PdfBytes = ms.ToArray()
+                        };
 
-                        var content = new StreamContent(ms);
-                        content.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+                        var jsonRequest = JsonSerializer.Serialize(requestData, SourceGenerationContext.Default.PdfExtractRequest);
+                        var content = new StringContent(jsonRequest, System.Text.Encoding.UTF8, "application/json");
                         
                         var response = await httpClient.PostAsync(apiUrl, content);                        
                         if (response.IsSuccessStatusCode)
                         {
-                            var json = await response.Content.ReadAsStringAsync();
-                            using var doc = JsonDocument.Parse(json);
+                            var jsonResponse = await response.Content.ReadAsStringAsync();
+                            using var doc = JsonDocument.Parse(jsonResponse);
                             record.Abstract = doc.RootElement.GetProperty("abstractText").GetString() ?? "";
                             
                             if (!string.IsNullOrEmpty(record.Abstract) && !record.Abstract.StartsWith("["))
@@ -269,3 +278,19 @@ public class DbMetadata
     public int? Year { get; set; }
     public string? Abstract { get; set; }
 }
+
+public class PdfExtractRequest
+{
+    public string Folder { get; set; } = string.Empty;
+    public string FileName { get; set; } = string.Empty;
+    public byte[] PdfBytes { get; set; } = Array.Empty<byte>();
+}
+
+[JsonSerializable(typeof(ScimagRecord))]
+[JsonSerializable(typeof(List<ScimagRecord>))]
+[JsonSerializable(typeof(PdfExtractRequest))]
+[JsonSerializable(typeof(DbMetadata))]
+internal partial class SourceGenerationContext : JsonSerializerContext
+{
+}
+

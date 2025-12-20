@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using ABC.BookCity.API.Services;
+using ABC.BookCity.API.Models;
 
 namespace ABC.BookCity.API.Controllers
 {
@@ -15,21 +16,17 @@ namespace ABC.BookCity.API.Controllers
         }
 
         [HttpPost("extract-abstract")]
-        public async Task<IActionResult> ExtractAbstract()
+        [DisableRequestSizeLimit]
+        public async Task<IActionResult> ExtractAbstract([FromBody] PdfExtractRequest request)
         {
             try
             {
-                // Read the PDF from the request body as bytes to avoid stream position issues
-                using var ms = new MemoryStream();
-                await Request.Body.CopyToAsync(ms);
-                var bytes = ms.ToArray();
-
-                if (bytes.Length == 0)
+                if (request.PdfBytes == null || request.PdfBytes.Length == 0)
                 {
-                    return BadRequest("Empty PDF stream.");
+                    return BadRequest("Empty PDF data.");
                 }
 
-                var result = _pdfService.ExtractAbstract(bytes);
+                var result = _pdfService.ExtractAbstract(request.PdfBytes, request.Folder ?? "", request.FileName ?? "");
                 
                 return Ok(new { abstractText = result });
             }

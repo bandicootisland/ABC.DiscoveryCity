@@ -6,6 +6,8 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using Elastic.Clients.Elasticsearch;
 using Elastic.Transport;
 
@@ -142,4 +144,10 @@ public class ScimagRecord
     public string Title { get; set; }
     public string Author { get; set; }
     public int? Year { get; set; }
+}
+
+[JsonSerializable(typeof(ScimagRecord))]
+[JsonSerializable(typeof(List<ScimagRecord>))]
+internal partial class SourceGenerationContext : JsonSerializerContext
+{
 }
