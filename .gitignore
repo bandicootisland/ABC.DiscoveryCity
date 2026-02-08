@@ -465,6 +465,14 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
+# Sensitive files - API keys, credentials, secrets
+.env
+.env.*
+!.env.example
+*.local.json
+secrets.json
+credentials.json
+
 # JetBrains Rider
 *.sln.iml
 .idea/
