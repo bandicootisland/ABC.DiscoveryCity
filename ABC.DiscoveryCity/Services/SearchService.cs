@@ -63,6 +63,7 @@ public class SearchResultDto
     public DateTime? Date { get; set; }
     public int PageCount { get; set; }
     public string? ThumbnailPath { get; set; }
+    public string? FullImagePath { get; set; }
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
 }

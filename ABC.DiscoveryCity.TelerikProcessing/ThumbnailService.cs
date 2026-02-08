@@ -1,5 +1,7 @@
 using Microsoft.Playwright;
-using SkiaSharp;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Processing;
+using SixLabors.ImageSharp.Formats.Jpeg;
 using System.IO;
 using System.Net;
 
@@ -136,31 +138,23 @@ public class ThumbnailService : IDisposable
             //results.Add((outputPath, original.Width, original.Height)); but dont kjnow height width
             if (File.Exists(outputPath))
                 {
-                    // Resize to thumbnail
-                    try 
+                    // Resize to thumbnail using ImageSharp
+                    try
                     {
-                        using var original = SkiaSharp.SKBitmap.Decode(outputPath);
-                        if (original != null && !original.IsEmpty)
-                        {
+                        using var original = Image.Load(outputPath);
                         results.Add((outputPath, original.Width, original.Height));
-                        int targetWidth = 400; // Thumbnail width
-                            int targetHeight = (int)((float)original.Height / original.Width * targetWidth);
-                            
-                            using var resized = original.Resize(new SkiaSharp.SKImageInfo(targetWidth, targetHeight), SkiaSharp.SKFilterQuality.Medium);
-                            if (resized != null)
-                            {
-                                using var image = SkiaSharp.SKImage.FromBitmap(resized);
-                                using var data = image.Encode(SkiaSharp.SKEncodedImageFormat.Jpeg, 85); 
-                                var thumbPath = outputPath.Replace(".jpg", "_thumb.jpg");
-                                using var stream = File.OpenWrite(thumbPath); 
-                                stream.SetLength(0);
-                                data.SaveTo(stream);
-                               
-                                Console.WriteLine($"  Page{pageNum}: Resized to {targetWidth}x{targetHeight} ({outputPath})");
-                                
-                                results.Add((thumbPath, targetWidth, targetHeight));
-                            }
-                        }
+
+                        int targetWidth = 100; // Small thumbnail for shape preview
+                        int targetHeight = (int)((float)original.Height / original.Width * targetWidth);
+
+                        var thumbPath = outputPath.Replace(".jpg", "_thumb.jpg");
+
+                        // Clone and resize for thumbnail
+                        using var thumbnail = original.Clone(ctx => ctx.Resize(targetWidth, targetHeight));
+                        thumbnail.Save(thumbPath, new JpegEncoder { Quality = 85 });
+
+                        Console.WriteLine($"  Page{pageNum}: Resized to {targetWidth}x{targetHeight} ({outputPath})");
+                        results.Add((thumbPath, targetWidth, targetHeight));
                     }
                     catch (Exception ex)
                     {

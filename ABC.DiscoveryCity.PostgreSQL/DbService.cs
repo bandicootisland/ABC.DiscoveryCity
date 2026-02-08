@@ -98,21 +98,53 @@ public class DbService
             // Add DataSetId column if table already exists without it
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS DataSetId INT REFERENCES DataSets(Id);", conn)) cmd.ExecuteNonQuery();
 
-            // 3. Create Chunks Table
-            Console.WriteLine("Creating DocumentChunks table...");
-            string createChunksTableSql = @"
-                CREATE TABLE IF NOT EXISTS DocumentChunks (
-                    Id SERIAL PRIMARY KEY,
-                    ParentId INT REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
-                    ChunkIndex INT,
-                    TextContent TEXT,
-                    Embedding vector(384), 
-                    CreatedAt TIMESTAMPTZ DEFAULT NOW()
-                );
-            ";
-            using (var cmd = new NpgsqlCommand(createChunksTableSql, conn)) cmd.ExecuteNonQuery();
+            // 5. Create DocumentChunks Table with HASH Partitioning (4 partitions for parallel vector search)
+            Console.WriteLine("Creating DocumentChunks partitioned table...");
 
-            // 4. Create DocumentImages Table
+            // Check if table exists and is already partitioned
+            bool chunksTableExists = false;
+            using (var cmd = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'documentchunks');", conn))
+            {
+                chunksTableExists = (bool)(cmd.ExecuteScalar() ?? false);
+            }
+
+            if (!chunksTableExists)
+            {
+                // Create partitioned table
+                string createChunksTableSql = @"
+                    CREATE TABLE DocumentChunks (
+                        Id SERIAL,
+                        ParentId INT NOT NULL,
+                        ChunkIndex INT,
+                        TextContent TEXT,
+                        Embedding vector(384),
+                        CreatedAt TIMESTAMPTZ DEFAULT NOW(),
+                        PRIMARY KEY (Id, ParentId)
+                    ) PARTITION BY HASH (ParentId);
+                ";
+                using (var cmd = new NpgsqlCommand(createChunksTableSql, conn)) cmd.ExecuteNonQuery();
+
+                // Create 4 hash partitions
+                for (int i = 0; i < 4; i++)
+                {
+                    string partitionSql = $@"
+                        CREATE TABLE DocumentChunks_p{i} PARTITION OF DocumentChunks
+                        FOR VALUES WITH (MODULUS 4, REMAINDER {i});
+                    ";
+                    using (var cmd = new NpgsqlCommand(partitionSql, conn)) cmd.ExecuteNonQuery();
+                    Console.WriteLine($"  Created partition DocumentChunks_p{i}");
+                }
+
+                // Add FK constraint (works on partitioned tables pointing TO regular tables)
+                using (var cmd = new NpgsqlCommand(@"
+                    ALTER TABLE DocumentChunks ADD CONSTRAINT fk_chunks_parent
+                    FOREIGN KEY (ParentId) REFERENCES ParentDocuments(Id) ON DELETE CASCADE;", conn))
+                {
+                    cmd.ExecuteNonQuery();
+                }
+            }
+
+            // 6. Create DocumentImages Table
             Console.WriteLine("Creating DocumentImages table...");
             string createImagesTableSql = @"
                 CREATE TABLE IF NOT EXISTS DocumentImages (
@@ -123,23 +155,77 @@ public class DbService
                     FilePath TEXT NOT NULL,
                     Width INT,
                     Height INT,
-                    CreatedAt TIMESTAMPTZ DEFAULT NOW()
+                    CreatedAt TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(ParentId, ImageSize)
                 );
             ";
             using (var cmd = new NpgsqlCommand(createImagesTableSql, conn)) cmd.ExecuteNonQuery();
 
-            // 5. Create Indexes
+            // Add unique constraint if table already exists without it
+            using (var cmd = new NpgsqlCommand(@"
+                DO $$ BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documentimages_parentid_imagesize_key') THEN
+                        ALTER TABLE DocumentImages ADD CONSTRAINT documentimages_parentid_imagesize_key UNIQUE (ParentId, ImageSize);
+                    END IF;
+                END $$;", conn)) cmd.ExecuteNonQuery();
+
+            // 7. Create Indexes
+            Console.WriteLine("Creating indexes...");
             using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_parent_metadata ON ParentDocuments USING GIN (Metadata);", conn)) cmd.ExecuteNonQuery();
             using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_parentid ON DocumentChunks(ParentId);", conn)) cmd.ExecuteNonQuery();
+            using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_textcontent ON DocumentChunks USING GIN (to_tsvector('english', TextContent));", conn)) cmd.ExecuteNonQuery();
             using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_docimages_parentid ON DocumentImages(ParentId);", conn)) cmd.ExecuteNonQuery();
 
+            // 8. Create HNSW index for fast vector similarity search (on each partition)
+            Console.WriteLine("Creating HNSW vector indexes...");
+            try
+            {
+                // HNSW index for cosine similarity - created on parent table, applies to all partitions
+                using (var cmd = new NpgsqlCommand(@"
+                    CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON DocumentChunks
+                    USING hnsw (Embedding vector_cosine_ops)
+                    WITH (m = 16, ef_construction = 64);", conn))
+                {
+                    cmd.ExecuteNonQuery();
+                }
+                Console.WriteLine("  HNSW vector index created.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [WARN] HNSW index creation failed (may need pgvector 0.5+): {ex.Message}");
+                // Fallback to IVFFlat if HNSW not available
+                try
+                {
+                    using (var cmd = new NpgsqlCommand(@"
+                        CREATE INDEX IF NOT EXISTS idx_chunks_embedding_ivf ON DocumentChunks
+                        USING ivfflat (Embedding vector_cosine_ops) WITH (lists = 100);", conn))
+                    {
+                        cmd.ExecuteNonQuery();
+                    }
+                    Console.WriteLine("  IVFFlat vector index created (fallback).");
+                }
+                catch
+                {
+                    Console.WriteLine("  [WARN] Vector index creation skipped.");
+                }
+            }
+
             Console.WriteLine("Database Schema Initialized Successfully.");
-            
+
             // Verify
             using (var cmd = new NpgsqlCommand("SELECT count(*) FROM information_schema.tables WHERE table_name = 'parentdocuments';", conn))
             {
                 var count = (long)(cmd.ExecuteScalar() ?? 0L);
                 Console.WriteLine($"Table Verification: {count} (Should be 1)");
+            }
+
+            // Show partition info
+            using (var cmd = new NpgsqlCommand(@"
+                SELECT count(*) FROM pg_inherits
+                WHERE inhparent = 'documentchunks'::regclass;", conn))
+            {
+                var partitions = (long)(cmd.ExecuteScalar() ?? 0L);
+                Console.WriteLine($"DocumentChunks partitions: {partitions}");
             }
         }
         catch (Exception ex)
@@ -311,103 +397,107 @@ public class DbService
     }
 
     /// <summary>
-    /// Insert an image record for a document.
+    /// Upsert full and thumb image records for a document in a single transaction.
+    /// Only updates an image if width > 0 and height > 0 (preserves existing if not provided).
     /// </summary>
-    public void InsertImage(string parentFilePath, string imageType, string imageSize, string imagePath, int width, int height)
+    public void UpsertDocumentImages(string parentFilePath,
+        string fullPath, int fullWidth, int fullHeight,
+        string thumbPath, int thumbWidth, int thumbHeight)
     {
+        // Skip if nothing to update
+        if (fullWidth <= 0 && fullHeight <= 0 && thumbWidth <= 0 && thumbHeight <= 0) return;
+
         try
         {
             using var conn = _dataSource.OpenConnection();
 
             // Get parent ID
-            string parentIdSql = "SELECT Id FROM ParentDocuments WHERE FilePath = @fp LIMIT 1;";
             int parentId = 0;
-            using (var cmd = new NpgsqlCommand(parentIdSql, conn))
+            using (var cmd = new NpgsqlCommand("SELECT Id FROM ParentDocuments WHERE FilePath = @fp LIMIT 1;", conn))
             {
                 cmd.Parameters.AddWithValue("fp", parentFilePath);
                 var result = cmd.ExecuteScalar();
-                if (result == null) return; // Parent not found
+                if (result == null) return;
                 parentId = (int)result;
             }
 
-            // Delete existing image record for this size to avoid duplicates
-            string deleteSql = "DELETE FROM DocumentImages WHERE ParentId = @pid AND ImageSize = @size;";
-            using (var cmd = new NpgsqlCommand(deleteSql, conn))
-            {
-                cmd.Parameters.AddWithValue("pid", parentId);
-                cmd.Parameters.AddWithValue("size", imageSize);
-                cmd.ExecuteNonQuery();
-            }
-
-            // Insert image record
-            string insertSql = @"
+            string upsertSql = @"
                 INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, Width, Height)
-                VALUES (@pid, @type, @size, @path, @w, @h);
+                VALUES (@pid, 'jpg', @size, @path, @w, @h)
+                ON CONFLICT (ParentId, ImageSize)
+                DO UPDATE SET
+                    FilePath = EXCLUDED.FilePath,
+                    Width = EXCLUDED.Width,
+                    Height = EXCLUDED.Height,
+                    CreatedAt = NOW();
             ";
-            using (var cmd = new NpgsqlCommand(insertSql, conn))
+
+            using var trans = conn.BeginTransaction();
+            try
             {
-                cmd.Parameters.AddWithValue("pid", parentId);
-                cmd.Parameters.AddWithValue("type", imageType);
-                cmd.Parameters.AddWithValue("size", imageSize);
-                cmd.Parameters.AddWithValue("path", imagePath);
-                cmd.Parameters.AddWithValue("w", width);
-                cmd.Parameters.AddWithValue("h", height);
-                cmd.ExecuteNonQuery();
+                // Upsert full only if dimensions provided
+                if (fullWidth > 0 && fullHeight > 0)
+                {
+                    using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
+                    cmd.Parameters.AddWithValue("pid", parentId);
+                    cmd.Parameters.AddWithValue("size", "full");
+                    cmd.Parameters.AddWithValue("path", fullPath);
+                    cmd.Parameters.AddWithValue("w", fullWidth);
+                    cmd.Parameters.AddWithValue("h", fullHeight);
+                    cmd.ExecuteNonQuery();
+                }
+
+                // Upsert thumb only if dimensions provided
+                if (thumbWidth > 0 && thumbHeight > 0)
+                {
+                    using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
+                    cmd.Parameters.AddWithValue("pid", parentId);
+                    cmd.Parameters.AddWithValue("size", "thumb");
+                    cmd.Parameters.AddWithValue("path", thumbPath);
+                    cmd.Parameters.AddWithValue("w", thumbWidth);
+                    cmd.Parameters.AddWithValue("h", thumbHeight);
+                    cmd.ExecuteNonQuery();
+                }
+
+                trans.Commit();
+            }
+            catch
+            {
+                trans.Rollback();
+                throw;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  [WARN] InsertImage failed: {ex.Message}");
+            Console.WriteLine($"  [WARN] UpsertDocumentImages failed: {ex.Message}");
         }
     }
 
-    public async Task<List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? SourceName, string? DataSetName)>> SearchSimilarAsync(string query, int limit = 20)
+    public async Task<List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName)>> SearchSimilarAsync(string query, int limit = 20)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?)>();
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
 
         try
         {
             using var conn = _dataSource.OpenConnection();
-            
-            // Text-based search using ILIKE on chunk text content
-            // This is a fallback while pgvector compatibility is resolved
-            string sql = @"
-                SELECT DISTINCT ON (p.Id)
-                       p.FilePath, 
-                       c.TextContent, 
-                       0.0 as Distance,
-                       (p.Metadata->>'DeducedDate')::timestamp as DocDate,
-                       (p.Metadata->>'PageCount')::int as PageCount,
-                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                       s.Name as SourceName,
-                       d.Name as DataSetName
-                FROM DocumentChunks c
-                JOIN ParentDocuments p ON c.ParentId = p.Id
-                LEFT JOIN DataSets d ON p.DataSetId = d.Id
-                LEFT JOIN Sources s ON d.SourceId = s.Id
-                WHERE c.TextContent ILIKE @searchPattern
-                ORDER BY p.Id, p.ProcessedAt DESC
-                LIMIT @limit;
-            ";
 
-            using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("searchPattern", $"%{query}%");
-            cmd.Parameters.AddWithValue("limit", limit);
-
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            // Try vector similarity search if embedding service available
+            if (_embeddingService != null)
             {
-                results.Add((
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetDouble(2),
-                    reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5),
-                    reader.IsDBNull(6) ? null : reader.GetString(6),
-                    reader.IsDBNull(7) ? null : reader.GetString(7)
-                ));
+                try
+                {
+                    var queryEmbedding = await _embeddingService.GetEmbeddingAsync(query);
+                    results = await SearchByVectorAsync(conn, queryEmbedding, limit);
+                    if (results.Count > 0) return results;
+                }
+                catch (Exception embEx)
+                {
+                    Console.WriteLine($"Vector search failed, falling back to text: {embEx.Message}");
+                }
             }
+
+            // Fallback to full-text search
+            results = await SearchByTextAsync(conn, query, limit);
         }
         catch (Exception ex)
         {
@@ -416,19 +506,129 @@ public class DbService
         return results;
     }
 
-    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? SourceName, string? DataSetName)> GetRecentDocuments(int limit = 10)
+    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?)>();
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+
+        // Vector similarity search using cosine distance
+        string sql = @"
+            WITH ranked_chunks AS (
+                SELECT
+                    c.ParentId,
+                    c.TextContent,
+                    c.Embedding <=> @queryVector AS distance,
+                    ROW_NUMBER() OVER (PARTITION BY c.ParentId ORDER BY c.Embedding <=> @queryVector) as rn
+                FROM DocumentChunks c
+                WHERE c.Embedding IS NOT NULL
+                ORDER BY c.Embedding <=> @queryVector
+                LIMIT @limit * 3
+            )
+            SELECT DISTINCT ON (p.Id)
+                   p.FilePath,
+                   rc.TextContent,
+                   rc.distance,
+                   (p.Metadata->>'DeducedDate')::timestamp as DocDate,
+                   (p.Metadata->>'PageCount')::int as PageCount,
+                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
+                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
+                   s.Name as SourceName,
+                   d.Name as DataSetName
+            FROM ranked_chunks rc
+            JOIN ParentDocuments p ON rc.ParentId = p.Id
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            LEFT JOIN Sources s ON d.SourceId = s.Id
+            WHERE rc.rn = 1
+            ORDER BY p.Id, rc.distance
+            LIMIT @limit;
+        ";
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("queryVector", new Vector(queryEmbedding));
+        cmd.Parameters.AddWithValue("limit", limit);
+
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            results.Add((
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetDouble(2),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8)
+            ));
+        }
+
+        return results;
+    }
+
+    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit)
+    {
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+
+        // Full-text search using PostgreSQL tsvector
+        string sql = @"
+            SELECT DISTINCT ON (p.Id)
+                   p.FilePath,
+                   c.TextContent,
+                   ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query)) as score,
+                   (p.Metadata->>'DeducedDate')::timestamp as DocDate,
+                   (p.Metadata->>'PageCount')::int as PageCount,
+                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
+                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
+                   s.Name as SourceName,
+                   d.Name as DataSetName
+            FROM DocumentChunks c
+            JOIN ParentDocuments p ON c.ParentId = p.Id
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            LEFT JOIN Sources s ON d.SourceId = s.Id
+            WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+               OR c.TextContent ILIKE @pattern
+            ORDER BY p.Id, score DESC
+            LIMIT @limit;
+        ";
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("query", query);
+        cmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        cmd.Parameters.AddWithValue("limit", limit);
+
+        using var reader = await cmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            results.Add((
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? 0.0 : reader.GetDouble(2),
+                reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8)
+            ));
+        }
+
+        return results;
+    }
+
+    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName)> GetRecentDocuments(int limit = 10)
+    {
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
         try
         {
             using var conn = _dataSource.OpenConnection();
             string sql = @"
-                SELECT p.FilePath, 
+                SELECT p.FilePath,
                        (SELECT c.TextContent FROM DocumentChunks c WHERE c.ParentId = p.Id ORDER BY c.ChunkIndex LIMIT 1) as Text,
                        0.0 as Distance,
                        (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (p.Metadata->>'PageCount')::int as PageCount,
                        (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
+                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
                        s.Name as SourceName,
                        d.Name as DataSetName
                 FROM ParentDocuments p
@@ -452,7 +652,8 @@ public class DbService
                     reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     reader.IsDBNull(6) ? null : reader.GetString(6),
-                    reader.IsDBNull(7) ? null : reader.GetString(7)
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8)
                 ));
             }
         }

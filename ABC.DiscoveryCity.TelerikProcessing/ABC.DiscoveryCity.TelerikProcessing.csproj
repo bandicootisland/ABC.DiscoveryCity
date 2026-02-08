@@ -6,10 +6,10 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Playwright" Version="1.58.0" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
     <PackageReference Include="Telerik.Documents.Core" Version="2025.4.1319" />
     <PackageReference Include="Telerik.Documents.Flow" Version="2025.4.1319" />
     <PackageReference Include="Telerik.Documents.Fixed" Version="2025.4.1319" />
-    <PackageReference Include="Telerik.Documents.Fixed.FormatProviders.Image.Skia" Version="2025.4.1319" />
   </ItemGroup>
 
   <PropertyGroup>
