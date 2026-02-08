@@ -1,0 +1,254 @@
+@page "/downloader"
+@using ABC.DiscoveryCity.Services
+@inject IJSRuntime JS
+@inject TorrentService TorrentService
+@implements IDisposable
+
+<h3>📥 Torrent Manager</h3>
+
+@if (!string.IsNullOrEmpty(errorMessage))
+{
+    <div class="alert alert-danger mb-4">
+        <strong>⚠️ Error:</strong> @errorMessage
+        <button class="btn btn-sm btn-outline-danger ms-2" @onclick="RefreshFiles">Retry</button>
+    </div>
+}
+
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">📎 Add Torrent from URL</div>
+            <div class="card-body">
+                <div class="input-group">
+                    <input type="text" class="form-control" placeholder="Paste .torrent URL here..." @bind="torrentUrl" />
+                    <button class="btn btn-primary" @onclick="SaveTorrentFile">
+                        <TelerikSvgIcon Icon="@SvgIcon.Download" /> Save Torrent
+                    </button>
+                </div>
+                @if (!string.IsNullOrEmpty(statusMessage))
+                {
+                    <div class="alert @statusClass mt-2 mb-0">@statusMessage</div>
+                }
+                <small class="text-muted mt-2 d-block">
+                    💡 Torrents are saved to the watch folder. Use <code>ABC.DiscoveryCity.Downloader</code> console app to start downloads.
+                </small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-3">
+    <div class="col-md-6">
+        <strong>📁 Watch Folder:</strong> <code>@watchFolder</code>
+    </div>
+    <div class="col-md-6">
+        <strong>💾 Download Folder:</strong> <code>@downloadFolder</code>
+    </div>
+</div>
+
+<TelerikGrid Data="@torrentFiles"
+             Pageable="true"
+             PageSize="20"
+             Sortable="true"
+             FilterMode="@GridFilterMode.FilterMenu"
+             Resizable="true"
+             Height="500px">
+    <GridToolBarTemplate>
+        <span class="k-toolbar-spacer"></span>
+        <GridSearchBox />
+        <TelerikButton OnClick="@RefreshFiles" Icon="@SvgIcon.ArrowRotateCw">Refresh</TelerikButton>
+    </GridToolBarTemplate>
+    <GridColumns>
+        <GridColumn Field="@nameof(TorrentFileInfo.FileName)" Title="File Name" Width="400px">
+            <Template>
+                @{
+                    var item = (TorrentFileInfo)context;
+                }
+                <span title="@item.FullPath">@item.FileName</span>
+            </Template>
+        </GridColumn>
+        
+        <GridColumn Field="@nameof(TorrentFileInfo.Status)" Title="Status" Width="150px">
+            <Template>
+                @{
+                    var item = (TorrentFileInfo)context;
+                    var badgeClass = item.Status switch
+                    {
+                        TorrentFileStatus.NotStarted => "badge bg-secondary",
+                        TorrentFileStatus.Processing => "badge bg-primary",
+                        TorrentFileStatus.Completed => "badge bg-success",
+                        _ => "badge bg-info"
+                    };
+                    var icon = item.Status switch
+                    {
+                        TorrentFileStatus.NotStarted => "⬚",
+                        TorrentFileStatus.Processing => "⬇",
+                        TorrentFileStatus.Completed => "✓",
+                        _ => "?"
+                    };
+                }
+                <span class="@badgeClass">@icon @item.StatusDisplay</span>
+                @if (!string.IsNullOrEmpty(item.ProcessingBy))
+                {
+                    <br/><small class="text-muted">@item.ProcessingBy</small>
+                }
+            </Template>
+        </GridColumn>
+        
+        <GridColumn Field="@nameof(TorrentFileInfo.FileSize)" Title="Size" Width="120px">
+            <Template>
+                @{
+                    var item = (TorrentFileInfo)context;
+                }
+                @FormatSize(item.FileSize)
+            </Template>
+        </GridColumn>
+        
+        <GridColumn Field="@nameof(TorrentFileInfo.LastModified)" Title="Modified" Width="180px" DisplayFormat="{0:yyyy-MM-dd HH:mm}" />
+        
+        <GridColumn Title="Actions" Width="200px">
+            <Template>
+                @{
+                    var item = (TorrentFileInfo)context;
+                }
+                @if (item.Status == TorrentFileStatus.NotStarted)
+                {
+                    <TelerikButton OnClick="@(() => OpenInExplorer(item.FullPath))" 
+                                   Icon="@SvgIcon.Folder" 
+                                   ThemeColor="@ThemeConstants.Button.ThemeColor.Info"
+                                   Size="@ThemeConstants.Button.Size.Small">
+                        Open Folder
+                    </TelerikButton>
+                }
+                else if (item.Status == TorrentFileStatus.Processing)
+                {
+                    <span class="text-info">
+                        <TelerikLoader Size="@ThemeConstants.Loader.Size.Small" /> Downloading...
+                    </span>
+                }
+                else if (item.Status == TorrentFileStatus.Completed)
+                {
+                    <TelerikButton OnClick="@(() => OpenDownloadFolder())" 
+                                   Icon="@SvgIcon.FolderOpen" 
+                                   ThemeColor="@ThemeConstants.Button.ThemeColor.Success"
+                                   Size="@ThemeConstants.Button.Size.Small">
+                        View Download
+                    </TelerikButton>
+                }
+            </Template>
+        </GridColumn>
+    </GridColumns>
+</TelerikGrid>
+
+<div class="mt-4 p-3 bg-light rounded">
+    <h5>📋 Instructions</h5>
+    <ol class="mb-0">
+        <li><strong>Add torrents</strong> - Paste a torrent URL above and click "Save Torrent"</li>
+        <li><strong>Start downloads</strong> - Run <code>ABC.DiscoveryCity.Downloader</code> console app</li>
+        <li><strong>Select torrents</strong> - Use the Downloader's menu to choose which torrents to download</li>
+        <li><strong>Monitor progress</strong> - Refresh this page to see status updates</li>
+    </ol>
+</div>
+
+@code {
+    private string torrentUrl = "";
+    private string statusMessage = "";
+    private string statusClass = "alert-info";
+    private string errorMessage = "";
+    private string watchFolder = "";
+    private string downloadFolder = "";
+    private List<TorrentFileInfo> torrentFiles = new();
+    private System.Threading.Timer? _refreshTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshFiles();
+        
+        // Auto-refresh every 10 seconds
+        _refreshTimer = new System.Threading.Timer(async _ =>
+        {
+            await InvokeAsync(async () =>
+            {
+                await RefreshFiles();
+                StateHasChanged();
+            });
+        }, null, 10000, 10000);
+    }
+
+    private async Task RefreshFiles()
+    {
+        try
+        {
+            errorMessage = "";
+            var response = await TorrentService.GetTorrentFilesAsync();
+            watchFolder = response.WatchFolder;
+            downloadFolder = response.DownloadFolder;
+            torrentFiles = response.Files;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Cannot connect to API: {ex.Message}";
+        }
+    }
+
+    private async Task SaveTorrentFile()
+    {
+        if (string.IsNullOrWhiteSpace(torrentUrl))
+        {
+            statusMessage = "Please enter a URL";
+            statusClass = "alert-warning";
+            return;
+        }
+
+        try
+        {
+            statusMessage = "Downloading .torrent file...";
+            statusClass = "alert-info";
+            StateHasChanged();
+
+            await TorrentService.SaveTorrentFromUrlAsync(torrentUrl);
+            
+            statusMessage = "Torrent saved! Use the Downloader app to start downloading.";
+            statusClass = "alert-success";
+            torrentUrl = "";
+            
+            await RefreshFiles();
+        }
+        catch (Exception ex)
+        {
+            statusMessage = $"Error: {ex.Message}";
+            statusClass = "alert-danger";
+        }
+    }
+
+    private async Task OpenInExplorer(string filePath)
+    {
+        // Note: This won't work in WASM - would need API endpoint
+        statusMessage = $"File location: {filePath}";
+        statusClass = "alert-info";
+    }
+
+    private async Task OpenDownloadFolder()
+    {
+        statusMessage = $"Download folder: {downloadFolder}";
+        statusClass = "alert-info";
+    }
+
+    private string FormatSize(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        int order = 0;
+        double size = bytes;
+        while (size >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            size /= 1024;
+        }
+        return $"{size:F1} {sizes[order]}";
+    }
+
+    public void Dispose()
+    {
+        _refreshTimer?.Dispose();
+    }
+}

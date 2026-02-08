@@ -1,8 +1,0 @@
-{
-  "all": true,
-  "clean": true,
-  "exclude": [
-    "code/bitjs",
-    "tests"
-  ]
-}

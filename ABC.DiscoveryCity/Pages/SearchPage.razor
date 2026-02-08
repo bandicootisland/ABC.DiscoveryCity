@@ -1,0 +1,198 @@
+@page "/search"
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+@inject SearchService SearchService
+
+<PageTitle>Discovery Search</PageTitle>
+
+<div class="container-fluid">
+    <h3>Discovery Search</h3>
+    
+    <div class="row mb-3">
+        <div class="col-md-4">
+            <form @onsubmit="PerformSearch">
+                <div class="input-group">
+                    <TelerikTextBox @bind-Value="@SearchQuery" PlaceHolder="Enter search term..." Width="100%" />
+                    <TelerikButton ButtonType="@ButtonType.Submit" Icon="@SvgIcon.Search">Search</TelerikButton>
+                </div>
+            </form>
+        </div>
+        <div class="col-md-3">
+            <TelerikDropDownList Data="@AvailableSources" 
+                                 @bind-Value="@SelectedSource" 
+                                 DefaultText="All Sources"
+                                 Width="100%"
+                                 OnChange="@OnSourceFilterChanged" />
+        </div>
+    </div>
+
+    @if (IsSearching)
+    {
+        <div class="alert alert-info">Searching...</div>
+    }
+    else if (SearchResults == null)
+    {
+        <div class="alert alert-secondary">Enter a query to start searching.</div>
+    }
+    else if (SearchResults.Count == 0)
+    {
+        <div class="alert alert-warning">No results found.</div>
+    }
+    else
+    {
+        <TelerikGrid Data="@FilteredResults" Pageable="true" PageSize="10" Sortable="true" Resizable="true" FilterMode="@GridFilterMode.FilterRow" Height="calc(100vh - 200px)">
+            <GridColumns>
+                <GridColumn Title="Thumb" Width="80px">
+                     <Template>
+                        @{
+                            var item = context as SearchResultDto;
+                            if (!string.IsNullOrEmpty(item?.ThumbnailPath))
+                            {
+                                <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(item.ThumbnailPath)}")" 
+                                     style="width: 50px; height: auto; border: 1px solid #ddd; border-radius: 4px;" 
+                                     alt="Thumb" />
+                            }
+                            else
+                            {
+                                <div style="width: 50px; height: 70px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #aaa;">
+                                    <TelerikIcon Icon="@SvgIcon.FilePdf" />
+                                </div>
+                            }
+                        }
+                     </Template>
+                </GridColumn>
+                <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
+                <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date (Estimated)" Width="120px" DisplayFormat="{0:yyyy-MM-dd}" />
+                <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
+                <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
+                <GridColumn Title="People" Width="150px">
+                    <Template>
+                        <span style="color: #999; font-style: italic;">Processing...</span>
+                    </Template>
+                </GridColumn>
+                <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" DisplayFormat="{0:F4}" Width="100px" />
+                <GridColumn Field="@nameof(SearchResultDto.Text)" Title="Preview Text">
+                    <Template>
+                        @{
+                            var item = context as SearchResultDto;
+                            var preview = item?.Text?.Length > 150 ? item.Text.Substring(0, 150) + "..." : item?.Text;
+                            <span title="@item?.Text">@preview</span>
+                        }
+                    </Template>
+                </GridColumn>
+            </GridColumns>
+            <DetailTemplate>
+                @{
+                    var result = context as SearchResultDto;
+                    <DocumentDetails Document="@result" />
+                }
+            </DetailTemplate>
+        </TelerikGrid>
+    }
+</div>
+
+<TelerikWindow @bind-Visible="@ShowPdfWindow" Modal="true" Draggable="true" Resizable="true" Width="90%" Height="90%">
+    <WindowTitle>
+        Ref: @SelectedPdf?.FileName
+    </WindowTitle>
+    <WindowContent>
+        @if (SelectedPdf != null)
+        {
+            <iframe src="@GetPdfUrl(SelectedPdf.FilePath)" style="width:100%; height:100%; border:none;"></iframe>
+        }
+    </WindowContent>
+    <WindowActions>
+        <WindowAction Name="Close" />
+    </WindowActions>
+</TelerikWindow>
+
+@code {
+    private string SearchQuery { get; set; } = "";
+    private List<SearchResultDto>? SearchResults { get; set; }
+    private bool IsSearching { get; set; } = false;
+    
+    // Source filter
+    private List<string> AvailableSources { get; set; } = new();
+    private string? SelectedSource { get; set; }
+    
+    // Filtered results based on source selection
+    private IEnumerable<SearchResultDto> FilteredResults => 
+        string.IsNullOrEmpty(SelectedSource) 
+            ? SearchResults ?? new List<SearchResultDto>() 
+            : (SearchResults ?? new List<SearchResultDto>()).Where(r => r.SourceName == SelectedSource);
+
+    private bool ShowPdfWindow { get; set; } = false;
+    private SearchResultDto? SelectedPdf { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadRecentDocuments();
+    }
+
+    private async Task LoadRecentDocuments()
+    {
+        IsSearching = true;
+        try
+        {
+            SearchResults = await SearchService.GetRecentDocumentsAsync(50);
+            // Populate available sources from results
+            AvailableSources = SearchResults
+                .Where(r => !string.IsNullOrEmpty(r.SourceName))
+                .Select(r => r.SourceName!)
+                .Distinct()
+                .OrderBy(s => s)
+                .ToList();
+        }
+        finally
+        {
+            IsSearching = false;
+        }
+    }
+
+    private void OnSourceFilterChanged()
+    {
+        // FilteredResults is a computed property, so just trigger re-render
+        StateHasChanged();
+    }
+
+    private async Task PerformSearch()
+    {
+        if (string.IsNullOrWhiteSpace(SearchQuery)) return;
+
+        IsSearching = true;
+        SearchResults = null;
+        StateHasChanged();
+
+        try
+        {
+            SearchResults = await SearchService.SearchAsync(SearchQuery);
+            if (SearchResults.Count == 0)
+            {
+                // Optional: Check if API is actually reachable or if it's just no results
+                // For now, we rely on the service returning empty list on error, 
+                // but we could try to expose the error message from service.
+            }
+        }
+        catch (Exception ex)
+        {
+             Console.WriteLine($"Search UI Error: {ex.Message}");
+        }
+        finally
+        {
+            IsSearching = false;
+        }
+    }
+
+    private void ViewPdf(SearchResultDto item)
+    {
+        SelectedPdf = item;
+        ShowPdfWindow = true;
+    }
+
+    private string GetPdfUrl(string filePath)
+    {
+        // Use the generic file viewer endpoint with PDF mime type handling
+        return $"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(filePath)}";
+    }
+}

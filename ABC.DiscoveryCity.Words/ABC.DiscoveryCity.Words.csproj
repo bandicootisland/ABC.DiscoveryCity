@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="Resources\bwords.cs" />
+    <Compile Remove="Resources\cwords.cs" />
+    <Compile Remove="Resources\ewords.cs" />
+    <Compile Remove="Resources\fwords.cs" />
+    <Compile Remove="Resources\gwords.cs" />
+    <Compile Remove="Resources\hwords.cs" />
+    <Compile Remove="Resources\LetterTemplate.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="Resources\words - Copy.txt" />
+    <None Remove="Resources\words_alpha.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Resources\words.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ABC.DiscoveryCity.Words.Common\ABC.DiscoveryCity.Words.Common.csproj" />
+  </ItemGroup>
+
+</Project>

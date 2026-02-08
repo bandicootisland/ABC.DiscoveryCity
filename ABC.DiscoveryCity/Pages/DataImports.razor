@@ -1,0 +1,242 @@
+@page "/data-imports"
+@using ABC.DiscoveryCity.Models
+@using Telerik.Blazor.Components
+@inject HttpClient Http
+@inject IJSRuntime JS
+
+<h3>Data Imports Manager</h3>
+
+@if (!string.IsNullOrEmpty(readmeContent))
+{
+    <div class="card mb-4">
+        <div class="card-header">
+            README.md
+        </div>
+        <div class="card-body">
+             <TelerikEditor Value="@readmeContent" 
+                           EditMode="@EditorEditMode.Div" 
+                           Tools="@(new List<IEditorTool>())" 
+                           Height="300px" />
+        </div>
+    </div>
+}
+
+@if (datasets == null)
+{
+    <p><em>Loading...</em></p>
+}
+else
+{
+    <TelerikGrid Data="@datasets" Pageable="true" Sortable="true" FilterMode="@GridFilterMode.FilterMenu">
+        <DetailTemplate>
+            @{
+                var dataset = context as DatasetInfo;
+                <TelerikTabStrip>
+                    <TabStripTab Title="Overview">
+                        <div class="p-3">
+                            <h5 class="card-title">@dataset.Name</h5>
+                            <h6 class="card-subtitle mb-2 text-muted">@dataset.FileName</h6>
+                            <p class="card-text">@dataset.Description</p>
+                            
+                            <div class="mb-3">
+                                <span class="badge @(dataset.IsDownloaded ? "bg-success" : "bg-secondary") me-1">Downloaded</span>
+                                <span class="badge @(dataset.IsProcessed ? "bg-success" : "bg-secondary") me-1">Processed</span>
+                                <span class="badge @(dataset.IsImported ? "bg-success" : "bg-secondary")">Imported</span>
+                            </div>
+
+                            <div class="btn-group">
+                                <button class="btn btn-outline-primary" @onclick="@(() => RunAction(dataset.Name, DownloadAction))" disabled="@isRunning">Download</button>
+                                <button class="btn btn-outline-warning" @onclick="@(() => RunAction(dataset.Name, ProcessAction))" disabled="@isRunning">Process</button>
+                                <button class="btn btn-outline-danger" @onclick="@(() => RunAction(dataset.Name, ImportAction))" disabled="@isRunning">Import</button>
+                            </div>
+                        </div>
+                    </TabStripTab>
+                    <TabStripTab Title="Script">
+                        <div class="p-3">
+                            <textarea class="form-control" rows="15" readonly style="font-family: Consolas, monospace; font-size: 0.9em;">@dataset.ScriptContent</textarea>
+                        </div>
+                    </TabStripTab>
+                    <TabStripTab Title="C#">
+                        <div class="p-3">
+                            <div class="mb-2">
+                                <button class="btn btn-primary btn-sm" @onclick="@(() => GenerateScript(dataset))">Generate Script</button>
+                                <TelerikButton Icon="@SvgIcon.Download" OnClick="@(() => SaveScript(dataset))" Enabled="@(!string.IsNullOrEmpty(dataset.CSharpContent))">Download</TelerikButton>
+                                <TelerikButton Icon="@SvgIcon.Save" OnClick="@(() => SaveScriptToServer(dataset))" Enabled="@(!string.IsNullOrEmpty(dataset.CSharpContent))">Save to Server</TelerikButton>
+                            </div>
+                            <textarea class="form-control" rows="15" @bind="dataset.CSharpContent" style="font-family: Consolas, monospace; font-size: 0.9em;"></textarea>
+                        </div>
+                    </TabStripTab>
+                </TelerikTabStrip>
+            }
+        </DetailTemplate>
+        <GridColumns>
+            <GridColumn Field="@nameof(DatasetInfo.Name)" Title="Name" Width="200px" />
+            <GridColumn Field="@nameof(DatasetInfo.Description)" Title="Description" />
+            <GridColumn Field="@nameof(DatasetInfo.FileName)" Title="Target File" Width="250px" />
+            <GridColumn Title="Status" Width="300px">
+                <Template>
+                    @{
+                        var dataset = context as DatasetInfo;
+                        <span class="badge @(dataset.IsDownloaded ? "bg-success" : "bg-secondary") me-1">Downloaded</span>
+                        <span class="badge @(dataset.IsProcessed ? "bg-success" : "bg-secondary") me-1">Processed</span>
+                        <span class="badge @(dataset.IsImported ? "bg-success" : "bg-secondary")">Imported</span>
+                    }
+                </Template>
+            </GridColumn>
+        </GridColumns>
+    </TelerikGrid>
+}
+
+<div class="card mt-4">
+    <div class="card-header bg-dark text-white">
+        Console Output
+    </div>
+    <div class="card-body bg-black text-success p-0">
+        <div class="console-log p-3" style="height: 400px; overflow-y: auto; font-family: 'Consolas', monospace; white-space: pre-wrap;">
+            @foreach (var log in logs)
+            {
+                <div>@log</div>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<DatasetInfo>? datasets;
+    private List<string> logs = new List<string>();
+    private bool isRunning = false;
+    private string ApiUrl = "http://localhost:5022/api/Imports"; 
+    private string readmeContent = "";
+
+    private const string DownloadAction = "download";
+    private const string ProcessAction = "process";
+    private const string ImportAction = "import";
+
+    protected override async Task OnInitializedAsync()
+    {
+        try 
+        {
+            datasets = await Http.GetFromJsonAsync<List<DatasetInfo>>(ApiUrl);
+            readmeContent = await Http.GetStringAsync($"{ApiUrl}/readme");
+            readmeContent = GetHtmlFromMd(readmeContent);
+        }
+        catch (Exception ex)
+        {
+            logs.Add($"Error loading datasets: {ex.Message}. Make sure the API is running at {ApiUrl}");
+        }
+    }
+    string GetHtmlFromMd(string md)
+    {   
+        var mdToHtml = new MarkdownSharp.Markdown();
+        return mdToHtml.Transform(md);
+    }
+
+    // string GetMdFromHtml()
+    // {
+    //     // https://github.com/mysticmind/reversemarkdown-net
+    //     var converter = new ReverseMarkdown.Converter();
+    //     return converter.Convert(EditorHtml);
+    // }
+    private async Task RunAction(string datasetName, string action)
+    {
+        isRunning = true;
+        logs.Add($"--- Starting {action} for {datasetName} ---");
+        
+        try
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, $"{ApiUrl}/run/{datasetName}/{action}");
+            request.SetBrowserResponseStreamingEnabled(true);
+
+            using var response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var reader = new StreamReader(stream);
+
+            string? line;
+            while ((line = await reader.ReadLineAsync()) != null)
+            {
+                if (string.IsNullOrEmpty(line)) continue;
+                
+                if (line.StartsWith("data: "))
+                {
+                    var msg = line.Substring(6);
+                    logs.Add(msg);
+                    StateHasChanged();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logs.Add($"Error: {ex.Message}");
+        }
+        finally
+        {
+            isRunning = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task GenerateScript(DatasetInfo dataset)
+    {
+        try 
+        {
+            var response = await Http.PostAsJsonAsync($"{ApiUrl}/template", dataset);
+            if (response.IsSuccessStatusCode)
+            {
+                dataset.CSharpContent = await response.Content.ReadAsStringAsync();
+            }
+            else
+            {
+                logs.Add($"Error generating script: {response.StatusCode}");
+            }
+        }
+        catch (Exception ex)
+        {
+            logs.Add($"Error generating script: {ex.Message}");
+        }
+    }
+
+    private async Task SaveScript(DatasetInfo dataset)
+    {
+        if (string.IsNullOrEmpty(dataset.CSharpContent)) return;
+        
+        logs.Add($"Downloading script for {dataset.Name}...");
+        try 
+        {
+            var safeName = string.Join("_", dataset.Name.Split(Path.GetInvalidFileNameChars()));
+            var fileName = $"Download_{safeName}.cs";
+            
+            await JS.InvokeVoidAsync("saveTextAsFile", fileName, dataset.CSharpContent);
+            logs.Add($"Script download initiated: {fileName}");
+        }
+        catch (Exception ex)
+        {
+            logs.Add($"Error downloading script: {ex.Message}");
+        }
+    }
+
+    private async Task SaveScriptToServer(DatasetInfo dataset)
+    {
+        if (string.IsNullOrEmpty(dataset.CSharpContent)) return;
+        
+        logs.Add($"Saving script to server for {dataset.Name}...");
+        try 
+        {
+            var response = await Http.PostAsJsonAsync($"{ApiUrl}/save-script", dataset);
+            if (response.IsSuccessStatusCode)
+            {
+                var path = await response.Content.ReadAsStringAsync();
+                // Clean up quotes if JSON returned string
+                path = path.Trim('"');
+                logs.Add($"Script saved successfully to server: {path}");
+            }
+            else
+            {
+                logs.Add($"Error saving script to server: {response.StatusCode}");
+            }
+        }
+        catch (Exception ex)
+        {
+            logs.Add($"Error saving script to server: {ex.Message}");
+        }
+    }
+}

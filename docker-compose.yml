@@ -1,4 +1,17 @@
 services:
+  discovery-city-db:
+    image: pgvector/pgvector:pg16
+    container_name: discovery-city-postgres
+    environment:
+      POSTGRES_USER: discovery_user
+      POSTGRES_PASSWORD: discovery_password
+      POSTGRES_DB: DiscoveryCity
+    ports:
+      - "5435:5432"
+    volumes:
+      - H:/_DOCKER-DATA/discovery_city_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
   bookcity-db:
     image: mariadb:10.11
     container_name: bookcity-mariadb

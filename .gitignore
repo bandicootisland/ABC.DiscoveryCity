@@ -341,6 +341,77 @@ __pycache__/
 *.btp.cs
 *.btm.cs
 *.odx.cs
+
+# ===========================================
+# Large Files - Prevent push timeouts
+# ===========================================
+
+# Large dictionary/book DATA files (code files ARE tracked)
+# Data files in OxfordEnglishDictionaryCD
+ABC.BookPack.Dictionaries/OxfordEnglishDictionaryCD/*.json
+ABC.BookPack.Dictionaries/OxfordEnglishDictionaryCD/*.xml
+ABC.BookPack.Dictionaries/OxfordEnglishDictionaryCD/*.csv
+ABC.BookPack.Dictionaries/OxfordEnglishDictionaryCD/*.txt
+
+# Books folders - entire folders ignored (no code here, only data)
+ABC.BookPack.Dictionaries/Books/
+ABC.BookPack.Research/Books/
+ABC.BookPack.AtlasoftheHumanBrain/Books/
+
+# Large binary/archive files
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+
+# Large media files
+*.mp4
+*.mp3
+*.avi
+*.mov
+*.mkv
+*.wav
+*.flac
+
+# Large image files
+*.psd
+*.ai
+*.tiff
+*.tif
+*.bmp
+*.raw
+
+# Database files
+*.mdf
+*.ldf
+*.bak
+*.sql.gz
+
+# Large document files (UNCOMMENT if you don't need these tracked)
+# *.pdf
+# *.epub
+# *.mobi
+
+# Disk images
+*.iso
+*.img
+*.dmg
+*.vhd
+*.vhdx
+
+# Package/installer files
+*.msi
+# *.exe  # Uncomment if you don't need executables
+# *.dll  # Uncomment if you don't need DLLs (careful - may break builds)
+*.nupkg
+
+# Large data files (UNCOMMENT if you don't need these tracked)
+# *.csv
+# *.xlsx
+# *.json
+
 *.xsd.cs
 
 # OpenCover UI analysis results
@@ -400,3 +471,23 @@ FodyWeavers.xsd
 /ABC.BookCity.API/cache
 /DataImports
 /public
+/ABC.BookPack.Dictionaries/Books/Collins English Dictionary Complete and Unabridged -- Collins -- 13, 2018 -- Collins -- 1e926ccd1a1bc7c3d3fdc03d4f6eecbe -- Anna’s Archive.mobi
+/ABC.BookPack.Dictionaries/Books/Collins English Dictionary and Thesaurus Essential -- Collins Dictionaries -- Onleihe_ E-Book, Erscheinungsort nicht ermittelbar, 2021 -- Intangible -- 9781620531686 -- d1ae505fdf9aacddfda5a598f3ad2878 -- Anna’s A.epub
+/nul
+/ABC.WordCity.Lexicon.Edison/edison.txt
+/ABC.BookPack.AtlasoftheHumanBrain/Books/AtlasoftheHuman Brain-AnnasArchive.epub
+/ABC.BookPack.AtlasoftheHumanBrain/Books/AtlasoftheHumanBrain_reconstruct.html
+/ABC.BookPack.Dictionaries/Books/CollinsEngDictandThesaurus.mobi
+/ABC.BookPack.Dictionaries/Books/shorteroxfordenglishdictionary.bin
+/ABC.BookPack.Dictionaries/Books/CollinsEngDictandThesaurus/CollinsEngDictandThesaurus.html
+/ABC.BookPack.Dictionaries/Books/CollinsEngDictandThesaurus/CollinsEngDictandThesaurus_some.html
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/CollinsEnglishDictionaryandThesaurus_files/colorschememapping.xml
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/CollinsEnglishDictionaryandThesaurus_files/filelist.xml
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/CollinsEnglishDictionaryandThesaurus_files/image001.jpg
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/CollinsEnglishDictionaryandThesaurus_files/image002.jpg
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/CollinsEnglishDictionaryandThesaurus_files/image003.gif
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/CollinsEnglishDictionaryandThesaurus_files/image004.png
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/CollinsEnglishDictionaryandThesaurus_files/themedata.thmx
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/META-INF/container.xml
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/OPS/images/collins_c.gif
+/ABC.BookPack.Dictionaries/Books/CollinsEnglishDictionaryandThesaurus/OPS/images/cover_essential_dictthes.jpg

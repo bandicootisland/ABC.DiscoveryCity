@@ -1,0 +1,248 @@
+using ABC.DiscoveryCity.TelerikProcessing;
+using ABC.DiscoveryCity.Words.Common;
+
+using ABC.WordCity.Words.Common;
+using ABC.WordCity.Words.Common.Layers;
+using System;
+using System.Collections.Generic;
+
+namespace ABC.DiscoveryCity.TelerikProcessing
+{
+    public class CorpusIngestor
+    {
+        public List<Sentence> ResultSentences { get; } = new List<Sentence>();
+        public List<Word> ResultWords { get; } = new List<Word>();
+
+        private readonly List<Word> _currentSentenceBuffer = new List<Word>(50);
+        private SentenceData _currentSentenceData;
+        private int _wordOrdinal = 1;
+        private int _sentenceOrdinal = 1;
+        private static readonly string StringSpace = " ";
+        private WordLayers _corpusLayers = WordLayers.Empty; // Output Layers (Word-based)
+        private WordLayers _tokenLayers = WordLayers.Empty;  // Input Layers (Token-based)
+
+        public void Parse(BookCorpus corpus)
+        {
+            _tokenLayers = corpus.Layers ?? WordLayers.Empty;
+            _corpusLayers = new WordLayers(); // Create new output layers
+            Parse(new BookRawBuffer { Content = corpus.Content, Layout = corpus.Layout });
+        }
+
+        public void Parse(BookRawBuffer buffer)
+        {
+            ResultSentences.Clear();
+            ResultWords.Clear();
+            _currentSentenceBuffer.Clear();
+            _wordOrdinal = 1;
+            _sentenceOrdinal = 1;
+            _currentSentenceData = new SentenceData { Ordinal = _sentenceOrdinal, Layers = _corpusLayers };
+
+            ReadOnlyMemory<char> allText = new ReadOnlyMemory<char>(buffer.Content);
+
+            for (int i = 0; i < buffer.Layout.Length; i++)
+            {
+                LayoutToken curr = buffer.Layout[i];
+
+                // [IMAGE HANDLING]
+                // Check if this token corresponds to an image in the physical layer
+                var imgMeta = _tokenLayers.GetImage(i);
+                if (!imgMeta.IsEmpty)
+                {
+                    // Create a dedicated Word for the image
+                    AddWord("[IMAGE]");
+                    if (ResultWords.Count > 0)
+                    {
+                        var w = ResultWords[ResultWords.Count - 1];
+                        _corpusLayers.AddImage(w.Ordinal, imgMeta);
+                    }
+                    // Explicitly skip text processing for image tokens
+                    continue;
+                }
+
+                if (i > 0)
+                {
+                    LayoutToken prev = buffer.Layout[i - 1];
+                    DetectFormattingAndSpace(prev, curr);
+                }
+
+                ReadOnlyMemory<char> tokenText = allText.Slice(curr.TextOffset, curr.TextLength);
+                ProcessTextFragment(tokenText);
+            }
+
+            CloseSentence(null);
+        }
+
+        private void DetectFormattingAndSpace(LayoutToken prev, LayoutToken curr)
+        {
+            // [Layout Logic Same as Previous]
+            bool isPageBreak = prev.PageIndex != curr.PageIndex;
+            double yDiff = curr.Y - prev.Y;
+            double lineHeight = prev.FontSize;
+
+            FormatType detectedFormat = FormatType.None;
+            if (isPageBreak) detectedFormat = FormatType.SectionBreak;
+            else if (yDiff > (lineHeight * 1.4)) detectedFormat = FormatType.ParagraphBreak;
+            else if (yDiff > (lineHeight * 0.5)) detectedFormat = FormatType.LineBreak;
+
+            if (detectedFormat != FormatType.None && ResultWords.Count > 0)
+            {
+                var lastWord = ResultWords[ResultWords.Count - 1];
+                _corpusLayers.AddFormatting(lastWord.Ordinal, detectedFormat);
+            }
+
+            bool addSpace = false;
+            if (detectedFormat != FormatType.None)
+            {
+                if (ResultWords.Count > 0)
+                {
+                    var lastWord = ResultWords[ResultWords.Count - 1];
+                    bool endsInHyphen = lastWord.text.EndsWith("-") || lastWord.text.EndsWith("\u00AD");
+                    if (!endsInHyphen) addSpace = true;
+                }
+                else addSpace = true;
+            }
+            else
+            {
+                double prevRight = prev.X + prev.Width;
+                double gap = curr.X - prevRight;
+                if (gap > (curr.FontSize * 0.2)) addSpace = true;
+            }
+
+            if (addSpace && _currentSentenceBuffer.Count > 0)
+            {
+                AddWord(StringSpace);
+            }
+        }
+
+        private void ProcessTextFragment(ReadOnlyMemory<char> fragmentMem)
+        {
+            ReadOnlySpan<char> span = fragmentMem.Span;
+            int start = 0;
+
+            for (int k = 0; k < span.Length; k++)
+            {
+                char c = span[k];
+                bool isPunct = char.IsPunctuation(c) || char.IsSymbol(c);
+                bool isSpace = char.IsWhiteSpace(c);
+
+                if (isPunct || isSpace)
+                {
+                    if (k > start) AddWord(fragmentMem.Slice(start, k - start));
+
+                    if (isPunct)
+                    {
+                        AddWord(fragmentMem.Slice(k, 1));
+
+                        char? nextChar = (k + 1 < span.Length) ? span[k + 1] : (char?)null;
+
+                        // 1. Check Sentence End
+                        CheckSentenceEnd(c, nextChar);
+
+                        // 2. [NEW] Force Space Logic (Institute,publishing -> Institute, publishing)
+                        // If punctuation is comma/colon/semicolon/dot AND next char is a Letter...
+                        if (ShouldForceSpaceAfterPunct(c, nextChar))
+                        {
+                            if (_currentSentenceBuffer.Count > 0) AddWord(StringSpace);
+                        }
+                    }
+                    else if (isSpace)
+                    {
+                        if (_currentSentenceBuffer.Count > 0)
+                        {
+                            AddWord(StringSpace);
+                        }
+                    }
+
+                    start = k + 1;
+                }
+            }
+
+            if (start < span.Length) AddWord(fragmentMem.Slice(start));
+        }
+
+        // [NEW HELPER]
+        private bool ShouldForceSpaceAfterPunct(char c, char? nextChar)
+        {
+            // If there is no next char, or it's already whitespace, we don't need to force anything.
+            if (!nextChar.HasValue || char.IsWhiteSpace(nextChar.Value)) return false;
+
+            // Only force space if the NEXT thing is a Letter. 
+            // This avoids splitting "1,000" (digit) or "http://google" (symbol)
+            if (!char.IsLetter(nextChar.Value)) return false;
+
+            // Check specific punctuation marks that usually require spacing
+            return c == ',' || c == '.' || c == ';' || c == ':' || c == '!' || c == '?';
+        }
+
+        private void CheckSentenceEnd(char punct, char? nextChar)
+        {
+            if (punct == '!' || punct == '?')
+            {
+                CloseSentence(punct.ToString());
+                return;
+            }
+            if (punct == '.')
+            {
+                // Lookahead: Refined Rule "Digit (3.5) or Lower (google.com)"
+                if (nextChar.HasValue)
+                {
+                    // If next char is ANY non-whitespace, the original code returned.
+                    // But we only want to skip if it's a DIGIT or LOWER case letter.
+                    // "End.Start" (Upper) -> Should Split.
+                    // "3.5" (Digit) -> Should Join.
+                    // "google.com" (Lower) -> Should Join.
+                    if (char.IsDigit(nextChar.Value) || char.IsLower(nextChar.Value)) return;
+                }
+
+                // Lookbehind: Initial check
+                if (_currentSentenceBuffer.Count >= 2)
+                {
+                    var lastWord = _currentSentenceBuffer[_currentSentenceBuffer.Count - 2];
+                    if (ABC.DiscoveryCity.Words.Common.Grammar.GrammarRules.IsAbbreviation(lastWord.span)) return;
+
+                    // Middle Initial Check (Mary D.)
+                    if (lastWord.span.Length == 1 && char.IsUpper(lastWord.span[0])) return;
+                }
+                CloseSentence(".");
+            }
+        }
+
+        private void AddWord(ReadOnlyMemory<char> textMemory)
+        {
+            if (_currentSentenceBuffer.Count == 0 && textMemory.Span.IsWhiteSpace()) return;
+            // Fidelity Mode: We accept " The" if the source has it.
+            var w = new Word(textMemory, _currentSentenceData, _currentSentenceBuffer.Count, _wordOrdinal++);
+            _currentSentenceBuffer.Add(w);
+            ResultWords.Add(w);
+        }
+
+        private void AddWord(string text)
+        {
+            if (_currentSentenceBuffer.Count == 0 && string.IsNullOrWhiteSpace(text)) return;
+            var w = new Word(text, _currentSentenceData, _currentSentenceBuffer.Count, _wordOrdinal++);
+            _currentSentenceBuffer.Add(w);
+            ResultWords.Add(w);
+        }
+
+        private void CloseSentence(string endChar)
+        {
+            if (_currentSentenceBuffer.Count == 0) return;
+
+            _currentSentenceData.EndChar = endChar ?? "";
+            _currentSentenceData.Words = _currentSentenceBuffer.ToArray();
+            _currentSentenceData.Layers = _corpusLayers;
+
+            ResultSentences.Add(new Sentence(_currentSentenceData));
+
+            _currentSentenceBuffer.Clear();
+            _sentenceOrdinal++;
+            _currentSentenceData = new SentenceData
+            {
+                Ordinal = _sentenceOrdinal,
+                Layers = _corpusLayers
+            };
+        }
+    }
+
+    
+}

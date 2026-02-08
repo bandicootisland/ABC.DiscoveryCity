@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="Tests\DslProtocolTests.cs" />
+  </ItemGroup>
+
+
+  <ItemGroup>
+    <ProjectReference Include="..\ABC.DiscoveryCity.TelerikProcessing\ABC.DiscoveryCity.TelerikProcessing.csproj" />
+    <ProjectReference Include="..\ABC.DiscoveryCity.Words\ABC.DiscoveryCity.Words.csproj" />
+    <ProjectReference Include="..\ABC.DiscoveryCity.Embeddings\ABC.DiscoveryCity.Embeddings.csproj" />
+    <ProjectReference Include="..\ABC.DiscoveryCity.PostgreSQL\ABC.DiscoveryCity.PostgreSQL.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="10.0.1" />
+    <PackageReference Include="Pgvector" Version="0.3.2" />
+  </ItemGroup>
+</Project>

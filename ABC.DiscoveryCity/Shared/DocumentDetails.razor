@@ -1,0 +1,65 @@
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor 
+@using Telerik.Blazor.Components
+@using Telerik.Blazor.Components.Common.Icon
+
+<TelerikTabStrip>
+    <TabStripTab Title="Overview">
+        <div class="p-3">
+             <div class="row">
+                <div class="col-md-5">
+                    @if (!string.IsNullOrEmpty(Document?.ThumbnailPath))
+                    {
+                        <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.ThumbnailPath)}")" 
+                             style="width: 100%; height: auto; border: 1px solid #ddd; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;" />
+                    }
+                    else
+                    {
+                        <div class="text-center p-5 bg-light text-muted border" style="height: 300px; display: flex; align-items: center; justify-content: center; flex-direction: column;">
+                            <TelerikIcon Icon="@SvgIcon.FilePdf" Size="large" />
+                            <div class="mt-2">No Preview Available</div>
+                        </div>
+                    }
+                    
+                    <div class="mt-4 p-3 bg-light border rounded">
+                         <h6 class="border-bottom pb-2">Document Metadata</h6>
+                         <ul class="list-unstyled mb-0">
+                             <li class="mb-1"><strong>Est. Date:</strong> @(Document?.Date?.ToString("yyyy-MM-dd") ?? "Unknown")</li>
+                             <li class="mb-1"><strong>Pages:</strong> @Document?.PageCount</li>
+                             <li class="mb-1"><strong>Relevance:</strong> @Document?.Distance.ToString("F4")</li>
+                             <li class="mb-1"><strong>File:</strong> <span class="text-break">@Document?.FileName</span></li>
+                         </ul>
+                    </div>
+                </div>
+                <div class="col-md-7">
+                    <h4 class="mb-3">Text Preview</h4>
+                    <div class="card h-100">
+                        <div class="card-body" style="max-height: 600px; overflow-y: auto; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
+                            @if (!string.IsNullOrEmpty(Document?.Text))
+                            {
+                                @Document.Text
+                            }
+                            else
+                            {
+                                <span class="text-muted fst-italic">No text content available.</span>
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </TabStripTab>
+    <TabStripTab Title="PDF Viewer">
+        <div style="height: 800px;">
+             @if (Document != null)
+             {
+                 <iframe src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.FilePath)}")" style="width:100%; height:100%; border:none;"></iframe>
+             }
+        </div>
+    </TabStripTab>
+</TelerikTabStrip>
+
+@code {
+    [Parameter]
+    public SearchResultDto? Document { get; set; }
+}
