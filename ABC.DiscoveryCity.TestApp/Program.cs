@@ -12,8 +12,12 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Globalization;
 
+// Parse command-line arguments
+string? priorityDataSet = args.Length > 0 ? args[0] : "DataSet 9";
+
 Console.WriteLine("Discovery City PDF Processor");
 Console.WriteLine("============================");
+Console.WriteLine($"Priority DataSet: {priorityDataSet}");
 
 // Initialize Embedding Service (Ollama)
 Console.WriteLine("Initializing Embedding Service...");
@@ -64,11 +68,11 @@ if (RUN_VERIFICATION)
 }
 
 // BATCH TEST LIMIT - set to 0 for unlimited, or a number to limit processing
-const int MAX_FILES = 150;
+const int MAX_FILES = 0;
 int totalFiles = 0;
 int processedFiles = 0; 
 
-// ... (existing code)
+
 
 string rootFolder = @"S:\EpsteinFiles\DepartmentofJustice\DOJ_Disclosures\"; 
 
@@ -78,8 +82,11 @@ Console.WriteLine($"Default Root Folder: {rootFolder}");
 var subDirs = System.IO.Directory.GetDirectories(rootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
 var targetFolders = new List<string>();
 
-// Prioritize DataSet 9 (or DataSet_9)
-var priorityFolder = subDirs.FirstOrDefault(d => d.EndsWith("DataSet 9", StringComparison.OrdinalIgnoreCase) || d.EndsWith("DataSet_9", StringComparison.OrdinalIgnoreCase));
+// Prioritize specified DataSet (supports both "DataSet 9" and "DataSet_9" formats)
+string priorityDataSetAlt = priorityDataSet.Replace(" ", "_");
+var priorityFolder = subDirs.FirstOrDefault(d =>
+    d.EndsWith(priorityDataSet, StringComparison.OrdinalIgnoreCase) ||
+    d.EndsWith(priorityDataSetAlt, StringComparison.OrdinalIgnoreCase));
 if (priorityFolder != null)
 {
     Console.WriteLine($"Prioritizing folder: {priorityFolder}");
@@ -260,39 +267,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, int? da
         Console.WriteLine($"  [WARN] Page image error: {ex.Message}");
     }
 }
-// SINGLE FILE TEST MODE (enabled for font rendering test)
-// string testPath = @"S:\EpsteinFiles\DepartmentofJustice\DOJ_Disclosures\DataSet_9\PDFs\EFTA00465304.pdf";
-// if (System.IO.File.Exists(testPath))
-// {
-//     Console.WriteLine($"\n--- SINGLE FILE TEST: {testPath} ---");
-//     // Delete .done to force reprocessing
-//     string donePath = testPath + ".done";
-//     if (System.IO.File.Exists(donePath)) System.IO.File.Delete(donePath);
-    
-//     await ProcessPdf(testPath, inspectMode: false);
-    
-//     Console.WriteLine("Single file test complete. Exiting.");
-//     return;
-// }
 
-
-
-
-
-/*
-foreach (var folder in targetFolders)
-{
-    // ... (commented out loop)
-}
-Console.WriteLine($"\nDone! Processed {processedFiles}/{totalFiles} files.");
-*/
-
-/* 
-async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, bool inspectMode = false)
-{
-    // ... (commented out) 
-}
-*/
 
 DateTime? DeduceDateFromText(string text)
 {
