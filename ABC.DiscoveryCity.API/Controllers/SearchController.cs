@@ -70,6 +70,20 @@ public class SearchController : ControllerBase
         var (docs, images, chunks) = _dbService.GetCounts();
         return Ok(new { Documents = docs, Images = images, Chunks = chunks });
     }
+
+    [HttpGet("stats")]
+    public IActionResult GetSystemStats()
+    {
+        var stats = _dbService.GetSystemStats();
+        return Ok(stats);
+    }
+
+    [HttpGet("stats/datasets")]
+    public IActionResult GetDataSetStats()
+    {
+        var stats = _dbService.GetDataSetStats();
+        return Ok(stats);
+    }
 }
 
 public class SearchResultDto

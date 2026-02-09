@@ -52,6 +52,33 @@ public class SearchService
              return new List<ImageDto>();
         }
     }
+
+    public async Task<SystemStatsDto?> GetSystemStatsAsync()
+    {
+        try
+        {
+            return await _httpClient.GetFromJsonAsync<SystemStatsDto>("api/search/stats");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetSystemStats error: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<List<DataSetStatsDto>> GetDataSetStatsAsync()
+    {
+        try
+        {
+            var response = await _httpClient.GetFromJsonAsync<List<DataSetStatsDto>>("api/search/stats/datasets");
+            return response ?? new List<DataSetStatsDto>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetDataSetStats error: {ex.Message}");
+            return new List<DataSetStatsDto>();
+        }
+    }
 }
 
 public class SearchResultDto
@@ -76,4 +103,29 @@ public class ImageDto
     public int Width { get; set; }
     public int Height { get; set; }
     public string Url { get; set; } = string.Empty;
+}
+
+public class SystemStatsDto
+{
+    public long TotalDocuments { get; set; }
+    public long TotalPages { get; set; }
+    public long TotalImages { get; set; }
+    public long TotalChunks { get; set; }
+    public long SourceCount { get; set; }
+    public long DataSetCount { get; set; }
+    public long DocumentsWithEmbeddings { get; set; }
+    public double AvgPagesPerDocument { get; set; }
+    public DateTime? LastProcessedAt { get; set; }
+}
+
+public class DataSetStatsDto
+{
+    public string SourceName { get; set; } = "";
+    public string DataSetName { get; set; } = "";
+    public long DocumentCount { get; set; }
+    public long TotalPages { get; set; }
+    public long ImageCount { get; set; }
+    public long ChunkCount { get; set; }
+    public DateTime? FirstProcessed { get; set; }
+    public DateTime? LastProcessed { get; set; }
 }

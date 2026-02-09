@@ -169,44 +169,83 @@ public class DbService
                     END IF;
                 END $$;", conn)) cmd.ExecuteNonQuery();
 
-            // 7. Create Indexes
-            Console.WriteLine("Creating indexes...");
-            using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_parent_metadata ON ParentDocuments USING GIN (Metadata);", conn)) cmd.ExecuteNonQuery();
-            using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_parentid ON DocumentChunks(ParentId);", conn)) cmd.ExecuteNonQuery();
-            using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_textcontent ON DocumentChunks USING GIN (to_tsvector('english', TextContent));", conn)) cmd.ExecuteNonQuery();
-            using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_docimages_parentid ON DocumentImages(ParentId);", conn)) cmd.ExecuteNonQuery();
-
-            // 8. Create HNSW index for fast vector similarity search (on each partition)
-            Console.WriteLine("Creating HNSW vector indexes...");
-            try
+            // 7. Create Indexes (skip if already exist)
+            int indexCount = 0;
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM pg_indexes WHERE indexname LIKE 'idx_chunks_%' OR indexname LIKE 'idx_parent_%';", conn))
             {
-                // HNSW index for cosine similarity - created on parent table, applies to all partitions
-                using (var cmd = new NpgsqlCommand(@"
-                    CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON DocumentChunks
-                    USING hnsw (Embedding vector_cosine_ops)
-                    WITH (m = 16, ef_construction = 64);", conn))
-                {
-                    cmd.ExecuteNonQuery();
-                }
-                Console.WriteLine("  HNSW vector index created.");
+                indexCount = (int)(long)(cmd.ExecuteScalar() ?? 0L);
             }
-            catch (Exception ex)
+
+            if (indexCount >= 3)
             {
-                Console.WriteLine($"  [WARN] HNSW index creation failed (may need pgvector 0.5+): {ex.Message}");
-                // Fallback to IVFFlat if HNSW not available
+                Console.WriteLine($"Indexes already exist ({indexCount} found), skipping creation.");
+            }
+            else
+            {
+                Console.WriteLine($"Creating indexes ({indexCount} found, need more)...");
+                using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_parent_metadata ON ParentDocuments USING GIN (Metadata);", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_parentid ON DocumentChunks(ParentId);", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_textcontent ON DocumentChunks USING GIN (to_tsvector('english', TextContent));", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_docimages_parentid ON DocumentImages(ParentId);", conn)) cmd.ExecuteNonQuery();
+            }
+
+            bool vectorIndexExists = false;
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'idx_chunks_embedding_hnsw';", conn))
+            {
+                vectorIndexExists = ((long)(cmd.ExecuteScalar() ?? 0L)) > 0;
+            }
+
+            // 8. Check pgvector version and create vector index if needed
+            if (vectorIndexExists)
+            {
+                Console.WriteLine("Vector index already exists, skipping.");
+            }
+            else
+            {
+                Console.WriteLine("Checking pgvector version...");
+                string? pgvectorVersion = null;
                 try
                 {
-                    using (var cmd = new NpgsqlCommand(@"
-                        CREATE INDEX IF NOT EXISTS idx_chunks_embedding_ivf ON DocumentChunks
-                        USING ivfflat (Embedding vector_cosine_ops) WITH (lists = 100);", conn))
+                    using (var cmd = new NpgsqlCommand("SELECT extversion FROM pg_extension WHERE extname = 'vector';", conn))
                     {
-                        cmd.ExecuteNonQuery();
+                        pgvectorVersion = cmd.ExecuteScalar() as string;
                     }
-                    Console.WriteLine("  IVFFlat vector index created (fallback).");
+                    Console.WriteLine($"  pgvector version: {pgvectorVersion ?? "not found"}");
                 }
-                catch
+                catch { }
+
+                if (pgvectorVersion != null)
                 {
-                    Console.WriteLine("  [WARN] Vector index creation skipped.");
+                    bool supportsHnsw = false;
+                    if (Version.TryParse(pgvectorVersion, out var ver))
+                    {
+                        supportsHnsw = ver >= new Version(0, 5, 0);
+                    }
+
+                    Console.WriteLine("Creating vector index...");
+                    try
+                    {
+                        if (supportsHnsw)
+                        {
+                            using (var cmd = new NpgsqlCommand(@"
+                                CREATE INDEX IF NOT EXISTS idx_chunks_embedding_hnsw ON DocumentChunks
+                                USING hnsw (Embedding vector_cosine_ops)
+                                WITH (m = 16, ef_construction = 64);", conn))
+                            {
+                                cmd.CommandTimeout = 300;
+                                cmd.ExecuteNonQuery();
+                            }
+                            Console.WriteLine("  HNSW vector index created.");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"  HNSW requires pgvector 0.5+ (you have {pgvectorVersion}). Skipping.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"  [WARN] Vector index creation failed: {ex.Message}");
+                    }
                 }
             }
 
@@ -666,18 +705,18 @@ public class DbService
 
     public (long Docs, long Images, long Chunks) GetCounts()
     {
-        try 
+        try
         {
             using var conn = _dataSource.OpenConnection();
             using var cmdDocs = new NpgsqlCommand("SELECT count(*) FROM ParentDocuments", conn);
-            long docs = (long)cmdDocs.ExecuteScalar();
-            
+            long docs = (long)(cmdDocs.ExecuteScalar() ?? 0L);
+
             using var cmdImages = new NpgsqlCommand("SELECT count(*) FROM DocumentImages", conn);
-            long images = (long)cmdImages.ExecuteScalar();
-            
+            long images = (long)(cmdImages.ExecuteScalar() ?? 0L);
+
             using var cmdChunks = new NpgsqlCommand("SELECT count(*) FROM DocumentChunks", conn);
-            long chunks = (long)cmdChunks.ExecuteScalar();
-            
+            long chunks = (long)(cmdChunks.ExecuteScalar() ?? 0L);
+
             return (docs, images, chunks);
         }
         catch (Exception ex)
@@ -686,6 +725,144 @@ public class DbService
             return (0, 0, 0);
         }
     }
+
+    /// <summary>
+    /// Get detailed stats grouped by DataSet for admin dashboard.
+    /// </summary>
+    public List<DataSetStats> GetDataSetStats()
+    {
+        var results = new List<DataSetStats>();
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            string sql = @"
+                SELECT
+                    COALESCE(s.Name, 'Unknown') as SourceName,
+                    COALESCE(d.Name, 'Unassigned') as DataSetName,
+                    COUNT(DISTINCT p.Id) as DocumentCount,
+                    COALESCE(SUM((p.Metadata->>'PageCount')::int), 0) as TotalPages,
+                    COUNT(DISTINCT i.Id) as ImageCount,
+                    COUNT(DISTINCT c.Id) as ChunkCount,
+                    MIN(p.ProcessedAt) as FirstProcessed,
+                    MAX(p.ProcessedAt) as LastProcessed
+                FROM ParentDocuments p
+                LEFT JOIN DataSets d ON p.DataSetId = d.Id
+                LEFT JOIN Sources s ON d.SourceId = s.Id
+                LEFT JOIN DocumentImages i ON i.ParentId = p.Id
+                LEFT JOIN DocumentChunks c ON c.ParentId = p.Id
+                GROUP BY s.Name, d.Name
+                ORDER BY s.Name, d.Name;
+            ";
+
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.CommandTimeout = 120; // Complex aggregation query
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new DataSetStats
+                {
+                    SourceName = reader.GetString(0),
+                    DataSetName = reader.GetString(1),
+                    DocumentCount = Convert.ToInt64(reader.GetValue(2)),
+                    TotalPages = Convert.ToInt64(reader.GetValue(3)),
+                    ImageCount = Convert.ToInt64(reader.GetValue(4)),
+                    ChunkCount = Convert.ToInt64(reader.GetValue(5)),
+                    FirstProcessed = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+                    LastProcessed = reader.IsDBNull(7) ? null : reader.GetDateTime(7)
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting dataset stats: {ex.Message}");
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Get overall system stats for admin dashboard.
+    /// </summary>
+    public SystemStats GetSystemStats()
+    {
+        var stats = new SystemStats();
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+
+            // Basic counts
+            var (docs, images, chunks) = GetCounts();
+            stats.TotalDocuments = docs;
+            stats.TotalImages = images;
+            stats.TotalChunks = chunks;
+
+            // Total pages
+            using (var cmd = new NpgsqlCommand("SELECT COALESCE(SUM((Metadata->>'PageCount')::int), 0) FROM ParentDocuments;", conn))
+            {
+                stats.TotalPages = (long)(cmd.ExecuteScalar() ?? 0L);
+            }
+
+            // Source count
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM Sources;", conn))
+            {
+                stats.SourceCount = (long)(cmd.ExecuteScalar() ?? 0L);
+            }
+
+            // DataSet count
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM DataSets;", conn))
+            {
+                stats.DataSetCount = (long)(cmd.ExecuteScalar() ?? 0L);
+            }
+
+            // Documents with embeddings
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(DISTINCT ParentId) FROM DocumentChunks WHERE Embedding IS NOT NULL;", conn))
+            {
+                stats.DocumentsWithEmbeddings = (long)(cmd.ExecuteScalar() ?? 0L);
+            }
+
+            // Average pages per document
+            if (stats.TotalDocuments > 0)
+            {
+                stats.AvgPagesPerDocument = (double)stats.TotalPages / stats.TotalDocuments;
+            }
+
+            // Last processed
+            using (var cmd = new NpgsqlCommand("SELECT MAX(ProcessedAt) FROM ParentDocuments;", conn))
+            {
+                var result = cmd.ExecuteScalar();
+                stats.LastProcessedAt = result == DBNull.Value ? null : (DateTime?)result;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting system stats: {ex.Message}");
+        }
+        return stats;
+    }
+
+public class DataSetStats
+{
+    public string SourceName { get; set; } = "";
+    public string DataSetName { get; set; } = "";
+    public long DocumentCount { get; set; }
+    public long TotalPages { get; set; }
+    public long ImageCount { get; set; }
+    public long ChunkCount { get; set; }
+    public DateTime? FirstProcessed { get; set; }
+    public DateTime? LastProcessed { get; set; }
+}
+
+public class SystemStats
+{
+    public long TotalDocuments { get; set; }
+    public long TotalPages { get; set; }
+    public long TotalImages { get; set; }
+    public long TotalChunks { get; set; }
+    public long SourceCount { get; set; }
+    public long DataSetCount { get; set; }
+    public long DocumentsWithEmbeddings { get; set; }
+    public double AvgPagesPerDocument { get; set; }
+    public DateTime? LastProcessedAt { get; set; }
+}
 
     public List<(string ImageType, string ImageSize, string FilePath, int Width, int Height)> GetDocumentImages(string parentFilePath)
     {

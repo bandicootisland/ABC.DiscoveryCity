@@ -66,5 +66,78 @@ namespace ABC.DiscoveryCity.TestApp.Tests
             return sb.ToString();
         }
 
+        public static string TestRedactionDetection(string pdfPath)
+        {
+            var (book, doc) = RunParseBook(pdfPath);
+            var sb = new StringBuilder();
+            sb.AppendLine($"=== Redaction Detection Test ===");
+            sb.AppendLine($"File: {Path.GetFileName(pdfPath)}");
+            sb.AppendLine($"Total Sentences: {book.Sentences.Count}");
+            sb.AppendLine($"Total Words: {book.Words.Count}");
+            
+            // Show artifact diagnostics
+            sb.AppendLine($"\n=== Artifacts Detected by CorpusBuilder ===");
+            sb.AppendLine($"Total Artifacts: {book.Source.Artifacts.Length}");
+            foreach (var art in book.Source.Artifacts.Take(20))
+            {
+                sb.AppendLine($"  - {art.Type} on page {art.PageIndex}: X={art.X:F1}, Y={art.Y:F1}, W={art.Width:F1}, H={art.Height:F1}");
+            }
+            
+            // Raw path analysis
+            sb.AppendLine($"\n=== Raw Path Analysis (First Page) ===");
+            if (doc.Pages.Count > 0)
+            {
+                int pathCount = 0;
+                int filledCount = 0;
+                foreach (var elem in doc.Pages[0].Content)
+                {
+                    if (elem is Telerik.Windows.Documents.Fixed.Model.Graphics.Path path)
+                    {
+                        pathCount++;
+                        if (path.IsFilled) filledCount++;
+                        if (pathCount <= 10)
+                        {
+                            var fillInfo = "null";
+                            if (path.Fill != null)
+                            {
+                                var typeName = path.Fill.GetType().Name;
+                                fillInfo = typeName;
+                                
+                                // Try to get Gray value
+                                var grayProp = path.Fill.GetType().GetProperty("Gray");
+                                if (grayProp != null)
+                                {
+                                    var gVal = grayProp.GetValue(path.Fill);
+                                    fillInfo += $" (Gray={gVal})";
+                                }
+                            }
+                            var bounds = path.Geometry?.Bounds;
+                            var boundsInfo = bounds.HasValue ? $"W={bounds.Value.Width:F0} H={bounds.Value.Height:F0}" : "no bounds";
+                            sb.AppendLine($"  Path {pathCount}: Filled={path.IsFilled}, Fill={fillInfo}, {boundsInfo}");
+                        }
+                    }
+                }
+                sb.AppendLine($"  Total: {pathCount} paths, {filledCount} filled");
+            }
+            
+            // Find all redaction markers in output
+            var redactions = book.Words.Where(w => w.text.StartsWith("[redact.")).ToList();
+            sb.AppendLine($"\n=== Redaction Markers in Output ===");
+            sb.AppendLine($"Redactions Found: {redactions.Count}");
+            
+            foreach (var r in redactions)
+            {
+                sb.AppendLine($"  - {r.text} at word ordinal {r.Ordinal}");
+            }
+            
+            // Show first few sentences for context
+            sb.AppendLine("\n=== Sample Sentences ===");
+            foreach (var sent in book.Sentences.Take(10))
+            {
+                sb.AppendLine(sent.ToString());
+            }
+            
+            return sb.ToString();
+        }
     }
 }

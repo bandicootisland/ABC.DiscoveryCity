@@ -12,12 +12,20 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Globalization;
 
-// Parse command-line arguments
-string? priorityDataSet = args.Length > 0 ? args[0] : "DataSet 9";
+// Parse command-line arguments - accepts multiple DataSet names in order
+string[] priorityDataSets = args.Length > 0 ? args : new[] { "DataSet 9" };
+
+// Quick Test Commands
+if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.OrdinalIgnoreCase))
+{
+    Console.WriteLine(TelerikBookCorpusIngestionTests.TestRedactionDetection(args[1]));
+    return;
+}
 
 Console.WriteLine("Discovery City PDF Processor");
 Console.WriteLine("============================");
-Console.WriteLine($"Priority DataSet: {priorityDataSet}");
+Console.WriteLine($"Priority DataSets: {string.Join(", ", priorityDataSets)}");
+
 
 // Initialize Embedding Service (Ollama)
 Console.WriteLine("Initializing Embedding Service...");
@@ -81,22 +89,27 @@ Console.WriteLine($"Default Root Folder: {rootFolder}");
 // Find DataSet folders
 var subDirs = System.IO.Directory.GetDirectories(rootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
 var targetFolders = new List<string>();
+var addedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-// Prioritize specified DataSet (supports both "DataSet 9" and "DataSet_9" formats)
-string priorityDataSetAlt = priorityDataSet.Replace(" ", "_");
-var priorityFolder = subDirs.FirstOrDefault(d =>
-    d.EndsWith(priorityDataSet, StringComparison.OrdinalIgnoreCase) ||
-    d.EndsWith(priorityDataSetAlt, StringComparison.OrdinalIgnoreCase));
-if (priorityFolder != null)
+// Add priority DataSets in specified order (supports both "DataSet 9" and "DataSet_9" formats)
+foreach (var priorityDataSet in priorityDataSets)
 {
-    Console.WriteLine($"Prioritizing folder: {priorityFolder}");
-    targetFolders.Add(priorityFolder);
+    string priorityDataSetAlt = priorityDataSet.Replace(" ", "_");
+    var priorityFolder = subDirs.FirstOrDefault(d =>
+        d.EndsWith(priorityDataSet, StringComparison.OrdinalIgnoreCase) ||
+        d.EndsWith(priorityDataSetAlt, StringComparison.OrdinalIgnoreCase));
+    if (priorityFolder != null && !addedFolders.Contains(priorityFolder))
+    {
+        Console.WriteLine($"Queued folder: {priorityFolder}");
+        targetFolders.Add(priorityFolder);
+        addedFolders.Add(priorityFolder);
+    }
 }
 
-// Add others
+// Add remaining folders not already queued
 foreach (var dir in subDirs)
 {
-    if (dir != priorityFolder) targetFolders.Add(dir);
+    if (!addedFolders.Contains(dir)) targetFolders.Add(dir);
 }
 
 // Fallback to root if no subdirs
@@ -244,22 +257,27 @@ async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, int? da
         Console.WriteLine($"DB Error: {ex.Message}");
     }
 
-    // 6. Generate page images (page 1, 2, 3)
+    // 6. Generate page images (thumb + full)
     try
     {
-        // Re-use the passed thumbnailService instance
         var pageImages = await thumbnailService.GeneratePageImagesAsync(pdfPath);
-        
+
+        // Extract thumb and full from results (empty string + 0 dimensions = skip)
+        string thumbPath = ""; int thumbW = 0, thumbH = 0;
+        string fullPath = ""; int fullW = 0, fullH = 0;
+
         foreach (var (filePath, width, height) in pageImages)
         {
-            // Map to thumb/full convention: _thumb.jpg = thumb, otherwise = full
-            string imageSize = filePath.Contains("_thumb.") ? "thumb" : "full";
-            
-            // Locking DB access for safety
-            lock (dbService) 
-            {
-                dbService.InsertImage(pdfPath, "jpg", imageSize, filePath, width, height);
-            }
+            if (filePath.Contains("_thumb."))
+                (thumbPath, thumbW, thumbH) = (filePath, width, height);
+            else
+                (fullPath, fullW, fullH) = (filePath, width, height);
+        }
+
+        // Single upsert call - only updates images with W>0 and H>0
+        lock (dbService)
+        {
+            dbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
         }
     }
     catch (Exception ex)

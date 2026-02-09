@@ -1,0 +1,162 @@
+@page "/admin/stats"
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor.Components
+@inject SearchService SearchService
+
+<PageTitle>Admin Stats</PageTitle>
+
+<div class="container-fluid">
+    <h3>Admin Statistics</h3>
+
+    <div class="row mb-3">
+        <div class="col">
+            <TelerikButton OnClick="@RefreshStats">
+                Refresh
+            </TelerikButton>
+        </div>
+    </div>
+
+    @if (IsLoading)
+    {
+        <div class="alert alert-info">Loading statistics...</div>
+    }
+    else if (SystemStats == null)
+    {
+        <div class="alert alert-warning">Unable to load statistics.</div>
+    }
+    else
+    {
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card bg-primary text-white">
+                    <div class="card-body">
+                        <h5 class="card-title">Documents</h5>
+                        <h2>@SystemStats.TotalDocuments.ToString("N0")</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-success text-white">
+                    <div class="card-body">
+                        <h5 class="card-title">Total Pages</h5>
+                        <h2>@SystemStats.TotalPages.ToString("N0")</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-info text-white">
+                    <div class="card-body">
+                        <h5 class="card-title">Images</h5>
+                        <h2>@SystemStats.TotalImages.ToString("N0")</h2>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card bg-warning text-dark">
+                    <div class="card-body">
+                        <h5 class="card-title">Text Chunks</h5>
+                        <h2>@SystemStats.TotalChunks.ToString("N0")</h2>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle text-muted">Sources</h6>
+                        <h4>@SystemStats.SourceCount</h4>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle text-muted">DataSets</h6>
+                        <h4>@SystemStats.DataSetCount</h4>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle text-muted">Avg Pages/Doc</h6>
+                        <h4>@SystemStats.AvgPagesPerDocument.ToString("F1")</h4>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-body">
+                        <h6 class="card-subtitle text-muted">With Embeddings</h6>
+                        <h4>@SystemStats.DocumentsWithEmbeddings.ToString("N0")</h4>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @if (SystemStats.LastProcessedAt.HasValue)
+        {
+            <div class="alert alert-secondary">
+                Last processed: @SystemStats.LastProcessedAt.Value.ToString("yyyy-MM-dd HH:mm:ss")
+            </div>
+        }
+
+        <h4 class="mt-4">DataSet Breakdown</h4>
+
+        <TelerikGrid Data="@DataSetStats"
+                     Pageable="true"
+                     PageSize="20"
+                     Sortable="true"
+                     Resizable="true"
+                     Height="400px">
+            <GridColumns>
+                <GridColumn Field="@nameof(DataSetStatsDto.SourceName)" Title="Source" Width="150px" />
+                <GridColumn Field="@nameof(DataSetStatsDto.DataSetName)" Title="DataSet" Width="150px" />
+                <GridColumn Field="@nameof(DataSetStatsDto.DocumentCount)" Title="Documents" Width="100px" />
+                <GridColumn Field="@nameof(DataSetStatsDto.TotalPages)" Title="Pages" Width="100px" />
+                <GridColumn Field="@nameof(DataSetStatsDto.ImageCount)" Title="Images" Width="100px" />
+                <GridColumn Field="@nameof(DataSetStatsDto.ChunkCount)" Title="Chunks" Width="100px" />
+                <GridColumn Field="@nameof(DataSetStatsDto.FirstProcessed)" Title="First Processed" Width="150px" DisplayFormat="{0:yyyy-MM-dd HH:mm}" />
+                <GridColumn Field="@nameof(DataSetStatsDto.LastProcessed)" Title="Last Processed" Width="150px" DisplayFormat="{0:yyyy-MM-dd HH:mm}" />
+            </GridColumns>
+        </TelerikGrid>
+    }
+</div>
+
+@code {
+    private SystemStatsDto? SystemStats { get; set; }
+    private List<DataSetStatsDto> DataSetStats { get; set; } = new();
+    private bool IsLoading { get; set; } = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshStats();
+    }
+
+    private async Task RefreshStats()
+    {
+        IsLoading = true;
+        StateHasChanged();
+
+        try
+        {
+            var statsTask = SearchService.GetSystemStatsAsync();
+            var dataSetTask = SearchService.GetDataSetStatsAsync();
+
+            await Task.WhenAll(statsTask, dataSetTask);
+
+            SystemStats = await statsTask;
+            DataSetStats = await dataSetTask;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading stats: {ex.Message}");
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+}

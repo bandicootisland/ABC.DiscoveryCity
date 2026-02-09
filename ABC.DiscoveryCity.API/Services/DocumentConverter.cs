@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
-using Telerik.Documents.Fixed.FormatProviders.Image.Skia;
 using Telerik.Documents.Primitives;
-using Telerik.Imaging.Svg;
 using Telerik.Windows.Documents.Common.FormatProviders;
 using Telerik.Windows.Documents.Fixed.FormatProviders.Text;
 using Telerik.Windows.Documents.Fixed.Model;
@@ -109,19 +107,6 @@ namespace ABC.DiscoveryCity.API.Services
 
             Console.WriteLine("Document converted.");
 
-        }
-        public void ExportThumbnails(RadFixedDocument document,string dir)
-        {
-            SkiaImageFormatProvider imageProvider = new SkiaImageFormatProvider();
-
-            foreach (RadFixedPage page in document.Pages)
-            {
-                byte[] resultImage = imageProvider.Export(page, TimeSpan.FromSeconds(30));
-                int pageNumber = document.Pages.IndexOf(page) + 1;                
-                if (!Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-                File.WriteAllBytes(dir + @"\Page_" + pageNumber + ".png", resultImage);
-            }
         }
     }
 }

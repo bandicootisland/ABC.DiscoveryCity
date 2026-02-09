@@ -42,11 +42,13 @@ namespace ABC.DiscoveryCity.TelerikProcessing
         public char[] Content { get; }
         public LayoutToken[] Layout { get; }
         public WordLayers Layers { get; }
+        public ArtifactMarker[] Artifacts { get; }
 
         public BookCorpus(BookRawBuffer buffer, WordLayers layers)
         {
             Content = buffer.Content ?? Array.Empty<char>();
             Layout = buffer.Layout ?? Array.Empty<LayoutToken>();
+            Artifacts = buffer.Artifacts ?? Array.Empty<ArtifactMarker>();
             Layers = layers ?? WordLayers.Empty;
         }
     }
@@ -55,21 +57,20 @@ namespace ABC.DiscoveryCity.TelerikProcessing
     {
         public char[] Content { get; set; } = Array.Empty<char>();
         public LayoutToken[] Layout { get; set; } = Array.Empty<LayoutToken>();
+        public ArtifactMarker[] Artifacts { get; set; } = Array.Empty<ArtifactMarker>();
     }
-
-    // =========================================================================
-    // 2. CORPUS BUILDER (Stream-based Extraction)
-    // =========================================================================
 
     public class CorpusBuilder
     {
         private WordLayers _layers = new WordLayers();
+        private List<ArtifactMarker> _artifacts = new List<ArtifactMarker>();
         private int _wordOrdinalCounter = 1;
         private const int MAX_RECURSION_DEPTH = 10; // Safety Guard
 
         public BookCorpus Process(RadFixedDocument doc)
         {
             _layers = new WordLayers();
+            _artifacts = new List<ArtifactMarker>();
             _wordOrdinalCounter = 1;
 
             var allFragments = new List<ExtractedFragment>(doc.Pages.Count * 300);
@@ -84,7 +85,7 @@ namespace ABC.DiscoveryCity.TelerikProcessing
                 var builder = new SmartFragmentBuilder(allFragments, pageIndex);
 
                 // 2. Recursive Stream Walk
-                ExtractStream(page.Content, builder, 0); // Start at depth 0
+                ExtractStream(page.Content, builder, 0, pageIndex); // Start at depth 0
                 
                 builder.Flush();
 
@@ -126,14 +127,18 @@ namespace ABC.DiscoveryCity.TelerikProcessing
             }
 
             return new BookCorpus(
-                new BookRawBuffer { Content = bigBuffer, Layout = layoutMap },
+                new BookRawBuffer { 
+                    Content = bigBuffer, 
+                    Layout = layoutMap, 
+                    Artifacts = _artifacts.ToArray() 
+                },
                 _layers
             );
         }
 
         // --- RECURSIVE STREAM WALKER (With Depth Guard) ---
 
-        private void ExtractStream(ContentElementCollection elements, SmartFragmentBuilder builder, int recursionDepth)
+        private void ExtractStream(ContentElementCollection elements, SmartFragmentBuilder builder, int recursionDepth, int pageIndex)
         {
             if (recursionDepth > MAX_RECURSION_DEPTH)
             {
@@ -157,15 +162,20 @@ namespace ABC.DiscoveryCity.TelerikProcessing
                 }
                 else if (element is Telerik.Windows.Documents.Fixed.Model.Graphics.Path path)
                 {
+                    // Check if it's a black-filled rectangle (redaction bar)
+                    if (RedactionExtensions.IsBlackFilledRectangle(path))
+                    {
+                        _artifacts.Add(RedactionExtensions.CreateRedactionMarkerFromPath(path, pageIndex));
+                    }
                     builder.Flush();
                 }
                 else if (element is Form form && form.FormSource != null)
                 {
-                    ExtractStream(form.FormSource.Content, builder, recursionDepth + 1);
+                    ExtractStream(form.FormSource.Content, builder, recursionDepth + 1, pageIndex);
                 }
                 else if (element is IContainerElement container)
                 {
-                    ExtractStream(container.Content, builder, recursionDepth + 1);
+                    ExtractStream(container.Content, builder, recursionDepth + 1, pageIndex);
                 }
             }
         }

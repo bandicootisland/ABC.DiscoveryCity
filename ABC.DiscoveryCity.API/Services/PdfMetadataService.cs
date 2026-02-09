@@ -79,12 +79,6 @@ namespace ABC.DiscoveryCity.API.Services
 
                 // 1. Save full text
                 File.WriteAllText(Path.Combine(targetDir, "extracted_text.txt"), fullText);
-
-                // 2. Save thumbnails (images) if document was loaded
-                if (document != null && document.Pages.Count > 0)
-                {
-                    converter.ExportThumbnails(document, Path.Combine(targetDir, "images"));
-                }
             }
             catch (Exception ex)
             {

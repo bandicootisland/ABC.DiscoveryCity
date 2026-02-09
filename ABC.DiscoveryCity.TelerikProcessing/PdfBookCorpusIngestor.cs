@@ -5,6 +5,7 @@ using ABC.WordCity.Words.Common;
 using ABC.WordCity.Words.Common.Layers;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace ABC.DiscoveryCity.TelerikProcessing
 {
@@ -20,12 +21,19 @@ namespace ABC.DiscoveryCity.TelerikProcessing
         private static readonly string StringSpace = " ";
         private WordLayers _corpusLayers = WordLayers.Empty; // Output Layers (Word-based)
         private WordLayers _tokenLayers = WordLayers.Empty;  // Input Layers (Token-based)
+        private ArtifactMarker[] _artifacts = Array.Empty<ArtifactMarker>(); // Detected visual artifacts
+        private LayoutToken[] _layout = Array.Empty<LayoutToken>(); // Current layout for dynamic char width
 
         public void Parse(BookCorpus corpus)
         {
             _tokenLayers = corpus.Layers ?? WordLayers.Empty;
             _corpusLayers = new WordLayers(); // Create new output layers
-            Parse(new BookRawBuffer { Content = corpus.Content, Layout = corpus.Layout });
+            _artifacts = corpus.Artifacts ?? Array.Empty<ArtifactMarker>();
+            Parse(new BookRawBuffer { 
+                Content = corpus.Content, 
+                Layout = corpus.Layout,
+                Artifacts = _artifacts
+            });
         }
 
         public void Parse(BookRawBuffer buffer)
@@ -36,6 +44,8 @@ namespace ABC.DiscoveryCity.TelerikProcessing
             _wordOrdinal = 1;
             _sentenceOrdinal = 1;
             _currentSentenceData = new SentenceData { Ordinal = _sentenceOrdinal, Layers = _corpusLayers };
+            _artifacts = buffer.Artifacts ?? Array.Empty<ArtifactMarker>();
+            _layout = buffer.Layout ?? Array.Empty<LayoutToken>();
 
             ReadOnlyMemory<char> allText = new ReadOnlyMemory<char>(buffer.Content);
 
@@ -62,7 +72,9 @@ namespace ABC.DiscoveryCity.TelerikProcessing
                 if (i > 0)
                 {
                     LayoutToken prev = buffer.Layout[i - 1];
-                    DetectFormattingAndSpace(prev, curr);
+                    // Get previous token text for email context detection
+                    string prevTokenText = new string(allText.Slice(prev.TextOffset, prev.TextLength).Span);
+                    DetectFormattingAndSpace(prev, curr, i, prevTokenText);
                 }
 
                 ReadOnlyMemory<char> tokenText = allText.Slice(curr.TextOffset, curr.TextLength);
@@ -72,7 +84,7 @@ namespace ABC.DiscoveryCity.TelerikProcessing
             CloseSentence(null);
         }
 
-        private void DetectFormattingAndSpace(LayoutToken prev, LayoutToken curr)
+        private void DetectFormattingAndSpace(LayoutToken prev, LayoutToken curr, int tokenIndex, string? previousTokenText)
         {
             // [Layout Logic Same as Previous]
             bool isPageBreak = prev.PageIndex != curr.PageIndex;
@@ -105,7 +117,52 @@ namespace ABC.DiscoveryCity.TelerikProcessing
             {
                 double prevRight = prev.X + prev.Width;
                 double gap = curr.X - prevRight;
-                if (gap > (curr.FontSize * 0.2)) addSpace = true;
+                
+                // Check for email context to use lower threshold
+                string prevText = previousTokenText ?? "";
+                bool isEmailContext = RedactionExtensions.IsEmailContext(prevText);
+                
+                // Check for redaction based on gap (with email context sensitivity)
+                if (RedactionExtensions.IsLikelyRedaction(gap, curr.FontSize, isEmailContext))
+                {
+                    bool hasRedactionArtifacts = _artifacts.Length > 0 && 
+                        _artifacts.Any(a => a.Type == ArtifactType.Redaction);
+                    
+                    if (hasRedactionArtifacts)
+                    {
+                        // We have detected redaction bars - require overlap for confirmation
+                        var overlappingArtifact = RedactionExtensions.FindOverlappingArtifact(
+                            prevRight, curr.X, curr.Y, curr.PageIndex, _artifacts);
+                        
+                        if (overlappingArtifact.HasValue)
+                        {
+                            int charCount = RedactionExtensions.EstimateRedactedCharCount(gap, curr.FontSize, _layout, tokenIndex);
+                            string marker = isEmailContext 
+                                ? RedactionExtensions.CreateRedactionMarker(charCount, "email") 
+                                : RedactionExtensions.CreateRedactionMarker(charCount);
+                            AddWord(marker);
+                            addSpace = true;
+                        }
+                        else if (gap > (curr.FontSize * 0.2))
+                        {
+                            addSpace = true;
+                        }
+                    }
+                    else
+                    {
+                        // No redaction artifacts detected - use gap-based heuristic only
+                        int charCount = RedactionExtensions.EstimateRedactedCharCount(gap, curr.FontSize, _layout, tokenIndex);
+                        string marker = isEmailContext 
+                            ? RedactionExtensions.CreateRedactionMarker(charCount, "email") 
+                            : RedactionExtensions.CreateRedactionMarker(charCount);
+                        AddWord(marker);
+                        addSpace = true;
+                    }
+                }
+                else if (gap > (curr.FontSize * 0.2))
+                {
+                    addSpace = true;
+                }
             }
 
             if (addSpace && _currentSentenceBuffer.Count > 0)
