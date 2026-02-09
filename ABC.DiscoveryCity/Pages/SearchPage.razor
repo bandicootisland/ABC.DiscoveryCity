@@ -20,9 +20,13 @@
                 </div>
             </form>
         </div>
+        <div class="col-md-2">
+            <TelerikCheckBox @bind-Value="@ExactMatchOnly" Id="exactMatch" />
+            <label for="exactMatch" class="ms-1" title="Only return documents containing the exact search text">Exact Match</label>
+        </div>
         <div class="col-md-3">
-            <TelerikDropDownList Data="@AvailableSources" 
-                                 @bind-Value="@SelectedSource" 
+            <TelerikDropDownList Data="@AvailableSources"
+                                 @bind-Value="@SelectedSource"
                                  DefaultText="All Sources"
                                  Width="100%"
                                  OnChange="@OnSourceFilterChanged" />
@@ -114,7 +118,8 @@
     private string SearchQuery { get; set; } = "";
     private List<SearchResultDto>? SearchResults { get; set; }
     private bool IsSearching { get; set; } = false;
-    
+    private bool ExactMatchOnly { get; set; } = false;
+
     // Source filter
     private List<string> AvailableSources { get; set; } = new();
     private string? SelectedSource { get; set; }
@@ -169,13 +174,7 @@
 
         try
         {
-            SearchResults = await SearchService.SearchAsync(SearchQuery);
-            if (SearchResults.Count == 0)
-            {
-                // Optional: Check if API is actually reachable or if it's just no results
-                // For now, we rely on the service returning empty list on error, 
-                // but we could try to expose the error message from service.
-            }
+            SearchResults = await SearchService.SearchAsync(SearchQuery, 20, ExactMatchOnly);
         }
         catch (Exception ex)
         {

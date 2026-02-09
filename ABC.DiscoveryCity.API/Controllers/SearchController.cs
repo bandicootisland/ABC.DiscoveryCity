@@ -15,14 +15,16 @@ public class SearchController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> Search([FromQuery] string query, [FromQuery] int limit = 20)
+    public async Task<IActionResult> Search([FromQuery] string query, [FromQuery] int limit = 20, [FromQuery] bool exactMatch = false)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
             return BadRequest("Query is required.");
         }
 
-        var results = await _dbService.SearchSimilarAsync(query, limit);
+        var results = exactMatch
+            ? _dbService.SearchExactMatch(query, limit)
+            : await _dbService.SearchSimilarAsync(query, limit);
         
         // Map to DTO for frontend
         var dtos = results.Select(r => new SearchResultDto

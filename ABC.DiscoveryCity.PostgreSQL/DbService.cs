@@ -584,34 +584,37 @@ public class DbService
         var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
 
         // Vector similarity search using cosine distance
+        // Find best matching chunk for ranking, but return ALL chunks combined for display
         string sql = @"
             WITH ranked_chunks AS (
                 SELECT
                     c.ParentId,
-                    c.TextContent,
                     c.Embedding <=> @queryVector AS distance,
                     ROW_NUMBER() OVER (PARTITION BY c.ParentId ORDER BY c.Embedding <=> @queryVector) as rn
                 FROM DocumentChunks c
                 WHERE c.Embedding IS NOT NULL
                 ORDER BY c.Embedding <=> @queryVector
                 LIMIT @limit * 3
+            ),
+            best_matches AS (
+                SELECT ParentId, distance
+                FROM ranked_chunks
+                WHERE rn = 1
             )
-            SELECT DISTINCT ON (p.Id)
-                   p.FilePath,
-                   rc.TextContent,
-                   rc.distance,
+            SELECT p.FilePath,
+                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                   bm.distance,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
                    s.Name as SourceName,
                    d.Name as DataSetName
-            FROM ranked_chunks rc
-            JOIN ParentDocuments p ON rc.ParentId = p.Id
+            FROM best_matches bm
+            JOIN ParentDocuments p ON bm.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
             LEFT JOIN Sources s ON d.SourceId = s.Id
-            WHERE rc.rn = 1
-            ORDER BY p.Id, rc.distance
+            ORDER BY bm.distance
             LIMIT @limit;
         ";
 
@@ -643,25 +646,32 @@ public class DbService
         var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
 
         // Full-text search using PostgreSQL tsvector
+        // Find best matching chunk for ranking, but return ALL chunks combined for display
         string sql = @"
-            SELECT DISTINCT ON (p.Id)
-                   p.FilePath,
-                   c.TextContent,
-                   ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query)) as score,
+            WITH matching_docs AS (
+                SELECT DISTINCT c.ParentId,
+                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
+                FROM DocumentChunks c
+                WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                   OR c.TextContent ILIKE @pattern
+                GROUP BY c.ParentId
+                ORDER BY score DESC
+                LIMIT @limit
+            )
+            SELECT p.FilePath,
+                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                   md.score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
                    s.Name as SourceName,
                    d.Name as DataSetName
-            FROM DocumentChunks c
-            JOIN ParentDocuments p ON c.ParentId = p.Id
+            FROM matching_docs md
+            JOIN ParentDocuments p ON md.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
             LEFT JOIN Sources s ON d.SourceId = s.Id
-            WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
-               OR c.TextContent ILIKE @pattern
-            ORDER BY p.Id, score DESC
-            LIMIT @limit;
+            ORDER BY md.score DESC;
         ";
 
         using var cmd = new NpgsqlCommand(sql, conn);
@@ -688,6 +698,68 @@ public class DbService
         return results;
     }
 
+    /// <summary>
+    /// Exact text match search - only returns documents containing the exact query string
+    /// </summary>
+    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName)> SearchExactMatch(string query, int limit = 20)
+    {
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+
+            // Exact text match - only returns docs where the chunk contains the exact query string
+            string sql = @"
+                WITH matching_docs AS (
+                    SELECT DISTINCT c.ParentId
+                    FROM DocumentChunks c
+                    WHERE c.TextContent ILIKE @pattern
+                    LIMIT @limit
+                )
+                SELECT p.FilePath,
+                       (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                       1.0 as score,
+                       (p.Metadata->>'DeducedDate')::timestamp as DocDate,
+                       (p.Metadata->>'PageCount')::int as PageCount,
+                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
+                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
+                       s.Name as SourceName,
+                       d.Name as DataSetName
+                FROM matching_docs md
+                JOIN ParentDocuments p ON md.ParentId = p.Id
+                LEFT JOIN DataSets d ON p.DataSetId = d.Id
+                LEFT JOIN Sources s ON d.SourceId = s.Id;
+            ";
+
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("pattern", $"%{query}%");
+            cmd.Parameters.AddWithValue("limit", limit);
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add((
+                    reader.GetString(0),
+                    reader.IsDBNull(1) ? "No text content" : reader.GetString(1),
+                    reader.GetDouble(2),
+                    reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                    reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8)
+                ));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Exact match search failed: {ex.Message}");
+        }
+
+        return results;
+    }
+
     public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName)> GetRecentDocuments(int limit = 10)
     {
         var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
@@ -696,7 +768,7 @@ public class DbService
             using var conn = _dataSource.OpenConnection();
             string sql = @"
                 SELECT p.FilePath,
-                       (SELECT c.TextContent FROM DocumentChunks c WHERE c.ParentId = p.Id ORDER BY c.ChunkIndex LIMIT 1) as Text,
+                       (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as Text,
                        0.0 as Distance,
                        (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (p.Metadata->>'PageCount')::int as PageCount,

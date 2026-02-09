@@ -11,11 +11,12 @@ public class SearchService
         _httpClient = httpClient;
     }
 
-    public async Task<List<SearchResultDto>> SearchAsync(string query, int limit = 20)
+    public async Task<List<SearchResultDto>> SearchAsync(string query, int limit = 20, bool exactMatch = false)
     {
         try
         {
-            var response = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>($"api/search?query={Uri.EscapeDataString(query)}&limit={limit}");
+            var url = $"api/search?query={Uri.EscapeDataString(query)}&limit={limit}&exactMatch={exactMatch}";
+            var response = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>(url);
             return response ?? new List<SearchResultDto>();
         }
         catch (Exception ex)
