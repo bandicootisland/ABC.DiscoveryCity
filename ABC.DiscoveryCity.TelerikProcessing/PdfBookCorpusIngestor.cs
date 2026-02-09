@@ -58,8 +58,10 @@ namespace ABC.DiscoveryCity.TelerikProcessing
                 var imgMeta = _tokenLayers.GetImage(i);
                 if (!imgMeta.IsEmpty)
                 {
-                    // Create a dedicated Word for the image
-                    AddWord("[IMAGE]");
+                    // Use the token text which contains DSL format [image.(w,h)] from SmartFragmentBuilder
+                    string imageMarker = new string(allText.Slice(curr.TextOffset, curr.TextLength).Span);
+                    if (string.IsNullOrEmpty(imageMarker)) imageMarker = "[image.(0,0)]";
+                    AddWord(imageMarker);
                     if (ResultWords.Count > 0)
                     {
                         var w = ResultWords[ResultWords.Count - 1];

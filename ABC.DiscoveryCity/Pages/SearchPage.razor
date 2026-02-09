@@ -3,6 +3,7 @@
 @using Telerik.Blazor
 @using Telerik.Blazor.Components
 @using Telerik.Blazor.Components.Common.Icon
+@using static ABC.DiscoveryCity.Services.TextFormatExtensions
 @inject SearchService SearchService
 
 <PageTitle>Discovery Search</PageTitle>
@@ -77,8 +78,9 @@
                     <Template>
                         @{
                             var item = context as SearchResultDto;
-                            var preview = item?.Text?.Length > 150 ? item.Text.Substring(0, 150) + "..." : item?.Text;
-                            <span title="@item?.Text">@preview</span>
+                            var preview = item?.Text?.Length > 300 ? item.Text.Substring(0, 300) + "..." : item?.Text;
+                            var formatted = preview.FormatWithSentenceBreaks();
+                            <span title="@item?.Text">@((MarkupString)formatted)</span>
                         }
                     </Template>
                 </GridColumn>

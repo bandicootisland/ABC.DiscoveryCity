@@ -12,13 +12,44 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Globalization;
 
-// Parse command-line arguments - accepts multiple DataSet names in order
-string[] priorityDataSets = args.Length > 0 ? args : new[] { "DataSet 9" };
+// Parse command-line arguments
+bool resetDb = args.Any(a => a.Equals("--reset-db", StringComparison.OrdinalIgnoreCase));
+int limitFiles = 0;
+for (int i = 0; i < args.Length; i++)
+{
+    if (args[i].Equals("--limit", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+    {
+        int.TryParse(args[i + 1], out limitFiles);
+    }
+}
+
+string[] priorityDataSets = args.Where(a => !a.StartsWith("--") && int.TryParse(a, out _) == false).ToArray();
+if (priorityDataSets.Length == 0) priorityDataSets = new[] { "DataSet 9" };
 
 // Quick Test Commands
 if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.OrdinalIgnoreCase))
 {
     Console.WriteLine(TelerikBookCorpusIngestionTests.TestRedactionDetection(args[1]));
+    return;
+}
+
+if (args.Any(a => a.Equals("--stats", StringComparison.OrdinalIgnoreCase)))
+{
+    Console.WriteLine("Checking Database Stats...");
+    try 
+    {
+        var stats = new DbService(null).GetSystemStats();
+        Console.WriteLine($"\n=== DATABASE STATE ===");
+        Console.WriteLine($"Documents: {stats.TotalDocuments}");
+        Console.WriteLine($"Images:    {stats.TotalImages}");
+        Console.WriteLine($"Chunks:    {stats.TotalChunks}");
+        Console.WriteLine("======================\n");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"\n[ERROR] Database check failed: {ex.Message}");
+        Console.WriteLine("(Tables likely do not exist or connection failed)\n");
+    }
     return;
 }
 
@@ -46,6 +77,11 @@ catch (Exception ex)
 Console.WriteLine("Initializing Database...");
 try 
 { 
+    if (resetDb)
+    {
+        new DbService(embeddingService).ResetDb();
+    }
+    
     new DbService(embeddingService).InitDb(); 
     Console.WriteLine("Database initialized successfully.");
 } 
@@ -58,7 +94,7 @@ catch (Exception ex)
 
 // Initialize Services
 using var thumbnailService = new ThumbnailService(); // No logger needed
-await thumbnailService.InitializeAsync(headless: false); // Use non-headless for better rendering
+await thumbnailService.InitializeAsync(headless: false, instancecount: 20); // Use non-headless for better rendering
 var dbService = new DbService(embeddingService);
 
 //await VerifyDocumentData.Run(dbService);
@@ -76,9 +112,10 @@ if (RUN_VERIFICATION)
 }
 
 // BATCH TEST LIMIT - set to 0 for unlimited, or a number to limit processing
-const int MAX_FILES = 0;
+int MAX_FILES = limitFiles;
 int totalFiles = 0;
-int processedFiles = 0; 
+int processedFiles = 0;
+var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>(); 
 
 
 
@@ -174,6 +211,14 @@ foreach (var folder in targetFolders)
 
 Console.WriteLine($"\nDone! Processed {processedFiles}/{totalFiles} files.");
 
+// Wait for all background image tasks to complete
+if (pendingImageTasks.Count > 0)
+{
+    Console.WriteLine($"Waiting for {pendingImageTasks.Count} image tasks to complete...");
+    await Task.WhenAll(pendingImageTasks);
+    Console.WriteLine("All image tasks completed.");
+}
+
 async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, int? dataSetId = null, bool inspectMode = false)
 {
     // 1. Parse PDF
@@ -225,10 +270,13 @@ async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, int? da
         foreach (var line in input)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
-            
+
             // 1. Remove/Replace Unicodes
             string s = line.Replace("\u25A0", "-").Replace("\"", "'");
-                        
+
+            // 2. Add newline before EFTA file IDs (e.g., EFTA00039885)
+            s = Regex.Replace(s, @"(EFTA\d{8,})", "\n$1");
+
             // Add newline before sentence number for better readability
             cleaned.Add($"\n[{i++}] {s.Trim()}");
         }
@@ -247,43 +295,50 @@ async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, int? da
     System.IO.File.WriteAllText(jsonPath, json);
     Console.WriteLine($"Saved JSON: {jsonPath}");
 
-    // 5. Insert into Postgres
-    try 
+    // 5. Insert into Postgres (lock for thread-safety with parallel processing)
+    try
     {
-        dbService.InsertDocument(pdfPath, metadata, dataSetId); 
+        lock (dbService)
+        {
+            dbService.InsertDocument(pdfPath, metadata, dataSetId);
+        }
     }
-    catch(Exception ex) 
+    catch(Exception ex)
     {
         Console.WriteLine($"DB Error: {ex.Message}");
     }
 
-    // 6. Generate page images (thumb + full)
-    try
+    // 6. Generate page images (thumb + full) - fire-and-forget, don't block document processing
+    var imageTask = Task.Run(async () =>
     {
-        var pageImages = await thumbnailService.GeneratePageImagesAsync(pdfPath);
-
-        // Extract thumb and full from results (empty string + 0 dimensions = skip)
-        string thumbPath = ""; int thumbW = 0, thumbH = 0;
-        string fullPath = ""; int fullW = 0, fullH = 0;
-
-        foreach (var (filePath, width, height) in pageImages)
+        try
         {
-            if (filePath.Contains("_thumb."))
-                (thumbPath, thumbW, thumbH) = (filePath, width, height);
-            else
-                (fullPath, fullW, fullH) = (filePath, width, height);
-        }
+            var pageImages = await thumbnailService.GeneratePageImagesAsync(pdfPath);
 
-        // Single upsert call - only updates images with W>0 and H>0
-        lock (dbService)
-        {
-            dbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+            // Extract thumb and full from results (empty string + 0 dimensions = skip)
+            string thumbPath = ""; int thumbW = 0, thumbH = 0;
+            string fullPath = ""; int fullW = 0, fullH = 0;
+
+            foreach (var (filePath, width, height) in pageImages)
+            {
+                if (filePath.Contains("_thumb."))
+                    (thumbPath, thumbW, thumbH) = (filePath, width, height);
+                else
+                    (fullPath, fullW, fullH) = (filePath, width, height);
+            }
+
+            // Single upsert call - only updates images with W>0 and H>0
+            lock (dbService)
+            {
+                dbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+            }
         }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"  [WARN] Page image error: {ex.Message}");
-    }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [WARN] Page image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
+        }
+    });
+    pendingImageTasks.Add(imageTask);
 }
 
 

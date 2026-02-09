@@ -209,16 +209,16 @@ namespace ABC.DiscoveryCity.TelerikProcessing
         }
 
         /// <summary>
-        /// Creates the redaction marker string in the format [redact.(N)].
+        /// Creates the redaction marker string in the format [redact.char(N)].
         /// </summary>
         public static string CreateRedactionMarker(int charCount)
-            => $"[redact.({charCount})]";
+            => $"[redact.char({charCount})]";
 
         /// <summary>
-        /// Creates the redaction marker with context, e.g. [redact.email(N)] for email fields.
+        /// Creates the redaction marker with context, e.g. [redact.email.char(N)] for email fields.
         /// </summary>
         public static string CreateRedactionMarker(int charCount, string contextType)
-            => $"[redact.{contextType}({charCount})]";
+            => $"[redact.{contextType}.char({charCount})]";
 
         /// <summary>
         /// Full analysis: checks if gap is a redaction and returns the marker if so.

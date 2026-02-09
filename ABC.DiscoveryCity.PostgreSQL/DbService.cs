@@ -275,6 +275,33 @@ public class DbService
     }
 
     /// <summary>
+    /// Drops all tables to provide a clean slate. 
+    /// </summary>
+    public void ResetDb()
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            Console.WriteLine("Resetting database - truncating all tables...");
+
+            // Truncate all tables, reset identity sequences
+            using (var cmd = new NpgsqlCommand(
+                "TRUNCATE DocumentImages, DocumentChunks, ParentDocuments, DataSets, Sources RESTART IDENTITY CASCADE;",
+                conn))
+            {
+                cmd.ExecuteNonQuery();
+            }
+
+            Console.WriteLine("All tables truncated. Schema and indexes preserved.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error resetting DB: {ex.Message}");
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Get or create a Source by name. Returns the Source Id.
     /// </summary>
     public int GetOrCreateSource(string name, string baseFilePath, string? url = null)
@@ -320,8 +347,8 @@ public class DbService
 
             try
             {
-                // 1. Upsert Parent Document
-                string json = JsonSerializer.Serialize(metadata);
+                // 1. Upsert Parent Document (store metadata WITHOUT Text - text goes to DocumentChunks)
+                string json = JsonSerializer.Serialize(metadata.ToStorageDto());
                 int parentId = 0;
 
                 string parentSql = @"
@@ -354,10 +381,16 @@ public class DbService
                 // 3. Chunk and Insert
                 // Strategy: Smart Chunking (max 2048 chars or 25 sentences)
                 var sentences = metadata.Text ?? new List<string>();
-                
+
+                if (sentences.Count == 0)
+                {
+                    Console.WriteLine($"  [WARN] No sentences to chunk for {filePath}");
+                }
+
                 var currentChunk = new List<string>();
                 int currentLength = 0;
                 int chunkIndex = 0; // Use a local counter
+                int totalChunksCreated = 0;
 
                 // Local function to write chunk
                 void WriteChunk()
@@ -398,6 +431,7 @@ public class DbService
                     }
 
                     chunkIndex++; // Increment for next chunk
+                    totalChunksCreated++;
                     currentChunk.Clear();
                     currentLength = 0;
                 }
@@ -421,7 +455,7 @@ public class DbService
                 WriteChunk();
 
                 trans.Commit();
-                Console.WriteLine($"Saved to DB: {filePath} with {Math.Ceiling((double)sentences.Count/25.0)} chunks.");
+                Console.WriteLine($"Saved to DB: {filePath} with {totalChunksCreated} chunks (from {sentences.Count} sentences).");
             }
             catch
             {

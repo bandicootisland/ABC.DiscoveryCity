@@ -12,6 +12,7 @@ namespace ABC.DiscoveryCity.TelerikProcessing
         public double X;
         public double Y;
         public double Width;
+        public double Height;
         public double FontSize;
         public int PageIndex;
         public bool IsImage;
@@ -182,13 +183,17 @@ namespace ABC.DiscoveryCity.TelerikProcessing
         public void AddImage(Image img)
         {
             Flush(isLineBreak: true);
+            // DSL format: [image.(width,height)]
+            int w = (int)Math.Round(img.Width);
+            int h = (int)Math.Round(img.Height);
             _targetList.Add(new ExtractedFragment
             {
-                Text = "[IMAGE]",
+                Text = $"[image.({w},{h})]",
                 IsImage = true,
                 X = img.Position.Matrix.OffsetX,
                 Y = img.Position.Matrix.OffsetY,
                 Width = img.Width,
+                Height = img.Height,
                 FontSize = 0,
                 PageIndex = _pageIndex
             });

@@ -155,8 +155,6 @@ namespace ABC.DiscoveryCity.TelerikProcessing
                 }
                 else if (element is Image image)
                 {
-                    image.Height = 0;
-                    image.Width = 0;
                     builder.Flush();
                     builder.AddImage(image);
                 }
