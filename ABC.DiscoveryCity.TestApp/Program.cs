@@ -14,6 +14,10 @@ using System.Globalization;
 
 // Parse command-line arguments
 bool resetDb = args.Any(a => a.Equals("--reset-db", StringComparison.OrdinalIgnoreCase));
+bool cleanFiles = args.Any(a => a.Equals("--clean", StringComparison.OrdinalIgnoreCase));
+bool headless = args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgnoreCase));
+bool renderDirect = args.Any(a => a.Equals("--render-direct", StringComparison.OrdinalIgnoreCase));
+bool noImages = args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase));
 int limitFiles = 0;
 for (int i = 0; i < args.Length; i++)
 {
@@ -93,8 +97,24 @@ catch (Exception ex)
 }
 
 // Initialize Services
-using var thumbnailService = new ThumbnailService(); // No logger needed
-await thumbnailService.InitializeAsync(headless: false, instancecount: 20); // Use non-headless for better rendering
+ThumbnailService? thumbnailService = null;
+TelerikThumbnailService? telerikThumbnailService = null;
+
+if (noImages)
+{
+    Console.WriteLine("Skipping image generation (--no-images flag)");
+}
+else if (renderDirect)
+{
+    Console.WriteLine("Using Telerik direct rendering for thumbnails (no browser)");
+    telerikThumbnailService = new TelerikThumbnailService();
+}
+else
+{
+    Console.WriteLine("Using Playwright browser for thumbnails");
+    thumbnailService = new ThumbnailService();
+    await thumbnailService.InitializeAsync(headless: headless, instancecount: 20);
+}
 var dbService = new DbService(embeddingService);
 
 //await VerifyDocumentData.Run(dbService);
@@ -166,6 +186,13 @@ foreach (var folder in targetFolders)
     Console.WriteLine($"Created/Found DataSet: {dataSetName} (Id: {dataSetId}) for Source: {sourceName}");
 
     Console.WriteLine($"Scanning folder: {folder}");
+
+    // Clean up generated files if --clean flag is set
+    if (cleanFiles)
+    {
+        CleanGeneratedFiles(folder);
+    }
+
     var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories);
 
     // Use Parallel.ForEachAsync to process files concurrently
@@ -188,7 +215,7 @@ foreach (var folder in targetFolders)
             int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
             Console.WriteLine($"[{currentCount}] Processing: {System.IO.Path.GetFileName(pdfPath)}");
             
-            await ProcessPdf(pdfPath, thumbnailService, dataSetId);
+            await ProcessPdf(pdfPath, thumbnailService, telerikThumbnailService, dataSetId);
             
             // Mark as done
             System.IO.File.Create(doneFile).Dispose();
@@ -219,7 +246,7 @@ if (pendingImageTasks.Count > 0)
     Console.WriteLine("All image tasks completed.");
 }
 
-async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, int? dataSetId = null, bool inspectMode = false)
+async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, TelerikThumbnailService? telerikThumbnailService, int? dataSetId = null, bool inspectMode = false)
 {
     // 1. Parse PDF
     (var digitalBook, var telerikDoc) = TelerikBookCorpusIngestionTests.RunParseBook(pdfPath);
@@ -308,37 +335,62 @@ async Task ProcessPdf(string pdfPath, ThumbnailService thumbnailService, int? da
         Console.WriteLine($"DB Error: {ex.Message}");
     }
 
-    // 6. Generate page images (thumb + full) - fire-and-forget, don't block document processing
-    var imageTask = Task.Run(async () =>
+    // 6. Generate page images (thumb + full) - skip if --no-images flag is set
+    if (!noImages)
     {
-        try
+        var imageTask = Task.Run(async () =>
         {
-            var pageImages = await thumbnailService.GeneratePageImagesAsync(pdfPath);
-
-            // Extract thumb and full from results (empty string + 0 dimensions = skip)
-            string thumbPath = ""; int thumbW = 0, thumbH = 0;
-            string fullPath = ""; int fullW = 0, fullH = 0;
-
-            foreach (var (filePath, width, height) in pageImages)
+            try
             {
-                if (filePath.Contains("_thumb."))
-                    (thumbPath, thumbW, thumbH) = (filePath, width, height);
-                else
-                    (fullPath, fullW, fullH) = (filePath, width, height);
-            }
+                string thumbPath = ""; int thumbW = 0, thumbH = 0;
+                string fullPath = ""; int fullW = 0, fullH = 0;
 
-            // Single upsert call - only updates images with W>0 and H>0
-            lock (dbService)
-            {
-                dbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+                if (telerikThumbnailService != null)
+                {
+                    // Use Telerik direct rendering (no browser needed)
+                    var (tPath, fPath) = telerikThumbnailService.GenerateThumbnails(telerikDoc, pdfPath);
+
+                    if (!string.IsNullOrEmpty(tPath) && System.IO.File.Exists(tPath))
+                    {
+                        using var img = SixLabors.ImageSharp.Image.Load(tPath);
+                        (thumbPath, thumbW, thumbH) = (tPath, img.Width, img.Height);
+                    }
+                    if (!string.IsNullOrEmpty(fPath) && System.IO.File.Exists(fPath))
+                    {
+                        using var img = SixLabors.ImageSharp.Image.Load(fPath);
+                        (fullPath, fullW, fullH) = (fPath, img.Width, img.Height);
+                    }
+                }
+                else if (thumbnailService != null)
+                {
+                    // Use Playwright browser rendering
+                    var pageImages = await thumbnailService.GeneratePageImagesAsync(pdfPath);
+
+                    foreach (var (filePath, width, height) in pageImages)
+                    {
+                        if (filePath.Contains("_thumb."))
+                            (thumbPath, thumbW, thumbH) = (filePath, width, height);
+                        else
+                            (fullPath, fullW, fullH) = (filePath, width, height);
+                    }
+                }
+
+                // Single upsert call - only updates images with W>0 and H>0
+                if (!string.IsNullOrEmpty(thumbPath) || !string.IsNullOrEmpty(fullPath))
+                {
+                    lock (dbService)
+                    {
+                        dbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+                    }
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  [WARN] Page image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
-        }
-    });
-    pendingImageTasks.Add(imageTask);
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [WARN] Page image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
+            }
+        });
+        pendingImageTasks.Add(imageTask);
+    }
 }
 
 
@@ -447,6 +499,28 @@ string DeduceTitleFromText(string text, string filename)
     }
     
     return filename; // Default
+}
+
+void CleanGeneratedFiles(string folder)
+{
+    var extensions = new[] { "*.jpg", "*.done", "*.json", "*.html" };
+    int count = 0;
+
+    foreach (var ext in extensions)
+    {
+        var files = Directory.GetFiles(folder, ext, SearchOption.AllDirectories);
+        foreach (var file in files)
+        {
+            try
+            {
+                File.Delete(file);
+                count++;
+            }
+            catch { /* ignore locked files */ }
+        }
+    }
+
+    Console.WriteLine($"  Cleaned {count} generated files (.jpg, .done, .json, .html)");
 }
 
 // Helper extension

@@ -15,7 +15,7 @@ public class DbService
     private static readonly object _mapLock = new();
 
     // Default connection string for convenience, but allows override
-    private const string DefaultConnectionString = "Host=127.0.0.1;Port=5435;Username=discovery_user;Password=discovery_password;Database=DiscoveryCity";
+    private const string DefaultConnectionString = "Host=192.168.1.114;Port=5435;Username=discovery_user;Password=discovery_password;Database=DiscoveryCity";
 
     public DbService(IEmbeddingService? embeddingService = null, string? connectionString = null)
     {
