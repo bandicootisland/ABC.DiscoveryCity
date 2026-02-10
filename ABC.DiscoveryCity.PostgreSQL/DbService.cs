@@ -15,7 +15,7 @@ public class DbService
     private static readonly object _mapLock = new();
 
     // Default connection string for convenience, but allows override
-    private const string DefaultConnectionString = "Host=192.168.1.114;Port=5435;Username=discovery_user;Password=discovery_password;Database=DiscoveryCity";
+    private const string DefaultConnectionString = "Host=192.168.1.114;Port=5435;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo;Database=discoverycity";
 
     public DbService(IEmbeddingService? embeddingService = null, string? connectionString = null)
     {
@@ -543,6 +543,26 @@ public class DbService
         catch (Exception ex)
         {
             Console.WriteLine($"  [WARN] UpsertDocumentImages failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Check if a document already exists in the database by file path.
+    /// Used for duplicate detection in distributed processing.
+    /// </summary>
+    public bool DocumentExists(string filePath)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand("SELECT 1 FROM parentdocuments WHERE filepath = @path LIMIT 1", conn);
+            cmd.Parameters.AddWithValue("path", filePath);
+            var result = cmd.ExecuteScalar();
+            return result != null;
+        }
+        catch
+        {
+            return false; // On error, allow processing (will fail on insert if duplicate)
         }
     }
 

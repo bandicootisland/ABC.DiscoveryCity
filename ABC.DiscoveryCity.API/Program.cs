@@ -39,15 +39,18 @@ var elasticSettings = new ElasticsearchClientSettings(new Uri(elasticUrl))
     .DefaultIndex("ol_editions");
 builder.Services.AddSingleton(new ElasticsearchClient(elasticSettings));
 
-builder.Services.AddScoped<IImportService, ImportService>();
-builder.Services.AddSingleton<ITorrentService, TorrentService>();
+
+
 builder.Services.AddSingleton<PdfMetadataService>();
 builder.Services.AddSingleton<ABC.PdfProcessing.Syncfusion.PdfMetaDataSyncFusionService>();
 
 // Postgres & Embeddings
 builder.Services.AddScoped<ABC.DiscoveryCity.Embeddings.IEmbeddingService, ABC.DiscoveryCity.Embeddings.OllamaEmbeddingService>();
 // Use scoped for DbService as it creates connections
-builder.Services.AddScoped<ABC.DiscoveryCity.PostgreSQL.DbService>(sp => 
+var configConnStartup = builder.Configuration.GetConnectionString("DiscoveryCityDB");
+Console.WriteLine($"[API STARTUP] Connection string from config: {configConnStartup ?? "NULL - using default"}");
+
+builder.Services.AddScoped<ABC.DiscoveryCity.PostgreSQL.DbService>(sp =>
 {
     var embeddingService = sp.GetRequiredService<ABC.DiscoveryCity.Embeddings.IEmbeddingService>();
     // Use default connection string or from config

@@ -248,6 +248,13 @@ if (pendingImageTasks.Count > 0)
 
 async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, TelerikThumbnailService? telerikThumbnailService, int? dataSetId = null, bool inspectMode = false)
 {
+    // Skip if already processed (for distributed processing)
+    if (dbService.DocumentExists(pdfPath))
+    {
+        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(pdfPath)}");
+        return;
+    }
+
     // 1. Parse PDF
     (var digitalBook, var telerikDoc) = TelerikBookCorpusIngestionTests.RunParseBook(pdfPath);
     var simpleText = telerikDoc.ToSimpleTextDocument(TimeSpan.FromSeconds(5 * 60));
