@@ -12,6 +12,7 @@ public class PdfMetadata
     public DateTime? CreationDate { get; set; }
     public DateTime? DeducedDate { get; set; }
     public List<string>? Text { get; set; }
+    public List<string>? People { get; set; }
 
     /// <summary>
     /// Returns metadata for JSONB storage (excludes Text to avoid redundancy with DocumentChunks)
@@ -26,7 +27,8 @@ public class PdfMetadata
         Producer = Producer,
         PageCount = PageCount,
         CreationDate = CreationDate,
-        DeducedDate = DeducedDate
+        DeducedDate = DeducedDate,
+        People = People
     };
 }
 
@@ -44,4 +46,5 @@ public class PdfMetadataForStorage
     public int PageCount { get; set; }
     public DateTime? CreationDate { get; set; }
     public DateTime? DeducedDate { get; set; }
+    public List<string>? People { get; set; }
 }

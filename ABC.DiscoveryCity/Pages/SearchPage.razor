@@ -74,7 +74,22 @@
                 <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
                 <GridColumn Title="People" Width="150px">
                     <Template>
-                        <span style="color: #999; font-style: italic;">Processing...</span>
+                        @{
+                            var person = context as SearchResultDto;
+                            if (person?.People != null && person.People.Count > 0)
+                            {
+                                <div style="font-size: 0.85em; line-height: 1.4;">
+                                    @foreach (var name in person.People)
+                                    {
+                                        <span class="badge bg-info text-dark me-1 mb-1" style="font-weight: normal;">@name</span>
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <span style="color: #ccc;">—</span>
+                            }
+                        }
                     </Template>
                 </GridColumn>
                 <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" DisplayFormat="{0:F4}" Width="100px" />

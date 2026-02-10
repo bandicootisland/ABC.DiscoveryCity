@@ -4,12 +4,12 @@ services:
     container_name: discovery-city-postgres
     environment:
       POSTGRES_USER: discovery_user
-      POSTGRES_PASSWORD: discovery_password
-      POSTGRES_DB: DiscoveryCity
+      POSTGRES_PASSWORD: WL71dM5oM2s36FP6ZrBo
+      POSTGRES_DB: discoverycity
     ports:
       - "5435:5432"
     volumes:
-      - H:/_DOCKER-DATA/discovery_city_postgres:/var/lib/postgresql/data
+      - discovery_city_data:/var/lib/postgresql/data
     restart: unless-stopped
 
   bookcity-db:
@@ -23,8 +23,8 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      - E:/_DOCKER-DATA/mariadb:/var/lib/mysql
-      - H:/Developer.BookCity/aa-data-import--temp-dir:/imports
+      - /data/BookCity/mariadb:/var/lib/mysql
+      - /data/BookCity/imports:/imports
     command:
       - --innodb-buffer-pool-size=1G
       - --innodb-log-file-size=256M
@@ -43,7 +43,7 @@ services:
     ports:
       - "9200:9200"
     volumes:
-      - H:/_DOCKER-DATA/elasticsearch:/usr/share/elasticsearch/data
+      - /data/BookCity/elasticsearch:/usr/share/elasticsearch/data
     restart: unless-stopped
 
   kibana:
@@ -56,3 +56,6 @@ services:
     depends_on:
       - bookcity-elastic
     restart: unless-stopped
+
+volumes:
+  discovery_city_data:

@@ -1,5 +1,6 @@
 using ABC.DiscoveryCity.PostgreSQL;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
 
 namespace ABC.DiscoveryCity.API.Controllers;
 
@@ -38,7 +39,8 @@ public class SearchController : ControllerBase
             ThumbnailPath = r.Thumbnail,
             FullImagePath = r.FullImage,
             SourceName = r.SourceName,
-            DataSetName = r.DataSetName
+            DataSetName = r.DataSetName,
+            People = ParsePeopleJson(r.People)
         }).ToList();
 
         return Ok(dtos);
@@ -60,7 +62,8 @@ public class SearchController : ControllerBase
             ThumbnailPath = r.Thumbnail,
             FullImagePath = r.FullImage,
             SourceName = r.SourceName,
-            DataSetName = r.DataSetName
+            DataSetName = r.DataSetName,
+            People = ParsePeopleJson(r.People)
         }).ToList();
 
         return Ok(dtos);
@@ -86,6 +89,23 @@ public class SearchController : ControllerBase
         var stats = _dbService.GetDataSetStats();
         return Ok(stats);
     }
+
+    /// <summary>
+    /// Parse People JSON array string from JSONB metadata into a List.
+    /// The DB returns it as a raw JSON string like ["Name1","Name2"].
+    /// </summary>
+    private static List<string>? ParsePeopleJson(string? peopleJson)
+    {
+        if (string.IsNullOrWhiteSpace(peopleJson)) return null;
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(peopleJson);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
 public class SearchResultDto
@@ -100,4 +120,5 @@ public class SearchResultDto
     public string? FullImagePath { get; set; }
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
+    public List<string>? People { get; set; }
 }

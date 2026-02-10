@@ -15,7 +15,7 @@ public class DbService
     private static readonly object _mapLock = new();
 
     // Default connection string for convenience, but allows override
-    private const string DefaultConnectionString = "Host=192.168.1.114;Port=5435;Username=discovery_user;Password=discovery_password;Database=DiscoveryCity";
+    private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
 
     public DbService(IEmbeddingService? embeddingService = null, string? connectionString = null)
     {
@@ -52,8 +52,31 @@ public class DbService
                 cmd.ExecuteNonQuery();
             }
 
-            // Cleanup old table if exists
-            using (var cmd = new NpgsqlCommand("DROP TABLE IF EXISTS Documents;", conn)) cmd.ExecuteNonQuery();
+            // Check if schema already exists — skip all CREATE TABLE if so
+            bool schemaExists = false;
+            using (var cmd = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'sources');", conn))
+            {
+                schemaExists = (bool)(cmd.ExecuteScalar() ?? false);
+            }
+
+            if (schemaExists)
+            {
+                Console.WriteLine("Database schema already exists. Skipping table creation.");
+
+                // Just verify and report
+                using (var cmd = new NpgsqlCommand("SELECT count(*) FROM information_schema.tables WHERE table_name = 'parentdocuments';", conn))
+                {
+                    var count = (long)(cmd.ExecuteScalar() ?? 0L);
+                    Console.WriteLine($"Table Verification: {count} (Should be 1)");
+                }
+                using (var cmd = new NpgsqlCommand(@"SELECT count(*) FROM pg_inherits WHERE inhparent = 'documentchunks'::regclass;", conn))
+                {
+                    var partitions = (long)(cmd.ExecuteScalar() ?? 0L);
+                    Console.WriteLine($"DocumentChunks partitions: {partitions}");
+                }
+                Console.WriteLine("Database Schema Verified Successfully.");
+                return;
+            }
 
             // 2. Create Sources Table (top-level organization)
             Console.WriteLine("Creating Sources table...");
@@ -338,6 +361,28 @@ public class DbService
         return (int)(cmd.ExecuteScalar() ?? 0);
     }
 
+    /// <summary>
+    /// Check if a document already exists in the DB by its file path.
+    /// Returns the ParentDocument Id if found, or null if not.
+    /// </summary>
+    public int? DocumentExists(string filePath)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(
+                "SELECT Id FROM ParentDocuments WHERE FilePath = @fp;", conn);
+            cmd.Parameters.AddWithValue("fp", filePath);
+            var result = cmd.ExecuteScalar();
+            return result != null ? (int)result : null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error checking document exists: {ex.Message}");
+            return null;
+        }
+    }
+
     public void InsertDocument(string filePath, PdfMetadata metadata, int? dataSetId = null)
     {
         try
@@ -347,35 +392,61 @@ public class DbService
 
             try
             {
-                // 1. Upsert Parent Document (store metadata WITHOUT Text - text goes to DocumentChunks)
                 string json = JsonSerializer.Serialize(metadata.ToStorageDto());
                 int parentId = 0;
+                bool isUpdate = false;
 
-                string parentSql = @"
-                    INSERT INTO ParentDocuments (FilePath, Metadata, DataSetId, ProcessedAt)
-                    VALUES (@fp, @meta::jsonb, @dataSetId, NOW())
-                    ON CONFLICT (FilePath) 
-                    DO UPDATE SET 
-                        Metadata = EXCLUDED.Metadata, 
-                        DataSetId = COALESCE(EXCLUDED.DataSetId, ParentDocuments.DataSetId),
-                        ProcessedAt = NOW()
-                    RETURNING Id;
-                ";
-
-                using (var cmd = new NpgsqlCommand(parentSql, conn, trans))
+                // 1. Explicit duplicate check by FilePath (the natural key)
+                using (var checkCmd = new NpgsqlCommand(
+                    "SELECT Id FROM ParentDocuments WHERE FilePath = @fp;", conn, trans))
                 {
-                    cmd.Parameters.AddWithValue("fp", filePath);
-                    cmd.Parameters.AddWithValue("meta", json);
-                    cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
-                    var scalar = cmd.ExecuteScalar();
-                    parentId = scalar != null ? (int)scalar : 0;
+                    checkCmd.Parameters.AddWithValue("fp", filePath);
+                    var existing = checkCmd.ExecuteScalar();
+                    if (existing != null)
+                    {
+                        parentId = (int)existing;
+                        isUpdate = true;
+                    }
                 }
 
-                // 2. Delete existing chunks for this document (re-processing case)
-                using (var cmd = new NpgsqlCommand("DELETE FROM DocumentChunks WHERE ParentId = @pid", conn, trans))
+                if (isUpdate)
                 {
-                    cmd.Parameters.AddWithValue("pid", parentId);
-                    cmd.ExecuteNonQuery();
+                    // 2a. UPDATE existing document metadata
+                    using (var cmd = new NpgsqlCommand(@"
+                        UPDATE ParentDocuments 
+                        SET Metadata = @meta::jsonb, 
+                            DataSetId = COALESCE(@dataSetId, DataSetId),
+                            ProcessedAt = NOW()
+                        WHERE Id = @id;", conn, trans))
+                    {
+                        cmd.Parameters.AddWithValue("id", parentId);
+                        cmd.Parameters.AddWithValue("meta", json);
+                        cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
+                        cmd.ExecuteNonQuery();
+                    }
+
+                    // Delete existing chunks (will be re-created below)
+                    using (var cmd = new NpgsqlCommand(
+                        "DELETE FROM DocumentChunks WHERE ParentId = @pid", conn, trans))
+                    {
+                        cmd.Parameters.AddWithValue("pid", parentId);
+                        cmd.ExecuteNonQuery();
+                    }
+                }
+                else
+                {
+                    // 2b. INSERT new document
+                    using (var cmd = new NpgsqlCommand(@"
+                        INSERT INTO ParentDocuments (FilePath, Metadata, DataSetId, ProcessedAt)
+                        VALUES (@fp, @meta::jsonb, @dataSetId, NOW())
+                        RETURNING Id;", conn, trans))
+                    {
+                        cmd.Parameters.AddWithValue("fp", filePath);
+                        cmd.Parameters.AddWithValue("meta", json);
+                        cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
+                        var scalar = cmd.ExecuteScalar();
+                        parentId = scalar != null ? (int)scalar : 0;
+                    }
                 }
 
                 // 3. Chunk and Insert
@@ -546,9 +617,9 @@ public class DbService
         }
     }
 
-    public async Task<List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName)>> SearchSimilarAsync(string query, int limit = 20)
+    public async Task<List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName, string? People)>> SearchSimilarAsync(string query, int limit = 20)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
 
         try
         {
@@ -579,9 +650,9 @@ public class DbService
         return results;
     }
 
-    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit)
+    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
 
         // Vector similarity search using cosine distance
         // Find best matching chunk for ranking, but return ALL chunks combined for display
@@ -609,7 +680,8 @@ public class DbService
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
                    s.Name as SourceName,
-                   d.Name as DataSetName
+                   d.Name as DataSetName,
+                   p.Metadata->>'People' as People
             FROM best_matches bm
             JOIN ParentDocuments p ON bm.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -634,16 +706,17 @@ public class DbService
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8)
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9)
             ));
         }
 
         return results;
     }
 
-    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit)
+    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
 
         // Full-text search using PostgreSQL tsvector
         // Find best matching chunk for ranking, but return ALL chunks combined for display
@@ -666,7 +739,8 @@ public class DbService
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
                    s.Name as SourceName,
-                   d.Name as DataSetName
+                   d.Name as DataSetName,
+                   p.Metadata->>'People' as People
             FROM matching_docs md
             JOIN ParentDocuments p ON md.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -691,7 +765,8 @@ public class DbService
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8)
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9)
             ));
         }
 
@@ -701,9 +776,9 @@ public class DbService
     /// <summary>
     /// Exact text match search - only returns documents containing the exact query string
     /// </summary>
-    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName)> SearchExactMatch(string query, int limit = 20)
+    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName, string? People)> SearchExactMatch(string query, int limit = 20)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
 
         try
         {
@@ -725,7 +800,8 @@ public class DbService
                        (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
                        (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
                        s.Name as SourceName,
-                       d.Name as DataSetName
+                       d.Name as DataSetName,
+                       p.Metadata->>'People' as People
                 FROM matching_docs md
                 JOIN ParentDocuments p ON md.ParentId = p.Id
                 LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -748,7 +824,8 @@ public class DbService
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     reader.IsDBNull(6) ? null : reader.GetString(6),
                     reader.IsDBNull(7) ? null : reader.GetString(7),
-                    reader.IsDBNull(8) ? null : reader.GetString(8)
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9)
                 ));
             }
         }
@@ -760,9 +837,9 @@ public class DbService
         return results;
     }
 
-    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName)> GetRecentDocuments(int limit = 10)
+    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName, string? People)> GetRecentDocuments(int limit = 10)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?)>();
+        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
         try
         {
             using var conn = _dataSource.OpenConnection();
@@ -775,7 +852,8 @@ public class DbService
                        (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
                        (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
                        s.Name as SourceName,
-                       d.Name as DataSetName
+                       d.Name as DataSetName,
+                       p.Metadata->>'People' as People
                 FROM ParentDocuments p
                 LEFT JOIN DataSets d ON p.DataSetId = d.Id
                 LEFT JOIN Sources s ON d.SourceId = s.Id
@@ -798,7 +876,8 @@ public class DbService
                     reader.IsDBNull(5) ? null : reader.GetString(5),
                     reader.IsDBNull(6) ? null : reader.GetString(6),
                     reader.IsDBNull(7) ? null : reader.GetString(7),
-                    reader.IsDBNull(8) ? null : reader.GetString(8)
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9)
                 ));
             }
         }
@@ -969,6 +1048,183 @@ public class SystemStats
     public double AvgPagesPerDocument { get; set; }
     public DateTime? LastProcessedAt { get; set; }
 }
+
+    // ============================================================
+    // REPROCESS MODE helpers
+    // ============================================================
+
+    /// <summary>
+    /// Get a batch of documents (Id, FilePath, Metadata JSON) for reprocessing.
+    /// </summary>
+    public List<(int Id, string FilePath, string MetadataJson)> GetDocumentsForReprocessing(int limit = 500, int offset = 0)
+    {
+        var results = new List<(int, string, string)>();
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                SELECT Id, FilePath, Metadata::text 
+                FROM ParentDocuments 
+                ORDER BY Id
+                LIMIT @limit OFFSET @offset;", conn);
+            cmd.Parameters.AddWithValue("limit", limit);
+            cmd.Parameters.AddWithValue("offset", offset);
+            cmd.CommandTimeout = 120;
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add((
+                    reader.GetInt32(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? "" : reader.GetString(2)
+                ));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting documents for reprocessing: {ex.Message}");
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Get the full text of a document by concatenating all its chunk texts (ordered by ChunkIndex).
+    /// </summary>
+    public string GetDocumentFullText(int parentId)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                SELECT TextContent 
+                FROM DocumentChunks 
+                WHERE ParentId = @pid 
+                ORDER BY ChunkIndex;", conn);
+            cmd.Parameters.AddWithValue("pid", parentId);
+            cmd.CommandTimeout = 30;
+
+            var parts = new List<string>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                if (!reader.IsDBNull(0))
+                    parts.Add(reader.GetString(0));
+            }
+            return string.Join("\n", parts);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting full text for doc {parentId}: {ex.Message}");
+            return "";
+        }
+    }
+
+    /// <summary>
+    /// Update only the metadata JSONB for a document (no chunk changes).
+    /// </summary>
+    public void UpdateDocumentMetadata(int parentId, string metadataJson)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                UPDATE ParentDocuments 
+                SET Metadata = @meta::jsonb 
+                WHERE Id = @id;", conn);
+            cmd.Parameters.AddWithValue("id", parentId);
+            cmd.Parameters.AddWithValue("meta", metadataJson);
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error updating metadata for doc {parentId}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Get chunks that have no embedding vector, with optional limit.
+    /// Returns (ChunkId, ParentId, TextContent, ParentFilePath).
+    /// </summary>
+    public List<(int ChunkId, int ParentId, string TextContent, string FilePath)> GetChunksWithoutEmbeddings(int limit = 1000)
+    {
+        var results = new List<(int, int, string, string)>();
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            string sql = @"
+                SELECT c.Id, c.ParentId, c.TextContent, p.FilePath
+                FROM DocumentChunks c
+                JOIN ParentDocuments p ON c.ParentId = p.Id
+                WHERE c.Embedding IS NULL
+                ORDER BY c.Id
+                LIMIT @limit;
+            ";
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("limit", limit);
+            cmd.CommandTimeout = 120;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add((
+                    reader.GetInt32(0),
+                    reader.GetInt32(1),
+                    reader.GetString(2),
+                    reader.GetString(3)
+                ));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting chunks without embeddings: {ex.Message}");
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Update the embedding vector for a specific chunk by Id.
+    /// </summary>
+    public bool UpdateChunkEmbedding(int chunkId, int parentId, float[] embedding)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            string sql = @"
+                UPDATE DocumentChunks
+                SET Embedding = @emb
+                WHERE Id = @id AND ParentId = @pid;
+            ";
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("id", chunkId);
+            cmd.Parameters.AddWithValue("pid", parentId);
+            cmd.Parameters.AddWithValue("emb", new Vector(embedding));
+            return cmd.ExecuteNonQuery() > 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error updating chunk embedding {chunkId}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Count total chunks without embeddings.
+    /// </summary>
+    public long CountChunksWithoutEmbeddings()
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM DocumentChunks WHERE Embedding IS NULL;", conn);
+            cmd.CommandTimeout = 120;
+            return (long)(cmd.ExecuteScalar() ?? 0L);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error counting chunks: {ex.Message}");
+            return -1;
+        }
+    }
 
     public List<(string ImageType, string ImageSize, string FilePath, int Width, int Height)> GetDocumentImages(string parentFilePath)
     {

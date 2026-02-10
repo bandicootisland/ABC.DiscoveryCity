@@ -15,7 +15,7 @@ namespace ABC.DiscoveryCity.TestApp
 
             Console.WriteLine($"--- Verifying Data for {targetFile} ---");
             
-            string connString = "Host=127.0.0.1;Port=5435;Username=discovery_user;Password=discovery_password;Database=DiscoveryCity";
+            string connString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
             await using var connection = new NpgsqlConnection(connString);
             await connection.OpenAsync();
 

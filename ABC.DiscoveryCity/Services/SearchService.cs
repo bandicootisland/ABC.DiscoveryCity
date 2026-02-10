@@ -94,6 +94,7 @@ public class SearchResultDto
     public string? FullImagePath { get; set; }
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
+    public List<string>? People { get; set; }
 }
 
 public class ImageDto
