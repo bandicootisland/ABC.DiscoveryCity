@@ -36,6 +36,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.Words", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.Embeddings", "ABC.DiscoveryCity.Embeddings\ABC.DiscoveryCity.Embeddings.csproj", "{AE32B967-EB65-4AF3-A119-DAC67401BFE0}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.Linker", "ABC.DiscoveryCity.Linker\ABC.DiscoveryCity.Linker.csproj", "{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -202,6 +204,18 @@ Global
 		{AE32B967-EB65-4AF3-A119-DAC67401BFE0}.Release|x64.Build.0 = Release|Any CPU
 		{AE32B967-EB65-4AF3-A119-DAC67401BFE0}.Release|x86.ActiveCfg = Release|Any CPU
 		{AE32B967-EB65-4AF3-A119-DAC67401BFE0}.Release|x86.Build.0 = Release|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Debug|x64.Build.0 = Debug|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Debug|x86.Build.0 = Debug|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Release|x64.ActiveCfg = Release|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Release|x64.Build.0 = Release|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Release|x86.ActiveCfg = Release|Any CPU
+		{F9F8B671-D6DF-4A07-9E43-7B4D3E582A75}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
