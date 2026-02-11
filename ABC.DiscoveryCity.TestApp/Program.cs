@@ -19,6 +19,7 @@ bool headless = args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgn
 bool renderDirect = args.Any(a => a.Equals("--render-direct", StringComparison.OrdinalIgnoreCase));
 bool noImages = args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase));
 bool embeddingsOnly = args.Any(a => a.Equals("--embeddings-only", StringComparison.OrdinalIgnoreCase));
+bool imagesOnly = args.Any(a => a.Equals("--images-only", StringComparison.OrdinalIgnoreCase));
 bool forceReprocess = args.Any(a => a.Equals("--force", StringComparison.OrdinalIgnoreCase));
 bool reprocessMode = args.Any(a => a.Equals("--reprocess", StringComparison.OrdinalIgnoreCase));
 bool extractPeopleLlm = args.Any(a => a.Equals("--extract-people-llm", StringComparison.OrdinalIgnoreCase));
@@ -65,7 +66,8 @@ Console.WriteLine("Discovery City PDF Processor");
 Console.WriteLine("============================");
 Console.WriteLine($"Priority DataSets: {string.Join(", ", priorityDataSets)}");
 if (embeddingsOnly) Console.WriteLine("MODE: Embeddings-only (backfill NULL embeddings)");
-if (reprocessMode) Console.WriteLine("MODE: Reprocess (re-extract metadata from stored text, no PDF re-parsing)");
+if (imagesOnly) Console.WriteLine("MODE: Images-only (generate thumbnails for files without .done.images)");
+if (reprocessMode) Console.WriteLine("MODE: Reprocess (re-extract metadata from stored text, no PDF re-parsing)");;
 if (forceReprocess) Console.WriteLine("MODE: Force reprocess (ignore .done flags)");
 if (extractPeopleLlm) Console.WriteLine("MODE: LLM People extraction (using Ollama) — NOT YET IMPLEMENTED");
 
@@ -120,7 +122,7 @@ else
 {
     Console.WriteLine("Using Playwright browser for thumbnails");
     thumbnailService = new ThumbnailService();
-    await thumbnailService.InitializeAsync(headless: headless, instancecount: 20);
+    await thumbnailService.InitializeAsync(headless: headless, instancecount: 10);
 }
 var dbService = new DbService(embeddingService);
 
@@ -261,6 +263,121 @@ if (embeddingsOnly)
     }
 
     Console.WriteLine($"\nEmbeddings complete! Updated: {totalUpdated}, Errors: {totalErrors}");
+    return;
+}
+
+// ============================================================
+// IMAGES-ONLY MODE: Generate thumbnails for files without .done.images
+// ============================================================
+if (imagesOnly)
+{
+    Console.WriteLine("\n--- IMAGES-ONLY MODE ---");
+    
+    // Initialize thumbnail service
+    ThumbnailService imgThumbnailService = new ThumbnailService();
+    await imgThumbnailService.InitializeAsync(headless: headless, instancecount: 10);
+    var imgDbService = new DbService(embeddingService);
+
+    int MAX_IMG_FILES = limitFiles;
+    int imgProcessed = 0;
+    int imgSkipped = 0;
+    int imgErrors = 0;
+    int imgTotal = 0;
+    var imgPendingTasks = new System.Collections.Concurrent.ConcurrentBag<Task>();
+
+    string imgRootFolder = "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/";
+    var imgSubDirs = System.IO.Directory.GetDirectories(imgRootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
+    var imgTargetFolders = new List<string>();
+    var imgAddedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // Add priority DataSets first
+    foreach (var ds in priorityDataSets)
+    {
+        string dsAlt = ds.Replace(" ", "_");
+        var match = imgSubDirs.FirstOrDefault(d =>
+            d.EndsWith(ds, StringComparison.OrdinalIgnoreCase) ||
+            d.EndsWith(dsAlt, StringComparison.OrdinalIgnoreCase));
+        if (match != null && imgAddedFolders.Add(match))
+            imgTargetFolders.Add(match);
+    }
+    foreach (var dir in imgSubDirs)
+    {
+        if (!imgAddedFolders.Contains(dir)) imgTargetFolders.Add(dir);
+    }
+    if (imgTargetFolders.Count == 0) imgTargetFolders.Add(imgRootFolder);
+
+    foreach (var folder in imgTargetFolders)
+    {
+        Console.WriteLine($"Scanning for images: {folder}");
+        var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories);
+
+        foreach (var pdfPath in pdfFiles)
+        {
+            if (MAX_IMG_FILES > 0 && imgProcessed >= MAX_IMG_FILES) break;
+
+            string doneImages = pdfPath + ".done.images";
+
+            // Skip if images already generated (unless --force)
+            if (!forceReprocess && System.IO.File.Exists(doneImages))
+            {
+                imgSkipped++;
+                continue;
+            }
+
+            imgTotal++;
+            int current = ++imgProcessed;
+            if (current % 100 == 0 || current <= 5)
+                Console.WriteLine($"  [{current}] Image: {System.IO.Path.GetFileName(pdfPath)}");
+
+            // Fire image task
+            var imageTask = Task.Run(async () =>
+            {
+                try
+                {
+                    var pageImages = await imgThumbnailService.GeneratePageImagesAsync(pdfPath);
+
+                    string thumbPath = ""; int thumbW = 0, thumbH = 0;
+                    string fullPath = ""; int fullW = 0, fullH = 0;
+
+                    foreach (var (filePath, width, height) in pageImages)
+                    {
+                        if (filePath.Contains("_thumb."))
+                            (thumbPath, thumbW, thumbH) = (filePath, width, height);
+                        else
+                            (fullPath, fullW, fullH) = (filePath, width, height);
+                    }
+
+                    if (!string.IsNullOrEmpty(thumbPath) || !string.IsNullOrEmpty(fullPath))
+                    {
+                        lock (imgDbService)
+                        {
+                            imgDbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+                        }
+                        // Mark images as done
+                        System.IO.File.Create(doneImages).Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref imgErrors);
+                    Console.WriteLine($"  [WARN] Image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
+                }
+            });
+            imgPendingTasks.Add(imageTask);
+        }
+
+        if (MAX_IMG_FILES > 0 && imgProcessed >= MAX_IMG_FILES) break;
+    }
+
+    // Wait for all image tasks
+    if (imgPendingTasks.Count > 0)
+    {
+        Console.WriteLine($"Waiting for {imgPendingTasks.Count} image tasks to complete...");
+        await Task.WhenAll(imgPendingTasks);
+    }
+
+    await imgThumbnailService.DisposeAsync();
+    Console.WriteLine($"\nImages-only complete! Processed: {imgProcessed}, Skipped: {imgSkipped}, Errors: {imgErrors}");
     return;
 }
 

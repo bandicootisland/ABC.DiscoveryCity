@@ -555,15 +555,19 @@ public class DbService
         {
             using var conn = _dataSource.OpenConnection();
 
-            // Get parent ID
-            int parentId = 0;
-            using (var cmd = new NpgsqlCommand("SELECT Id FROM ParentDocuments WHERE FilePath = @fp LIMIT 1;", conn))
+            // Get ALL parent IDs for this file (handles duplicate Windows/Linux path entries)
+            string fileName = System.IO.Path.GetFileName(parentFilePath);
+            var parentIds = new List<int>();
+            using (var cmd = new NpgsqlCommand(
+                "SELECT Id FROM ParentDocuments WHERE FilePath = @fp OR FilePath LIKE @pattern;", conn))
             {
                 cmd.Parameters.AddWithValue("fp", parentFilePath);
-                var result = cmd.ExecuteScalar();
-                if (result == null) return;
-                parentId = (int)result;
+                cmd.Parameters.AddWithValue("pattern", $"%{fileName}");
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                    parentIds.Add(reader.GetInt32(0));
             }
+            if (parentIds.Count == 0) return;
 
             string upsertSql = @"
                 INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, Width, Height)

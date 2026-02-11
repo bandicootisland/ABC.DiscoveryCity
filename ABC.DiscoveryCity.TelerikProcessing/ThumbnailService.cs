@@ -1,5 +1,6 @@
 using Microsoft.Playwright;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SixLabors.ImageSharp.Formats.Jpeg;
 using System.IO;
@@ -11,13 +12,18 @@ namespace ABC.DiscoveryCity.TelerikProcessing;
 /// Service for generating PDF page thumbnails using Playwright (Headless Chrome).
 /// Guaranteed to render what Chrome sees (including OCR text overlays or images).
 /// </summary>
-public class ThumbnailService : IDisposable
+public class ThumbnailService : IDisposable, IAsyncDisposable
 {
     private IPlaywright? _playwright;
-    //private IBrowser? _browser;
     private bool _initialized;
     private static Dictionary<int,Tuple<IBrowser,IBrowserContext,IPage>> _browserinstances { get; set; }
+    private static SemaphoreSlim[] _pageLocks = Array.Empty<SemaphoreSlim>();
     private static int browserroundrobin;
+    private static int _filesProcessed;
+    private static int _instanceCount = 10;
+    private static bool _headless = true;
+    private static readonly SemaphoreSlim _resetLock = new(1, 1);
+    private const int RESET_EVERY_N_FILES = 100;
     /// <summary>
     /// Initialize Playwright and launch the browser.
     /// Call this once before processing.
@@ -27,6 +33,9 @@ public class ThumbnailService : IDisposable
     public async Task InitializeAsync(bool headless = true,int instancecount= 10)
     {
         if (_initialized) return;
+        _headless = headless;
+        _instanceCount = instancecount;
+        _filesProcessed = 0;
 
         //        // Create a simple PDF viewer HTML to avoid download prompt
         _viewerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "pdf_viewer.html");
@@ -76,6 +85,12 @@ public class ThumbnailService : IDisposable
                 
                 _browserinstances.Add(i, new( browser,browsercontext,page));
         }
+
+        // Create per-page semaphores — ensures each browser tab is used by only one PDF at a time
+        _pageLocks = new SemaphoreSlim[instancecount];
+        for (int i = 0; i < instancecount; i++)
+            _pageLocks[i] = new SemaphoreSlim(1, 1);
+
         _initialized = true;
         Console.WriteLine("  Playwright Initialized.");
     }
@@ -98,10 +113,14 @@ public class ThumbnailService : IDisposable
         // Ensure PDF path is a valid URI
         string pdfFileUrl = new Uri(pdfPath).AbsoluteUri;
         string viewerUrl = new Uri(_viewerPath).AbsoluteUri;
-        var browser = _browserinstances[browserroundrobin++ % _browserinstances.Count];
-        IPage? page = browser.Item3;
+
+        // Round-robin pick a browser slot and acquire its lock
+        int slot = Interlocked.Increment(ref browserroundrobin) % _browserinstances.Count;
+        await _pageLocks[slot].WaitAsync();
         try
         {
+        var browser = _browserinstances[slot];
+        IPage? page = browser.Item3;
         
             
             var pageNum = 1;//page 1 show thumnails in viewer itself, so only 1 page required
@@ -118,7 +137,7 @@ public class ThumbnailService : IDisposable
                 try 
                 {
                     await page.GotoAsync(pageNavUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Load });
-                    await page.WaitForTimeoutAsync(3000); //seems to be needed
+                    await page.WaitForTimeoutAsync(5000); // initial wait — retry catches slow loads
                 }
                 catch (Exception navEx)
                 {
@@ -135,6 +154,27 @@ public class ThumbnailService : IDisposable
                     Quality = 85,
                     FullPage = false
                 });
+
+                // Check if screenshot is just the viewer background (PDF didn't load)
+                if (File.Exists(outputPath) && IsBlankViewerScreenshot(outputPath))
+                {
+                    Console.Error.WriteLine($"  [RETRY] Blank viewer background detected, waiting 10s and retrying...");
+                    await page.WaitForTimeoutAsync(10000);
+                    await page.ScreenshotAsync(new PageScreenshotOptions 
+                    { 
+                        Path = outputPath, 
+                        Type = ScreenshotType.Jpeg,
+                        Quality = 85,
+                        FullPage = false
+                    });
+
+                    if (IsBlankViewerScreenshot(outputPath))
+                    {
+                        Console.Error.WriteLine($"  [SKIP] Still blank after retry - PDF failed to render: {Path.GetFileName(pdfPath)}");
+                        File.Delete(outputPath);
+                        return results;
+                    }
+                }
             //results.Add((outputPath, original.Width, original.Height)); but dont kjnow height width
             if (File.Exists(outputPath))
                 {
@@ -174,32 +214,167 @@ public class ThumbnailService : IDisposable
         }
         finally
         {
-            
+            // Release this browser slot so next PDF can use it
+            _pageLocks[slot].Release();
+
+            // Periodic browser reset to prevent memory leaks
+            int count = Interlocked.Increment(ref _filesProcessed);
+            if (count % RESET_EVERY_N_FILES == 0)
+            {
+                Console.WriteLine($"  [RESET] {count} files processed — recycling browsers to free memory...");
+                await ResetBrowsersAsync();
+            }
         }
 
         return results;
     }
 
-    public void Dispose()
+    /// <summary>
+    /// Gracefully close all browser contexts/pages and relaunch fresh ones.
+    /// Prevents Chrome memory leaks from accumulating over hundreds of files.
+    /// </summary>
+    public async Task ResetBrowsersAsync()
     {
-        if (_browserinstances != null)
+        await _resetLock.WaitAsync();
+        try
         {
-            foreach (var _browserinstance in _browserinstances)
+            if (_browserinstances == null || _browserinstances.Count == 0) return;
+
+            // Acquire all page locks so no renders are in-flight during reset
+            for (int i = 0; i < _pageLocks.Length; i++)
+                await _pageLocks[i].WaitAsync();
+
+            // Close pages and contexts gracefully (keep the browser process)
+            IBrowser? sharedBrowser = null;
+            foreach (var instance in _browserinstances.Values)
             {
-                var b = _browserinstance.Value;
-                var browser = b.Item1;
-                var context = b.Item2;
-                var page = b.Item3;
-                page.CloseAsync().Wait();
-                context.CloseAsync().Wait();
-                browser?.DisposeAsync().AsTask().Wait();
+                sharedBrowser = instance.Item1;
+                try { await instance.Item3.CloseAsync(); } catch { }
+                try { await instance.Item2.CloseAsync(); } catch { }
             }
             _browserinstances.Clear();
+
+            // Relaunch fresh contexts on the same browser
+            if (sharedBrowser != null)
+            {
+                for (int i = 0; i < _instanceCount; i++)
+                {
+                    var ctx = await sharedBrowser.NewContextAsync(new BrowserNewContextOptions { JavaScriptEnabled = true });
+                    var page = await ctx.NewPageAsync();
+                    _browserinstances.Add(i, new(sharedBrowser, ctx, page));
+                }
+            }
+
+            // Release all page locks
+            for (int i = 0; i < _pageLocks.Length; i++)
+                _pageLocks[i].Release();
+
+            Console.WriteLine($"  [RESET] Done — {_instanceCount} fresh browser contexts ready.");
         }
-        
+        finally
+        {
+            _resetLock.Release();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_browserinstances != null && _browserinstances.Count > 0)
+        {
+            IBrowser? sharedBrowser = null;
+            foreach (var instance in _browserinstances.Values)
+            {
+                sharedBrowser = instance.Item1;
+                try { await instance.Item3.CloseAsync(); } catch { }
+                try { await instance.Item2.CloseAsync(); } catch { }
+            }
+            _browserinstances.Clear();
+
+            // Close the browser process itself
+            if (sharedBrowser != null)
+            {
+                try { await sharedBrowser.CloseAsync(); } catch { }
+                try { await sharedBrowser.DisposeAsync(); } catch { }
+            }
+        }
+
         _playwright?.Dispose();
+        _initialized = false;
+        Console.WriteLine("  Playwright disposed gracefully.");
+    }
+
+    public void Dispose()
+    {
+        DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
     
+    /// <summary>
+    /// Detects if a screenshot is just the Chrome PDF viewer background (PDF didn't load).
+    /// The viewer background is solid dark gray RGB(40,40,40). This does NOT flag:
+    /// - Redacted/black pages (RGB near 0,0,0) — those are real content
+    /// - Sparse/mostly-white pages — those are real content
+    /// - Any page with meaningful color variance — real content
+    /// Only catches the very specific viewer-background-gray pattern.
+    /// </summary>
+    private static bool IsBlankViewerScreenshot(string imagePath)
+    {
+        try
+        {
+            using var img = Image.Load<Rgb24>(imagePath);
+            int w = img.Width;
+            int h = img.Height;
+            
+            // Sample the center 50% of the image (avoid toolbar/edges)
+            int startX = w / 4;
+            int endX = w * 3 / 4;
+            int startY = h / 4;
+            int endY = h * 3 / 4;
+            
+            int sampleCount = 0;
+            int viewerGrayCount = 0;
+            
+            // Sample every 10th pixel for speed
+            for (int y = startY; y < endY; y += 10)
+            {
+                for (int x = startX; x < endX; x += 10)
+                {
+                    var pixel = img[x, y];
+                    sampleCount++;
+                    
+                    // Viewer background is RGB(40,40,40) — check for range 30-55
+                    // This is clearly distinct from:
+                    //   - Redacted black (0-15)
+                    //   - White/content pages (200+)
+                    //   - Any real rendered content (high variance)
+                    if (pixel.R >= 30 && pixel.R <= 55 && 
+                        pixel.G >= 30 && pixel.G <= 55 && 
+                        pixel.B >= 30 && pixel.B <= 55 &&
+                        Math.Abs(pixel.R - pixel.G) <= 5 &&
+                        Math.Abs(pixel.G - pixel.B) <= 5)
+                    {
+                        viewerGrayCount++;
+                    }
+                }
+            }
+            
+            double viewerGrayPct = (double)viewerGrayCount / sampleCount;
+            
+            // If >90% of center pixels are viewer-background gray, it's blank
+            if (viewerGrayPct > 0.90)
+            {
+                Console.Error.WriteLine($"  [BLANK] {Path.GetFileName(imagePath)}: {viewerGrayPct:P0} viewer-gray pixels — PDF did not render");
+                return true;
+            }
+            
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"  [WARN] Blank detection failed: {ex.Message}");
+            return false; // If we can't check, assume it's real
+        }
+    }
+
     // Legacy support for static path not really needed but useful helper
     public static string GetThumbnailPath(string pdfPath)
     {
