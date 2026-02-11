@@ -5,10 +5,29 @@ namespace ABC.DiscoveryCity.Services;
 public class SearchService
 {
     private readonly HttpClient _httpClient;
+    private List<FileSourceDto>? _fileSources;
 
     public SearchService(HttpClient httpClient)
     {
         _httpClient = httpClient;
+    }
+
+    /// <summary>
+    /// Load file sources from the API (cached after first call).
+    /// </summary>
+    public async Task<List<FileSourceDto>> GetFileSourcesAsync()
+    {
+        if (_fileSources != null) return _fileSources;
+        try
+        {
+            _fileSources = await _httpClient.GetFromJsonAsync<List<FileSourceDto>>("api/search/filesources") ?? new();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"FileSources error: {ex.Message}");
+            _fileSources = new();
+        }
+        return _fileSources;
     }
 
     public async Task<List<SearchResultDto>> SearchAsync(string query, int limit = 20, bool exactMatch = false)
@@ -16,8 +35,10 @@ public class SearchService
         try
         {
             var url = $"api/search?query={Uri.EscapeDataString(query)}&limit={limit}&exactMatch={exactMatch}";
-            var response = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>(url);
-            return response ?? new List<SearchResultDto>();
+            var results = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>(url) ?? new();
+            var fileSources = await GetFileSourcesAsync();
+            foreach (var r in results) r.FileSources = fileSources;
+            return results;
         }
         catch (Exception ex)
         {
@@ -30,8 +51,10 @@ public class SearchService
     {
         try
         {
-            var response = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>($"api/search/recent?limit={limit}");
-            return response ?? new List<SearchResultDto>();
+            var results = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>($"api/search/recent?limit={limit}") ?? new();
+            var fileSources = await GetFileSourcesAsync();
+            foreach (var r in results) r.FileSources = fileSources;
+            return results;
         }
         catch (Exception ex)
         {
@@ -84,16 +107,67 @@ public class SearchService
 
 public class SearchResultDto
 {
-    public string FilePath { get; set; } = string.Empty;
     public string FileName { get; set; } = string.Empty;
+    public string? FilePath { get; set; }
+
+    // Image paths (directory + filename concatenated from server)
+    public string? ThumbnailPath { get; set; }
+    public string? FullImagePath { get; set; }
+
+    // Content & metadata
     public string Text { get; set; } = string.Empty;
     public double Distance { get; set; }
     public DateTime? Date { get; set; }
     public int PageCount { get; set; }
-    public string? ThumbnailPath { get; set; }
-    public string? FullImagePath { get; set; }
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
+    public List<string>? People { get; set; }
+
+    // --- File sources for OS-aware path resolution ---
+    [System.Text.Json.Serialization.JsonIgnore]
+    public List<FileSourceDto>? FileSources { get; set; }
+
+    private static bool IsWindows => System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+        System.Runtime.InteropServices.OSPlatform.Windows);
+
+    /// <summary>
+    /// Resolve a stored path to the correct OS path using file sources.
+    /// </summary>
+    private string? Resolve(string? storedPath)
+    {
+        if (string.IsNullOrEmpty(storedPath) || FileSources == null || FileSources.Count == 0)
+            return storedPath;
+
+        string normalised = storedPath.Replace('\\', '/');
+        foreach (var fs in FileSources)
+        {
+            string normBase = fs.BasePath.Replace('\\', '/');
+            if (normalised.StartsWith(normBase, StringComparison.OrdinalIgnoreCase))
+            {
+                string relative = normalised[normBase.Length..];
+                var osMatch = FileSources.FirstOrDefault(f =>
+                    IsWindows ? (f.BasePath.Contains('\\') || f.BasePath.Contains(':'))
+                              : f.BasePath.StartsWith('/'));
+                if (osMatch != null && osMatch.Id != fs.Id)
+                {
+                    char sep = IsWindows ? '\\' : '/';
+                    return osMatch.BasePath.TrimEnd('\\', '/') + sep + relative.Replace(IsWindows ? '/' : '\\', sep);
+                }
+                return storedPath;
+            }
+        }
+        return storedPath;
+    }
+
+    public string? ResolvedFilePath => Resolve(FilePath);
+    public string? ResolvedThumbnailPath => Resolve(ThumbnailPath);
+    public string? ResolvedFullImagePath => Resolve(FullImagePath);
+}
+
+public class FileSourceDto
+{
+    public int Id { get; set; }
+    public string BasePath { get; set; } = string.Empty;
 }
 
 public class ImageDto
@@ -101,6 +175,7 @@ public class ImageDto
     public string ImageType { get; set; } = string.Empty;
     public string ImageSize { get; set; } = string.Empty;
     public string FilePath { get; set; } = string.Empty;
+    public string? FileName { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
     public string Url { get; set; } = string.Empty;

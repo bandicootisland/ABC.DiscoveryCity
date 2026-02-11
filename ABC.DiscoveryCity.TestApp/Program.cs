@@ -18,6 +18,11 @@ bool cleanFiles = args.Any(a => a.Equals("--clean", StringComparison.OrdinalIgno
 bool headless = args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgnoreCase));
 bool renderDirect = args.Any(a => a.Equals("--render-direct", StringComparison.OrdinalIgnoreCase));
 bool noImages = args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase));
+bool embeddingsOnly = args.Any(a => a.Equals("--embeddings-only", StringComparison.OrdinalIgnoreCase));
+bool imagesOnly = args.Any(a => a.Equals("--images-only", StringComparison.OrdinalIgnoreCase));
+bool forceReprocess = args.Any(a => a.Equals("--force", StringComparison.OrdinalIgnoreCase));
+bool reprocessMode = args.Any(a => a.Equals("--reprocess", StringComparison.OrdinalIgnoreCase));
+bool extractPeopleLlm = args.Any(a => a.Equals("--extract-people-llm", StringComparison.OrdinalIgnoreCase));
 int limitFiles = 0;
 for (int i = 0; i < args.Length; i++)
 {
@@ -28,7 +33,7 @@ for (int i = 0; i < args.Length; i++)
 }
 
 string[] priorityDataSets = args.Where(a => !a.StartsWith("--") && int.TryParse(a, out _) == false).ToArray();
-if (priorityDataSets.Length == 0) priorityDataSets = new[] { "DataSet 9" };
+if (priorityDataSets.Length == 0) priorityDataSets = new[] { "DataSet 11" };
 
 // Quick Test Commands
 if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.OrdinalIgnoreCase))
@@ -60,7 +65,11 @@ if (args.Any(a => a.Equals("--stats", StringComparison.OrdinalIgnoreCase)))
 Console.WriteLine("Discovery City PDF Processor");
 Console.WriteLine("============================");
 Console.WriteLine($"Priority DataSets: {string.Join(", ", priorityDataSets)}");
-
+if (embeddingsOnly) Console.WriteLine("MODE: Embeddings-only (backfill NULL embeddings)");
+if (imagesOnly) Console.WriteLine("MODE: Images-only (generate thumbnails for files without .done.images)");
+if (reprocessMode) Console.WriteLine("MODE: Reprocess (re-extract metadata from stored text, no PDF re-parsing)");;
+if (forceReprocess) Console.WriteLine("MODE: Force reprocess (ignore .done flags)");
+if (extractPeopleLlm) Console.WriteLine("MODE: LLM People extraction (using Ollama) — NOT YET IMPLEMENTED");
 
 // Initialize Embedding Service (Ollama)
 Console.WriteLine("Initializing Embedding Service...");
@@ -83,7 +92,7 @@ try
 { 
     if (resetDb)
     {
-        new DbService(embeddingService).ResetDb();
+        Console.WriteLine("WARNING: --reset-db flag is DISABLED for safety. Skipping.");
     }
     
     new DbService(embeddingService).InitDb(); 
@@ -113,7 +122,7 @@ else
 {
     Console.WriteLine("Using Playwright browser for thumbnails");
     thumbnailService = new ThumbnailService();
-    await thumbnailService.InitializeAsync(headless: headless, instancecount: 20);
+    await thumbnailService.InitializeAsync(headless: headless, instancecount: 10);
 }
 var dbService = new DbService(embeddingService);
 
@@ -131,15 +140,255 @@ if (RUN_VERIFICATION)
     return;
 }
 
+// ============================================================
+// REPROCESS MODE: Re-extract metadata from stored text (no PDF re-parsing)
+// ============================================================
+if (reprocessMode)
+{
+    Console.WriteLine("\n--- REPROCESS MODE ---");
+    Console.WriteLine("Reading documents from DB and re-extracting metadata...");
+
+    int batchSize = 500;
+    int totalUpdated = 0;
+    int totalSkipped = 0;
+    int totalErrors = 0;
+    int offset = 0;
+    int batchLimit = limitFiles > 0 ? limitFiles : int.MaxValue;
+
+    while (offset < batchLimit)
+    {
+        int fetchSize = Math.Min(batchSize, batchLimit - offset);
+        var docs = dbService.GetDocumentsForReprocessing(fetchSize, offset);
+        if (docs.Count == 0) break;
+
+        Console.WriteLine($"  Batch: {docs.Count} documents (offset: {offset})");
+
+        foreach (var (docId, filePath, metadataJson) in docs)
+        {
+            try
+            {
+                // Reconstruct text from chunks for people extraction
+                string fullText = dbService.GetDocumentFullText(docId);
+                if (string.IsNullOrWhiteSpace(fullText))
+                {
+                    totalSkipped++;
+                    continue;
+                }
+
+                // --- Reprocess steps (add future extractions here) ---
+                var extractedPeople = ExtractPeopleFromText(fullText);
+
+                // Merge into existing metadata
+                var metadata = string.IsNullOrWhiteSpace(metadataJson)
+                    ? new Dictionary<string, JsonElement>()
+                    : JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(metadataJson)
+                      ?? new Dictionary<string, JsonElement>();
+
+                // Update People field
+                if (extractedPeople.Count > 0)
+                    metadata["People"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedPeople));
+                else
+                    metadata.Remove("People");
+
+                // Write back updated metadata
+                string updatedJson = JsonSerializer.Serialize(metadata);
+                dbService.UpdateDocumentMetadata(docId, updatedJson);
+                totalUpdated++;
+
+                if (totalUpdated % 1000 == 0)
+                    Console.WriteLine($"    [{totalUpdated}] documents reprocessed...");
+            }
+            catch (Exception ex)
+            {
+                totalErrors++;
+                if (totalErrors <= 10)
+                    Console.WriteLine($"    [ERROR] Doc {docId} ({System.IO.Path.GetFileName(filePath)}): {ex.Message}");
+            }
+        }
+
+        offset += docs.Count;
+    }
+
+    Console.WriteLine($"\nReprocess complete! Updated: {totalUpdated}, Skipped: {totalSkipped}, Errors: {totalErrors}");
+    return;
+}
+
+// ============================================================
+// EMBEDDINGS-ONLY MODE: Backfill NULL embeddings from DB
+// ============================================================
+if (embeddingsOnly)
+{
+    if (embeddingService == null)
+    {
+        Console.WriteLine("FATAL: --embeddings-only requires a running embedding service (Ollama).");
+        return;
+    }
+
+    long totalMissing = dbService.CountChunksWithoutEmbeddings();
+    Console.WriteLine($"Chunks without embeddings: {totalMissing}");
+    if (totalMissing == 0) { Console.WriteLine("Nothing to do."); return; }
+
+    int batchSize = 500;
+    int totalUpdated = 0;
+    int totalErrors = 0;
+    int batchLimit = limitFiles > 0 ? limitFiles : int.MaxValue;
+
+    while (totalUpdated < batchLimit)
+    {
+        var chunks = dbService.GetChunksWithoutEmbeddings(Math.Min(batchSize, batchLimit - totalUpdated));
+        if (chunks.Count == 0) break;
+
+        Console.WriteLine($"  Batch: {chunks.Count} chunks (total updated so far: {totalUpdated}/{totalMissing})");
+
+        // Process in parallel (5 concurrent)
+        await Parallel.ForEachAsync(chunks, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (chunk, ct) =>
+        {
+            try
+            {
+                var embedding = await embeddingService.GetEmbeddingAsync(chunk.TextContent);
+                if (dbService.UpdateChunkEmbedding(chunk.ChunkId, chunk.ParentId, embedding))
+                {
+                    int count = System.Threading.Interlocked.Increment(ref totalUpdated);
+                    if (count % 100 == 0)
+                        Console.WriteLine($"    [{count}/{totalMissing}] embeddings updated...");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Threading.Interlocked.Increment(ref totalErrors);
+                if (totalErrors <= 5)
+                    Console.WriteLine($"    [WARN] Embedding error for chunk {chunk.ChunkId}: {ex.Message}");
+            }
+        });
+    }
+
+    Console.WriteLine($"\nEmbeddings complete! Updated: {totalUpdated}, Errors: {totalErrors}");
+    return;
+}
+
+// ============================================================
+// IMAGES-ONLY MODE: Generate thumbnails for files without .done.images
+// ============================================================
+if (imagesOnly)
+{
+    Console.WriteLine("\n--- IMAGES-ONLY MODE ---");
+    
+    // Initialize thumbnail service
+    ThumbnailService imgThumbnailService = new ThumbnailService();
+    await imgThumbnailService.InitializeAsync(headless: headless, instancecount: 10);
+    var imgDbService = new DbService(embeddingService);
+
+    int MAX_IMG_FILES = limitFiles;
+    int imgProcessed = 0;
+    int imgSkipped = 0;
+    int imgErrors = 0;
+    int imgTotal = 0;
+    var imgPendingTasks = new System.Collections.Concurrent.ConcurrentBag<Task>();
+
+    string imgRootFolder = "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/";
+    var imgSubDirs = System.IO.Directory.GetDirectories(imgRootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
+    var imgTargetFolders = new List<string>();
+    var imgAddedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // Add priority DataSets first
+    foreach (var ds in priorityDataSets)
+    {
+        string dsAlt = ds.Replace(" ", "_");
+        var match = imgSubDirs.FirstOrDefault(d =>
+            d.EndsWith(ds, StringComparison.OrdinalIgnoreCase) ||
+            d.EndsWith(dsAlt, StringComparison.OrdinalIgnoreCase));
+        if (match != null && imgAddedFolders.Add(match))
+            imgTargetFolders.Add(match);
+    }
+    foreach (var dir in imgSubDirs)
+    {
+        if (!imgAddedFolders.Contains(dir)) imgTargetFolders.Add(dir);
+    }
+    if (imgTargetFolders.Count == 0) imgTargetFolders.Add(imgRootFolder);
+
+    foreach (var folder in imgTargetFolders)
+    {
+        Console.WriteLine($"Scanning for images: {folder}");
+        var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories);
+
+        foreach (var pdfPath in pdfFiles)
+        {
+            if (MAX_IMG_FILES > 0 && imgProcessed >= MAX_IMG_FILES) break;
+
+            string doneImages = pdfPath + ".done.images";
+
+            // Skip if images already generated (unless --force)
+            if (!forceReprocess && System.IO.File.Exists(doneImages))
+            {
+                imgSkipped++;
+                continue;
+            }
+
+            imgTotal++;
+            int current = ++imgProcessed;
+            if (current % 100 == 0 || current <= 5)
+                Console.WriteLine($"  [{current}] Image: {System.IO.Path.GetFileName(pdfPath)}");
+
+            // Fire image task
+            var imageTask = Task.Run(async () =>
+            {
+                try
+                {
+                    var pageImages = await imgThumbnailService.GeneratePageImagesAsync(pdfPath);
+
+                    string thumbPath = ""; int thumbW = 0, thumbH = 0;
+                    string fullPath = ""; int fullW = 0, fullH = 0;
+
+                    foreach (var (filePath, width, height) in pageImages)
+                    {
+                        if (filePath.Contains("_thumb."))
+                            (thumbPath, thumbW, thumbH) = (filePath, width, height);
+                        else
+                            (fullPath, fullW, fullH) = (filePath, width, height);
+                    }
+
+                    if (!string.IsNullOrEmpty(thumbPath) || !string.IsNullOrEmpty(fullPath))
+                    {
+                        lock (imgDbService)
+                        {
+                            imgDbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+                        }
+                        // Mark images as done
+                        System.IO.File.Create(doneImages).Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref imgErrors);
+                    Console.WriteLine($"  [WARN] Image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
+                }
+            });
+            imgPendingTasks.Add(imageTask);
+        }
+
+        if (MAX_IMG_FILES > 0 && imgProcessed >= MAX_IMG_FILES) break;
+    }
+
+    // Wait for all image tasks
+    if (imgPendingTasks.Count > 0)
+    {
+        Console.WriteLine($"Waiting for {imgPendingTasks.Count} image tasks to complete...");
+        await Task.WhenAll(imgPendingTasks);
+    }
+
+    await imgThumbnailService.DisposeAsync();
+    Console.WriteLine($"\nImages-only complete! Processed: {imgProcessed}, Skipped: {imgSkipped}, Errors: {imgErrors}");
+    return;
+}
+
 // BATCH TEST LIMIT - set to 0 for unlimited, or a number to limit processing
 int MAX_FILES = limitFiles;
 int totalFiles = 0;
 int processedFiles = 0;
+int skippedFiles = 0;
 var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>(); 
 
-
-
-string rootFolder = @"S:\EpsteinFiles\DepartmentofJustice\DOJ_Disclosures\"; 
+string rootFolder = "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/"; 
 
 Console.WriteLine($"Default Root Folder: {rootFolder}");
 
@@ -173,8 +422,8 @@ foreach (var dir in subDirs)
 if (targetFolders.Count == 0) targetFolders.Add(rootFolder);
 
 // Define Source from path (e.g., "DepartmentofJustice")
-string sourceName = System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(rootFolder.TrimEnd('\\'))) ?? "Unknown";
-string baseFilePath = System.IO.Path.GetDirectoryName(rootFolder.TrimEnd('\\')) ?? "";
+string sourceName = System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(rootFolder.TrimEnd(System.IO.Path.DirectorySeparatorChar))) ?? "Unknown";
+string baseFilePath = System.IO.Path.GetDirectoryName(rootFolder.TrimEnd(System.IO.Path.DirectorySeparatorChar)) ?? "";
 int sourceId = dbService.GetOrCreateSource(sourceName, baseFilePath);
 Console.WriteLine($"Created/Found Source: {sourceName} (Id: {sourceId})");
 
@@ -205,11 +454,17 @@ foreach (var folder in targetFolders)
 
         try 
         {
-            // if (pdfPath.Contains(".processed.")) return; 
-            
-            // Force re-process for updates
-            string doneFile = pdfPath + ".done";
-            if (System.IO.File.Exists(doneFile)) System.IO.File.Delete(doneFile);
+            // Flag file paths
+            string doneFile = pdfPath + ".done";              // PDF parsed + text saved to DB
+            string doneEmbeddings = pdfPath + ".done.embeddings"; // Embeddings generated
+            string doneImages = pdfPath + ".done.images";        // Images generated
+
+            // Skip if already fully processed (unless --force)
+            if (!forceReprocess && System.IO.File.Exists(doneFile))
+            {
+                System.Threading.Interlocked.Increment(ref skippedFiles);
+                return;
+            }
 
             // Increment atomic counter
             int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
@@ -217,8 +472,20 @@ foreach (var folder in targetFolders)
             
             await ProcessPdf(pdfPath, thumbnailService, telerikThumbnailService, dataSetId);
             
-            // Mark as done
+            // Mark text extraction as done
             System.IO.File.Create(doneFile).Dispose();
+
+            // Mark embeddings done if embedding service was available and succeeded
+            if (embeddingService != null)
+            {
+                System.IO.File.Create(doneEmbeddings).Dispose();
+            }
+
+            // Mark images done if images were generated
+            if (!noImages)
+            {
+                System.IO.File.Create(doneImages).Dispose();
+            }
             
             int currentProcessed = System.Threading.Interlocked.Increment(ref processedFiles);
             
@@ -236,7 +503,7 @@ foreach (var folder in targetFolders)
     if (MAX_FILES > 0 && processedFiles >= MAX_FILES) break; // Break outer folder loop
 }
 
-Console.WriteLine($"\nDone! Processed {processedFiles}/{totalFiles} files.");
+Console.WriteLine($"\nDone! Processed {processedFiles}/{totalFiles} files. Skipped {skippedFiles} already-done.");
 
 // Wait for all background image tasks to complete
 if (pendingImageTasks.Count > 0)
@@ -266,6 +533,9 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
          fullText = string.Join(" ", digitalBook.Words.Select(w => w.text));
     }
 
+    // NOTE: Do NOT clean fullText — raw OCR text is evidence and must be preserved exactly.
+    // MIME artifacts (= replacing characters) are handled as a matching problem in people extraction.
+
     if (inspectMode)
     {
         Console.WriteLine("\n[INSPECT] Simple Text (First 500 chars):");
@@ -275,11 +545,13 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
     // 2. Extract Metadata & Deduce Date
     var deducedDate = DeduceDateFromText(fullText);
     var deducedTitle = DeduceTitleFromText(fullText, System.IO.Path.GetFileNameWithoutExtension(pdfPath));
+    var extractedPeople = ExtractPeopleFromText(fullText);
     
     if (inspectMode)
     {
         Console.WriteLine($"\n[INSPECT] Deduced Date: {deducedDate:yyyy-MM-dd}");
         Console.WriteLine($"[INSPECT] Deduced Title: {deducedTitle}");
+        Console.WriteLine($"[INSPECT] People: {string.Join(", ", extractedPeople)}");
         return; 
     }
 
@@ -294,7 +566,8 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
         PageCount = telerikDoc.Pages.Count,
         CreationDate = null, 
         DeducedDate = deducedDate,
-        Text = RunCleanUp(digitalBook.Sentences.Select(s => s.text).ToList())
+        Text = RunCleanUp(digitalBook.Sentences.Select(s => s.text).ToList()),
+        People = extractedPeople.Count > 0 ? extractedPeople : null
     };
 
     List<string> RunCleanUp(List<string> input)
@@ -307,6 +580,8 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
 
             // 1. Remove/Replace Unicodes
             string s = line.Replace("\u25A0", "-").Replace("\"", "'");
+
+            // NOTE: Do NOT clean MIME artifacts from sentences — raw text is evidence.
 
             // 2. Add newline before EFTA file IDs (e.g., EFTA00039885)
             s = Regex.Replace(s, @"(EFTA\d{8,})", "\n$1");
@@ -508,9 +783,198 @@ string DeduceTitleFromText(string text, string filename)
     return filename; // Default
 }
 
+/// <summary>
+/// Clean MIME quoted-printable artifacts from OCR'd email text.
+/// In these PDFs, the '=' character replaces exactly one letter due to MIME encoding
+/// that was baked into the document before printing/scanning. Examples:
+///   Ep=tein → Eptein (was Epstein, 's' replaced by '=')
+///   bo=tom → botom (was bottom, 't' replaced by '=')
+///   =ddressee → ddressee (was addressee, 'a' replaced by '=')
+///   recipie=t → recipiet (was recipient, 'n' replaced by '=')
+///   co=] → co] (was com], 'm' replaced by '=')
+/// 
+/// Also handles:
+///   =XX hex sequences (proper quoted-printable: =20 → space, =3D → '=', etc.)
+///   =\r\n or =\n soft line breaks (remove entirely)
+///   =0A, =0D line break codes
+/// </summary>
+string CleanMimeArtifacts(string text)
+{
+    if (string.IsNullOrEmpty(text)) return text;
+
+    // 1. Decode proper =XX hex sequences FIRST (e.g., =20 → space, =3D → '=')
+    text = Regex.Replace(text, @"=([0-9A-Fa-f]{2})", m =>
+    {
+        int charCode = Convert.ToInt32(m.Groups[1].Value, 16);
+        char decoded = (char)charCode;
+        // Only decode printable ASCII or common whitespace
+        if (charCode == 0x0D || charCode == 0x0A) return " "; // CR/LF → space
+        if (charCode >= 0x20 && charCode <= 0x7E) return decoded.ToString();
+        return ""; // Strip non-printable
+    });
+
+    // 2. Remove soft line breaks: = at end of line (MIME continuation)
+    text = Regex.Replace(text, @"=\r?\n", "");
+
+    // 3. Remove remaining '=' between letters (the "replacing a character" artifact)
+    //    Pattern: letter = letter  →  join them (the = ate one char, nothing to restore)
+    text = Regex.Replace(text, @"(?<=[a-zA-Z])=(?=[a-zA-Z])", "");
+
+    // 4. Remove '=' at start of a word (before letters, e.g., =ddressee)
+    text = Regex.Replace(text, @"(?<=\s|^)=(?=[a-zA-Z])", "");
+
+    // 5. Remove '=' before punctuation within words (e.g., co=] → co])
+    text = Regex.Replace(text, @"(?<=[a-zA-Z])=(?=[)\]}>.,;:!?/])", "");
+
+    return text;
+}
+
+/// <summary>
+/// Extract person names from document text using regex/heuristic patterns.
+/// Targets email headers (From:, To:, Cc:, Sent by:) and common name patterns.
+/// </summary>
+List<string> ExtractPeopleFromText(string text)
+{
+    var people = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    if (string.IsNullOrWhiteSpace(text)) return people.ToList();
+
+    // Use first 8000 chars - most names appear in headers at the top
+    string snippet = text.Length > 8000 ? text.Substring(0, 8000) : text;
+
+    // --- 1. Email header patterns (From:, To:, Cc:, Sent by:) ---
+    // Matches "From: FirstName LastName" or "To: FirstName LastName"
+    // Stops at common non-name tokens (email, angle brackets, dates, etc.)
+    // NOTE: [a-z=] and [A-Z=] allow '=' as a wildcard for MIME-damaged characters
+    //       e.g. "Ep=tein" matches as a name, then '=' is stripped in CleanExtractedName
+    var headerPatterns = new[]
+    {
+        @"(?:From|To|Cc|Bcc|Sent\s*(?:by)?)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
+        // "From: Jeffrey Epstein <email>"
+        @"(?:From|To|Cc|Bcc)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*<",
+        // Multi-recipient: "To: FirstName LastName; FirstName2 LastName2"
+        @"(?:To|Cc|Bcc)\s*:\s*(?:(?:[A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*;\s*)*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
+    };
+
+    foreach (var pattern in headerPatterns)
+    {
+        foreach (Match m in Regex.Matches(snippet, pattern))
+        {
+            var name = CleanExtractedName(m.Groups[1].Value);
+            if (IsValidPersonName(name)) people.Add(name);
+        }
+    }
+
+    // --- 2. "Dear X" / "Hi X" / "Hello X" patterns ---
+    foreach (Match m in Regex.Matches(snippet, @"\b(?:Dear|Hi|Hello|Attn)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20})?)", RegexOptions.None))
+    {
+        var name = CleanExtractedName(m.Groups[1].Value);
+        if (IsValidPersonName(name)) people.Add(name);
+    }
+
+    // --- 3. Known-name-context patterns ---
+    // "Appt w/ PersonName" or "LUNCH w/ PersonName" or "meeting with PersonName"
+    foreach (Match m in Regex.Matches(snippet, @"\b(?:w/|with|meeting\s+with|Appt\s+w/|LUNCH\s+w/)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20}))", RegexOptions.None))
+    {
+        var name = CleanExtractedName(m.Groups[1].Value);
+        if (IsValidPersonName(name)) people.Add(name);
+    }
+
+    // --- 4. Capitalized "Firstname Lastname" sequences that look like person names ---
+    // This is the broadest pattern - two adjacent capitalized words not matching common non-name patterns
+    foreach (Match m in Regex.Matches(snippet, @"\b([A-Z=][a-z=]{2,15}\s+[A-Z=][a-z=]{2,20})\b"))
+    {
+        var candidate = m.Groups[1].Value;
+        if (IsValidPersonName(candidate) && !IsCommonPhrase(candidate))
+        {
+            people.Add(candidate);
+        }
+    }
+
+    return people.OrderBy(p => p).ToList();
+}
+
+string CleanExtractedName(string name)
+{
+    if (string.IsNullOrWhiteSpace(name)) return "";
+    // Remove newlines - OCR artifacts
+    name = name.Replace("\n", " ").Replace("\r", " ");
+    // Remove trailing punctuation, digits, email artifacts
+    name = Regex.Replace(name, @"[\d<>\[\]@.,;:!?\-_/\\()]+$", "").Trim();
+    name = Regex.Replace(name, @"^[\d<>\[\]@.,;:!?\-_/\\()]+", "").Trim();
+    // Strip MIME '=' artifacts from the name (evidence is preserved in raw text;
+    // this only cleans the derived People metadata field)
+    name = name.Replace("=", "");
+    // Collapse multiple spaces
+    name = Regex.Replace(name, @"\s{2,}", " ").Trim();
+    // Remove trailing words that are common email artifacts (e.g., "Jeffrey E. Sent" -> trim "Sent")
+    name = Regex.Replace(name, @"\s+(Sent|From|To|Cc|Subject|Date|Re|Fwd|Mon|Tue|Wed|Thu|Fri|Sat|Sun)$", "", RegexOptions.IgnoreCase).Trim();
+    return name;
+}
+
+bool IsValidPersonName(string name)
+{
+    if (string.IsNullOrWhiteSpace(name) || name.Length < 4) return false;
+    
+    // Must contain at least a space (first + last)
+    if (!name.Contains(' ')) return false;
+    
+    // Reject if contains digits, @, newlines, or common non-name chars
+    if (Regex.IsMatch(name, @"[\d@#$%^&*(){}|<>\n\r]")) return false;
+
+    // Reject single-char first or last names
+    var parts = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    if (parts.Length < 2) return false;
+    if (parts[0].Length < 2 || parts[^1].Length < 2) return false;
+
+    // Reject names starting with common non-name words
+    var rejectFirstWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "Sent", "Hello", "Dear", "Hey", "The", "This", "That", "Your", "Our", "My",
+        "From", "Date", "Subject", "Reply", "Forward", "Original", "Attachment",
+        "Please", "Thanks", "Thank", "Best", "Kind", "Warm", "Good", "Look",
+        "Flight", "Stem", "Med", "Image", "File", "Case", "Help", "Earth",
+        "Click", "View", "Open", "Read", "Copy", "Save", "Print", "Delete",
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+        "San", "New", "South", "North", "East", "West", "Los", "Santa", "Palm"
+    };
+    if (rejectFirstWords.Contains(parts[0])) return false;
+
+    return true;
+}
+
+bool IsCommonPhrase(string candidate)
+{
+    // Common two-word phrases that are NOT person names — frequently found in legal/email docs
+    var nonNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "Sent from", "Sent From", "Original Message", "Court Order", "Court Document",
+        "New York", "Los Angeles", "San Francisco", "Santa Monica", "Palm Beach",
+        "United States", "South Florida", "Southern District", "Northern District",
+        "Dear Sir", "Dear Madam", "Good Morning", "Good Afternoon", "Good Evening",
+        "Best Regards", "Kind Regards", "Warm Regards", "Many Thanks",
+        "Please Note", "For Immediate", "Private Communication", "All Rights",
+        "Rights Reserved", "Jeffrey Epstein", // Often appears in disclaimers; keep if in From/To but filter as generic
+        "East Street", "West Street", "North Street", "South Street",
+        "Monday Morning", "Tuesday Morning", "Wednesday Morning", "Thursday Morning",
+        "Friday Morning", "Saturday Morning", "Sunday Morning",
+        "January February", "February March", "Unauthorized Use",
+        "Your Email", "This Email", "This Message", "Earth Link",
+        "Flash Player", "Internet Explorer", "Microsoft Office", "Google Chrome",
+        "Apple Inc", "Subject Line", "Read Receipt", "Return Receipt",
+        "Thank You", "Look Forward", "Property List", "Attachment Name",
+        "Cell Number", "Phone Number", "Office Number",
+        "Image Format", "File Size", "File Name", "Date Received",
+        "Help Save", "Feminine Care", "Gillette Blade",
+        "Building Entrance", "Front Door",
+        "Attorney Client", "Inside Information", "Strictly Prohibited",
+    };
+
+    return nonNames.Contains(candidate);
+}
+
 void CleanGeneratedFiles(string folder)
 {
-    var extensions = new[] { "*.jpg", "*.done", "*.json", "*.html" };
+    var extensions = new[] { "*.jpg", "*.done", "*.done.embeddings", "*.done.images", "*.json", "*.html" };
     int count = 0;
 
     foreach (var ext in extensions)
@@ -527,7 +991,7 @@ void CleanGeneratedFiles(string folder)
         }
     }
 
-    Console.WriteLine($"  Cleaned {count} generated files (.jpg, .done, .json, .html)");
+    Console.WriteLine($"  Cleaned {count} generated files (.jpg, .done*, .json, .html)");
 }
 
 // Helper extension

@@ -20,14 +20,22 @@ public class ImagesController : ControllerBase
         if (string.IsNullOrWhiteSpace(documentPath)) return BadRequest("Document path required");
 
         var images = _dbService.GetDocumentImages(documentPath)
-            .Select(i => new ImageDto
+            .Select(i => 
             {
-                ImageType = i.ImageType,
-                ImageSize = i.ImageSize,
-                FilePath = i.FilePath,
-                Width = i.Width,
-                Height = i.Height,
-                Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(i.FilePath)}"
+                // Combine directory + filename for the full path
+                var fullPath = !string.IsNullOrEmpty(i.FileName) && !string.IsNullOrEmpty(i.FilePath)
+                    ? Path.Combine(i.FilePath.TrimEnd(Path.DirectorySeparatorChar, '/'), i.FileName)
+                    : i.FilePath ?? "";
+                return new ImageDto
+                {
+                    ImageType = i.ImageType,
+                    ImageSize = i.ImageSize,
+                    FilePath = fullPath,
+                    FileName = i.FileName,
+                    Width = i.Width,
+                    Height = i.Height,
+                    Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(fullPath)}"
+                };
             })
             .ToList();
 
@@ -63,6 +71,7 @@ public class ImageDto
     public string ImageType { get; set; } = string.Empty;
     public string ImageSize { get; set; } = string.Empty;
     public string FilePath { get; set; } = string.Empty;
+    public string? FileName { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
     public string Url { get; set; } = string.Empty;
