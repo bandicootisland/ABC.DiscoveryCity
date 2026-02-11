@@ -9,9 +9,9 @@
         <div class="p-3">
              <div class="row">
                 <div class="col-md-5">
-                    @if (!string.IsNullOrEmpty(Document?.ResolvedThumbnailPath))
+                    @if (!string.IsNullOrEmpty(Document?.ThumbnailPath))
                     {
-                        <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.ResolvedFullImagePath ?? Document.ResolvedThumbnailPath)}")" 
+                        <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.FullImagePath ?? Document.ThumbnailPath)}")" 
                              style="width: 100%; height: auto; border: 1px solid #ddd; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;" />
                     }
                     else
@@ -55,9 +55,9 @@
         <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
             <SplitterPanes>
                 <SplitterPane Size="66%">
-                    @if (Document != null && !string.IsNullOrEmpty(Document.ResolvedFilePath))
+                    @if (Document != null && !string.IsNullOrEmpty(Document.FilePath))
                     {
-                        <iframe src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.ResolvedFilePath)}")" style="width:100%; height:100%; border:none;"></iframe>
+                        <iframe src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.FilePath)}"))" style="width:100%; height:100%; border:none;"></iframe>
                     }
                 </SplitterPane>
                 <SplitterPane>

@@ -52,7 +52,7 @@ public class Verification
         {
              foreach (var result in results)
              {
-                 Console.WriteLine($"Desc: {result.Distance:F4} | File: {result.FileName ?? Path.GetFileName(result.ResolvedFilePath ?? "")}");
+                 Console.WriteLine($"Desc: {result.Distance:F4} | File: {result.FileName}");
                  string preview = result.Text.Length > 100 ? result.Text.Substring(0, 100) + "..." : result.Text;
                  Console.WriteLine($"   Preview: {preview}\n");
              }

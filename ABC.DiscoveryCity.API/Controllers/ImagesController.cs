@@ -22,15 +22,15 @@ public class ImagesController : ControllerBase
         var images = _dbService.GetDocumentImages(documentPath)
             .Select(i => 
             {
-                // Resolve the correct path for the API server's OS
-                var resolvedPath = DbService.ResolvePath(i.WindowsFilePath, i.LinuxFilePath, i.FilePath) ?? "";
+                // Build the resolved path for the API server's OS
+                // For now use legacy FilePath if available, otherwise the filename alone
+                var resolvedPath = i.FilePath ?? i.FileName ?? "";
                 return new ImageDto
                 {
                     ImageType = i.ImageType,
                     ImageSize = i.ImageSize,
                     FilePath = resolvedPath,
-                    WindowsFilePath = i.WindowsFilePath,
-                    LinuxFilePath = i.LinuxFilePath,
+                    FileName = i.FileName,
                     Width = i.Width,
                     Height = i.Height,
                     Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(resolvedPath)}"
@@ -69,9 +69,8 @@ public class ImageDto
 {
     public string ImageType { get; set; } = string.Empty;
     public string ImageSize { get; set; } = string.Empty;
-    public string FilePath { get; set; } = string.Empty;        // Resolved for API's OS
-    public string? WindowsFilePath { get; set; }
-    public string? LinuxFilePath { get; set; }
+    public string FilePath { get; set; } = string.Empty;
+    public string? FileName { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
     public string Url { get; set; } = string.Empty;

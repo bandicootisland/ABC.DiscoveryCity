@@ -44,19 +44,13 @@ public class SearchController : ControllerBase
     private static SearchResultDto MapToDto(DocumentSearchResult r) => new()
     {
         FileName = r.FileName,
-        FilePath = r.FilePath,
-        WindowsFilePath = r.WindowsFilePath,
-        LinuxFilePath = r.LinuxFilePath,
+        FilePath = r.ResolvedFilePath,
+        ThumbnailPath = r.ResolvedThumbnailPath,
+        FullImagePath = r.ResolvedFullImagePath,
         Text = r.Text,
         Distance = r.Distance,
         Date = r.Date,
         PageCount = r.PageCount,
-        ThumbnailPath = r.ThumbnailPath,
-        WindowsThumbnailPath = r.WindowsThumbnailPath,
-        LinuxThumbnailPath = r.LinuxThumbnailPath,
-        FullImagePath = r.FullImagePath,
-        WindowsFullImagePath = r.WindowsFullImagePath,
-        LinuxFullImagePath = r.LinuxFullImagePath,
         SourceName = r.SourceName,
         DataSetName = r.DataSetName,
         People = ParsePeopleJson(r.People)
@@ -104,21 +98,9 @@ public class SearchController : ControllerBase
 public class SearchResultDto
 {
     public string FileName { get; set; } = string.Empty;
-
-    // Document paths — legacy + both OS variants
     public string? FilePath { get; set; }
-    public string? WindowsFilePath { get; set; }
-    public string? LinuxFilePath { get; set; }
-
-    // Thumbnail paths
     public string? ThumbnailPath { get; set; }
-    public string? WindowsThumbnailPath { get; set; }
-    public string? LinuxThumbnailPath { get; set; }
-
-    // Full image paths
     public string? FullImagePath { get; set; }
-    public string? WindowsFullImagePath { get; set; }
-    public string? LinuxFullImagePath { get; set; }
 
     // Content & metadata
     public string Text { get; set; } = string.Empty;

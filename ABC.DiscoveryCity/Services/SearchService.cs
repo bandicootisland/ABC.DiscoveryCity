@@ -85,21 +85,9 @@ public class SearchService
 public class SearchResultDto
 {
     public string FileName { get; set; } = string.Empty;
-
-    // Document paths — legacy + both OS variants
     public string? FilePath { get; set; }
-    public string? WindowsFilePath { get; set; }
-    public string? LinuxFilePath { get; set; }
-
-    // Thumbnail paths
     public string? ThumbnailPath { get; set; }
-    public string? WindowsThumbnailPath { get; set; }
-    public string? LinuxThumbnailPath { get; set; }
-
-    // Full image paths
     public string? FullImagePath { get; set; }
-    public string? WindowsFullImagePath { get; set; }
-    public string? LinuxFullImagePath { get; set; }
 
     // Content & metadata
     public string Text { get; set; } = string.Empty;
@@ -109,17 +97,6 @@ public class SearchResultDto
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public List<string>? People { get; set; }
-
-    // --- OS-aware path resolution (client picks the right one) ---
-    private static bool IsWindows => System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
-        System.Runtime.InteropServices.OSPlatform.Windows);
-
-    private static string? Resolve(string? winPath, string? linPath, string? legacy)
-        => IsWindows ? (winPath ?? legacy) : (linPath ?? legacy);
-
-    public string? ResolvedFilePath => Resolve(WindowsFilePath, LinuxFilePath, FilePath);
-    public string? ResolvedThumbnailPath => Resolve(WindowsThumbnailPath, LinuxThumbnailPath, ThumbnailPath);
-    public string? ResolvedFullImagePath => Resolve(WindowsFullImagePath, LinuxFullImagePath, FullImagePath);
 }
 
 public class ImageDto
@@ -127,8 +104,7 @@ public class ImageDto
     public string ImageType { get; set; } = string.Empty;
     public string ImageSize { get; set; } = string.Empty;
     public string FilePath { get; set; } = string.Empty;
-    public string? WindowsFilePath { get; set; }
-    public string? LinuxFilePath { get; set; }
+    public string? FileName { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
     public string Url { get; set; } = string.Empty;
