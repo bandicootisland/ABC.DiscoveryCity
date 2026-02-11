@@ -40,7 +40,7 @@ namespace ABC.DiscoveryCity.TestApp
             }
 
             // 1. Find Parent ID
-            string sqlParent = "SELECT Id, FilePath, Metadata FROM ParentDocuments WHERE FilePath LIKE @path";
+            string sqlParent = "SELECT Id, COALESCE(FileName, FilePath, ''), Metadata FROM ParentDocuments WHERE FileName LIKE @path OR FilePath LIKE @path OR WindowsFilePath LIKE @path OR LinuxFilePath LIKE @path";
             using var cmdParent = new NpgsqlCommand(sqlParent, connection);
             cmdParent.Parameters.AddWithValue("path", $"%{targetFile}%");
             
@@ -101,7 +101,7 @@ namespace ABC.DiscoveryCity.TestApp
             int rank = 1;
             foreach (var result in results)
             {
-                string fName = Path.GetFileName(result.FilePath);
+                string fName = result.FileName ?? Path.GetFileName(result.ResolvedFilePath ?? "");
                 Console.WriteLine($"Rank {rank}: {fName} (Dist: {result.Distance:F4})");
                 if (fName.Contains("EFTA00072580"))
                 {

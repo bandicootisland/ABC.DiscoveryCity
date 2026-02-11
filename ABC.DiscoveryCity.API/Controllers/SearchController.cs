@@ -27,21 +27,8 @@ public class SearchController : ControllerBase
             ? _dbService.SearchExactMatch(query, limit)
             : await _dbService.SearchSimilarAsync(query, limit);
         
-        // Map to DTO for frontend
-        var dtos = results.Select(r => new SearchResultDto
-        {
-            FilePath = r.FilePath,
-            FileName = Path.GetFileName(r.FilePath),
-            Text = r.Text,
-            Distance = r.Distance,
-            Date = r.Date,
-            PageCount = r.PageCount,
-            ThumbnailPath = r.Thumbnail,
-            FullImagePath = r.FullImage,
-            SourceName = r.SourceName,
-            DataSetName = r.DataSetName,
-            People = ParsePeopleJson(r.People)
-        }).ToList();
+        // Map to DTO — pass both OS paths so the client can resolve
+        var dtos = results.Select(MapToDto).ToList();
 
         return Ok(dtos);
     }
@@ -50,24 +37,30 @@ public class SearchController : ControllerBase
     public IActionResult SearchRecent([FromQuery] int limit = 10)
     {
         var results = _dbService.GetRecentDocuments(limit);
-
-        var dtos = results.Select(r => new SearchResultDto
-        {
-            FilePath = r.FilePath,
-            FileName = Path.GetFileName(r.FilePath),
-            Text = r.Text,
-            Distance = r.Distance,
-            Date = r.Date,
-            PageCount = r.PageCount,
-            ThumbnailPath = r.Thumbnail,
-            FullImagePath = r.FullImage,
-            SourceName = r.SourceName,
-            DataSetName = r.DataSetName,
-            People = ParsePeopleJson(r.People)
-        }).ToList();
-
+        var dtos = results.Select(MapToDto).ToList();
         return Ok(dtos);
     }
+
+    private static SearchResultDto MapToDto(DocumentSearchResult r) => new()
+    {
+        FileName = r.FileName,
+        FilePath = r.FilePath,
+        WindowsFilePath = r.WindowsFilePath,
+        LinuxFilePath = r.LinuxFilePath,
+        Text = r.Text,
+        Distance = r.Distance,
+        Date = r.Date,
+        PageCount = r.PageCount,
+        ThumbnailPath = r.ThumbnailPath,
+        WindowsThumbnailPath = r.WindowsThumbnailPath,
+        LinuxThumbnailPath = r.LinuxThumbnailPath,
+        FullImagePath = r.FullImagePath,
+        WindowsFullImagePath = r.WindowsFullImagePath,
+        LinuxFullImagePath = r.LinuxFullImagePath,
+        SourceName = r.SourceName,
+        DataSetName = r.DataSetName,
+        People = ParsePeopleJson(r.People)
+    };
 
     [HttpGet("counts")]
     public IActionResult GetCounts()
@@ -110,14 +103,28 @@ public class SearchController : ControllerBase
 
 public class SearchResultDto
 {
-    public string FilePath { get; set; } = string.Empty;
     public string FileName { get; set; } = string.Empty;
+
+    // Document paths — legacy + both OS variants
+    public string? FilePath { get; set; }
+    public string? WindowsFilePath { get; set; }
+    public string? LinuxFilePath { get; set; }
+
+    // Thumbnail paths
+    public string? ThumbnailPath { get; set; }
+    public string? WindowsThumbnailPath { get; set; }
+    public string? LinuxThumbnailPath { get; set; }
+
+    // Full image paths
+    public string? FullImagePath { get; set; }
+    public string? WindowsFullImagePath { get; set; }
+    public string? LinuxFullImagePath { get; set; }
+
+    // Content & metadata
     public string Text { get; set; } = string.Empty;
     public double Distance { get; set; }
     public DateTime? Date { get; set; }
     public int PageCount { get; set; }
-    public string? ThumbnailPath { get; set; }
-    public string? FullImagePath { get; set; }
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public List<string>? People { get; set; }

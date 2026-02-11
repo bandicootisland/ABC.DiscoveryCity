@@ -6,13 +6,36 @@ using ABC.DiscoveryCity.Embeddings;
 
 namespace ABC.DiscoveryCity.PostgreSQL;
 
-public class DbService
+public partial class DbService
 {
     private readonly string _connectionString;
     private readonly NpgsqlDataSource _dataSource;
     private readonly IEmbeddingService? _embeddingService;
     private static bool _pgvectorMapped = false;
     private static readonly object _mapLock = new();
+
+    /// <summary>
+    /// Returns true if running on Windows, false for Linux/Mac.
+    /// Used to decide which file path column to read/write.
+    /// </summary>
+    public static bool IsWindows => System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+        System.Runtime.InteropServices.OSPlatform.Windows);
+
+    /// <summary>
+    /// Given a full file path, returns just the file name portion for use as a unique key.
+    /// </summary>
+    public static string ExtractFileName(string filePath) => System.IO.Path.GetFileName(filePath);
+
+    /// <summary>
+    /// Resolves the correct file path for the current OS from dual-path columns.
+    /// Call this on the consumer side (API, Blazor, CLI) — NOT in SQL.
+    /// </summary>
+    public static string? ResolvePath(string? windowsPath, string? linuxPath, string? legacyPath = null)
+    {
+        if (IsWindows)
+            return windowsPath ?? legacyPath;
+        return linuxPath ?? legacyPath;
+    }
 
     // Default connection string for convenience, but allows override
     private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
@@ -75,6 +98,92 @@ public class DbService
                     Console.WriteLine($"DocumentChunks partitions: {partitions}");
                 }
                 Console.WriteLine("Database Schema Verified Successfully.");
+
+                // --- MIGRATION: Add dual-path columns to existing tables ---
+                Console.WriteLine("Applying schema migrations (if needed)...");
+
+                // Sources: add dual base path columns
+                using (var cmd = new NpgsqlCommand("ALTER TABLE Sources ADD COLUMN IF NOT EXISTS WindowsBasePath TEXT;", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("ALTER TABLE Sources ADD COLUMN IF NOT EXISTS LinuxBasePath TEXT;", conn)) cmd.ExecuteNonQuery();
+                // Make BaseFilePath nullable (legacy column)
+                using (var cmd = new NpgsqlCommand("ALTER TABLE Sources ALTER COLUMN BaseFilePath DROP NOT NULL;", conn))
+                    try { cmd.ExecuteNonQuery(); } catch { /* already nullable or column gone */ }
+
+                // ParentDocuments: add FileName and dual path columns, new unique constraint
+                using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS FileName TEXT;", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS WindowsFilePath TEXT;", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS LinuxFilePath TEXT;", conn)) cmd.ExecuteNonQuery();
+
+                // Backfill FileName from existing FilePath where FileName is null
+                using (var cmd = new NpgsqlCommand(@"
+                    UPDATE ParentDocuments 
+                    SET FileName = REVERSE(SPLIT_PART(REVERSE(
+                        CASE WHEN FilePath LIKE '%\%' THEN REPLACE(FilePath, '\', '/') ELSE FilePath END
+                    ), '/', 1))
+                    WHERE FileName IS NULL AND FilePath IS NOT NULL;", conn)) 
+                {
+                    int rows = cmd.ExecuteNonQuery();
+                    if (rows > 0) Console.WriteLine($"  Backfilled FileName for {rows} ParentDocuments rows.");
+                }
+
+                // Backfill WindowsFilePath/LinuxFilePath from existing FilePath
+                using (var cmd = new NpgsqlCommand(@"
+                    UPDATE ParentDocuments 
+                    SET WindowsFilePath = FilePath 
+                    WHERE WindowsFilePath IS NULL AND FilePath IS NOT NULL AND FilePath LIKE '%\%';", conn))
+                {
+                    int rows = cmd.ExecuteNonQuery();
+                    if (rows > 0) Console.WriteLine($"  Backfilled WindowsFilePath for {rows} rows.");
+                }
+                using (var cmd = new NpgsqlCommand(@"
+                    UPDATE ParentDocuments 
+                    SET LinuxFilePath = FilePath 
+                    WHERE LinuxFilePath IS NULL AND FilePath IS NOT NULL AND FilePath LIKE '/%';", conn))
+                {
+                    int rows = cmd.ExecuteNonQuery();
+                    if (rows > 0) Console.WriteLine($"  Backfilled LinuxFilePath for {rows} rows.");
+                }
+
+                // Make FileName NOT NULL after backfill
+                using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ALTER COLUMN FileName SET NOT NULL;", conn))
+                    try { cmd.ExecuteNonQuery(); } catch (Exception ex) { Console.WriteLine($"  [WARN] Could not set FileName NOT NULL: {ex.Message}"); }
+
+                // Drop old FilePath UNIQUE constraint and add new (DataSetId, FileName) unique constraint
+                using (var cmd = new NpgsqlCommand(@"
+                    DO $$ BEGIN
+                        -- Drop old FilePath unique constraint (may have different names)
+                        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parentdocuments_filepath_key') THEN
+                            ALTER TABLE ParentDocuments DROP CONSTRAINT parentdocuments_filepath_key;
+                        END IF;
+                        -- Add new unique constraint on (DataSetId, FileName)
+                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parentdocuments_datasetid_filename_key') THEN
+                            ALTER TABLE ParentDocuments ADD CONSTRAINT parentdocuments_datasetid_filename_key UNIQUE (DataSetId, FileName);
+                        END IF;
+                    END $$;", conn)) cmd.ExecuteNonQuery();
+
+                // DocumentImages: add dual path columns
+                using (var cmd = new NpgsqlCommand("ALTER TABLE DocumentImages ADD COLUMN IF NOT EXISTS WindowsFilePath TEXT;", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("ALTER TABLE DocumentImages ADD COLUMN IF NOT EXISTS LinuxFilePath TEXT;", conn)) cmd.ExecuteNonQuery();
+
+                // Backfill DocumentImages dual paths from existing FilePath
+                using (var cmd = new NpgsqlCommand(@"
+                    UPDATE DocumentImages 
+                    SET WindowsFilePath = FilePath 
+                    WHERE WindowsFilePath IS NULL AND FilePath IS NOT NULL AND FilePath LIKE '%\%';", conn))
+                {
+                    int rows = cmd.ExecuteNonQuery();
+                    if (rows > 0) Console.WriteLine($"  Backfilled DocumentImages WindowsFilePath for {rows} rows.");
+                }
+                using (var cmd = new NpgsqlCommand(@"
+                    UPDATE DocumentImages 
+                    SET LinuxFilePath = FilePath 
+                    WHERE LinuxFilePath IS NULL AND FilePath IS NOT NULL AND FilePath LIKE '/%';", conn))
+                {
+                    int rows = cmd.ExecuteNonQuery();
+                    if (rows > 0) Console.WriteLine($"  Backfilled DocumentImages LinuxFilePath for {rows} rows.");
+                }
+
+                Console.WriteLine("Schema migrations complete.");
                 return;
             }
 
@@ -85,7 +194,9 @@ public class DbService
                     Id SERIAL PRIMARY KEY,
                     Name TEXT NOT NULL UNIQUE,
                     Url TEXT,
-                    BaseFilePath TEXT NOT NULL,
+                    BaseFilePath TEXT,
+                    WindowsBasePath TEXT,
+                    LinuxBasePath TEXT,
                     CreatedAt TIMESTAMPTZ DEFAULT NOW()
                 );
             ";
@@ -105,15 +216,21 @@ public class DbService
             using (var cmd = new NpgsqlCommand(createDataSetsTableSql, conn)) cmd.ExecuteNonQuery();
 
             // 4. Create Parent Documents Table (child of DataSets)
+            //    Unique key is (DataSetId, FileName) — OS-independent.
+            //    Separate columns for Windows and Linux file paths.
             Console.WriteLine("Creating ParentDocuments table...");
             string createParentTableSql = @"
                 CREATE TABLE IF NOT EXISTS ParentDocuments (
                     Id SERIAL PRIMARY KEY,
                     DataSetId INT REFERENCES DataSets(Id),
-                    FilePath TEXT UNIQUE NOT NULL,
+                    FileName TEXT NOT NULL,
+                    FilePath TEXT,
+                    WindowsFilePath TEXT,
+                    LinuxFilePath TEXT,
                     Metadata JSONB,
                     CreatedAt TIMESTAMPTZ DEFAULT NOW(),
-                    ProcessedAt TIMESTAMPTZ DEFAULT NOW()
+                    ProcessedAt TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE(DataSetId, FileName)
                 );
             ";
             using (var cmd = new NpgsqlCommand(createParentTableSql, conn)) cmd.ExecuteNonQuery();
@@ -168,6 +285,7 @@ public class DbService
             }
 
             // 6. Create DocumentImages Table
+            //    Separate columns for Windows and Linux image file paths.
             Console.WriteLine("Creating DocumentImages table...");
             string createImagesTableSql = @"
                 CREATE TABLE IF NOT EXISTS DocumentImages (
@@ -175,7 +293,9 @@ public class DbService
                     ParentId INT REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
                     ImageType TEXT NOT NULL,
                     ImageSize TEXT NOT NULL,
-                    FilePath TEXT NOT NULL,
+                    FilePath TEXT,
+                    WindowsFilePath TEXT,
+                    LinuxFilePath TEXT,
                     Width INT,
                     Height INT,
                     CreatedAt TIMESTAMPTZ DEFAULT NOW(),
@@ -326,19 +446,27 @@ public class DbService
 
     /// <summary>
     /// Get or create a Source by name. Returns the Source Id.
+    /// Stores OS-specific base path in the appropriate column.
     /// </summary>
     public int GetOrCreateSource(string name, string baseFilePath, string? url = null)
     {
         using var conn = _dataSource.OpenConnection();
+        string windowsPath = IsWindows ? baseFilePath : null!;
+        string linuxPath = !IsWindows ? baseFilePath : null!;
         string sql = @"
-            INSERT INTO Sources (Name, BaseFilePath, Url)
-            VALUES (@name, @basePath, @url)
-            ON CONFLICT (Name) DO UPDATE SET Name = EXCLUDED.Name
+            INSERT INTO Sources (Name, BaseFilePath, WindowsBasePath, LinuxBasePath, Url)
+            VALUES (@name, @basePath, @winPath, @linPath, @url)
+            ON CONFLICT (Name) DO UPDATE SET 
+                WindowsBasePath = COALESCE(EXCLUDED.WindowsBasePath, Sources.WindowsBasePath),
+                LinuxBasePath = COALESCE(EXCLUDED.LinuxBasePath, Sources.LinuxBasePath),
+                BaseFilePath = COALESCE(EXCLUDED.BaseFilePath, Sources.BaseFilePath)
             RETURNING Id;
         ";
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("name", name);
-        cmd.Parameters.AddWithValue("basePath", baseFilePath);
+        cmd.Parameters.AddWithValue("basePath", (object?)baseFilePath ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("winPath", (object?)windowsPath ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("linPath", (object?)linuxPath ?? DBNull.Value);
         cmd.Parameters.AddWithValue("url", (object?)url ?? DBNull.Value);
         return (int)(cmd.ExecuteScalar() ?? 0);
     }
@@ -362,19 +490,45 @@ public class DbService
     }
 
     /// <summary>
-    /// Check if a document already exists in the DB by its file path.
+    /// Check if a document already exists in the DB by FileName (and optionally DataSetId).
+    /// Falls back to legacy FilePath check for compatibility.
     /// Returns the ParentDocument Id if found, or null if not.
     /// </summary>
-    public int? DocumentExists(string filePath)
+    public int? DocumentExists(string filePath, int? dataSetId = null)
     {
         try
         {
             using var conn = _dataSource.OpenConnection();
-            using var cmd = new NpgsqlCommand(
-                "SELECT Id FROM ParentDocuments WHERE FilePath = @fp;", conn);
-            cmd.Parameters.AddWithValue("fp", filePath);
-            var result = cmd.ExecuteScalar();
-            return result != null ? (int)result : null;
+            string fileName = ExtractFileName(filePath);
+
+            // Primary lookup: by DataSetId + FileName (the new unique key)
+            if (dataSetId.HasValue)
+            {
+                using var cmd = new NpgsqlCommand(
+                    "SELECT Id FROM ParentDocuments WHERE DataSetId = @dsId AND FileName = @fn;", conn);
+                cmd.Parameters.AddWithValue("dsId", dataSetId.Value);
+                cmd.Parameters.AddWithValue("fn", fileName);
+                var result = cmd.ExecuteScalar();
+                if (result != null) return (int)result;
+            }
+
+            // Fallback: by FileName alone (may return first match)
+            using (var cmd = new NpgsqlCommand(
+                "SELECT Id FROM ParentDocuments WHERE FileName = @fn LIMIT 1;", conn))
+            {
+                cmd.Parameters.AddWithValue("fn", fileName);
+                var result = cmd.ExecuteScalar();
+                if (result != null) return (int)result;
+            }
+
+            // Legacy fallback: exact FilePath match
+            using (var cmd = new NpgsqlCommand(
+                "SELECT Id FROM ParentDocuments WHERE FilePath = @fp;", conn))
+            {
+                cmd.Parameters.AddWithValue("fp", filePath);
+                var result = cmd.ExecuteScalar();
+                return result != null ? (int)result : null;
+            }
         }
         catch (Exception ex)
         {
@@ -393,35 +547,68 @@ public class DbService
             try
             {
                 string json = JsonSerializer.Serialize(metadata.ToStorageDto());
+                string fileName = ExtractFileName(filePath);
                 int parentId = 0;
                 bool isUpdate = false;
 
-                // 1. Explicit duplicate check by FilePath (the natural key)
-                using (var checkCmd = new NpgsqlCommand(
-                    "SELECT Id FROM ParentDocuments WHERE FilePath = @fp;", conn, trans))
+                // 1. Check for existing document by DataSetId + FileName (new unique key)
+                if (dataSetId.HasValue)
                 {
-                    checkCmd.Parameters.AddWithValue("fp", filePath);
-                    var existing = checkCmd.ExecuteScalar();
-                    if (existing != null)
+                    using (var checkCmd = new NpgsqlCommand(
+                        "SELECT Id FROM ParentDocuments WHERE DataSetId = @dsId AND FileName = @fn;", conn, trans))
                     {
-                        parentId = (int)existing;
-                        isUpdate = true;
+                        checkCmd.Parameters.AddWithValue("dsId", dataSetId.Value);
+                        checkCmd.Parameters.AddWithValue("fn", fileName);
+                        var existing = checkCmd.ExecuteScalar();
+                        if (existing != null)
+                        {
+                            parentId = (int)existing;
+                            isUpdate = true;
+                        }
+                    }
+                }
+
+                // Fallback: check by FileName alone
+                if (!isUpdate)
+                {
+                    using (var checkCmd = new NpgsqlCommand(
+                        "SELECT Id FROM ParentDocuments WHERE FileName = @fn LIMIT 1;", conn, trans))
+                    {
+                        checkCmd.Parameters.AddWithValue("fn", fileName);
+                        var existing = checkCmd.ExecuteScalar();
+                        if (existing != null)
+                        {
+                            parentId = (int)existing;
+                            isUpdate = true;
+                        }
                     }
                 }
 
                 if (isUpdate)
                 {
-                    // 2a. UPDATE existing document metadata
-                    using (var cmd = new NpgsqlCommand(@"
-                        UPDATE ParentDocuments 
-                        SET Metadata = @meta::jsonb, 
-                            DataSetId = COALESCE(@dataSetId, DataSetId),
-                            ProcessedAt = NOW()
-                        WHERE Id = @id;", conn, trans))
+                    // 2a. UPDATE existing document — merge the OS-specific file path
+                    string updateSql = IsWindows
+                        ? @"UPDATE ParentDocuments 
+                            SET Metadata = @meta::jsonb, 
+                                DataSetId = COALESCE(@dataSetId, DataSetId),
+                                WindowsFilePath = @fp,
+                                FilePath = COALESCE(FilePath, @fp),
+                                ProcessedAt = NOW()
+                            WHERE Id = @id;"
+                        : @"UPDATE ParentDocuments 
+                            SET Metadata = @meta::jsonb, 
+                                DataSetId = COALESCE(@dataSetId, DataSetId),
+                                LinuxFilePath = @fp,
+                                FilePath = COALESCE(FilePath, @fp),
+                                ProcessedAt = NOW()
+                            WHERE Id = @id;";
+
+                    using (var cmd = new NpgsqlCommand(updateSql, conn, trans))
                     {
                         cmd.Parameters.AddWithValue("id", parentId);
                         cmd.Parameters.AddWithValue("meta", json);
                         cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("fp", filePath);
                         cmd.ExecuteNonQuery();
                     }
 
@@ -435,13 +622,19 @@ public class DbService
                 }
                 else
                 {
-                    // 2b. INSERT new document
+                    // 2b. INSERT new document with OS-specific file path
+                    string winPath = IsWindows ? filePath : null!;
+                    string linPath = !IsWindows ? filePath : null!;
+
                     using (var cmd = new NpgsqlCommand(@"
-                        INSERT INTO ParentDocuments (FilePath, Metadata, DataSetId, ProcessedAt)
-                        VALUES (@fp, @meta::jsonb, @dataSetId, NOW())
+                        INSERT INTO ParentDocuments (FileName, FilePath, WindowsFilePath, LinuxFilePath, Metadata, DataSetId, ProcessedAt)
+                        VALUES (@fn, @fp, @winFp, @linFp, @meta::jsonb, @dataSetId, NOW())
                         RETURNING Id;", conn, trans))
                     {
+                        cmd.Parameters.AddWithValue("fn", fileName);
                         cmd.Parameters.AddWithValue("fp", filePath);
+                        cmd.Parameters.AddWithValue("winFp", (object?)winPath ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("linFp", (object?)linPath ?? DBNull.Value);
                         cmd.Parameters.AddWithValue("meta", json);
                         cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
                         var scalar = cmd.ExecuteScalar();
@@ -542,6 +735,7 @@ public class DbService
 
     /// <summary>
     /// Upsert full and thumb image records for a document in a single transaction.
+    /// Looks up by FileName (OS-independent key). Stores paths in OS-specific columns.
     /// Only updates an image if width > 0 and height > 0 (preserves existing if not provided).
     /// </summary>
     public void UpsertDocumentImages(string parentFilePath,
@@ -555,26 +749,33 @@ public class DbService
         {
             using var conn = _dataSource.OpenConnection();
 
-            // Get ALL parent IDs for this file (handles duplicate Windows/Linux path entries)
-            string fileName = System.IO.Path.GetFileName(parentFilePath);
+            // Look up parent by FileName (OS-independent)
+            string fileName = ExtractFileName(parentFilePath);
             var parentIds = new List<int>();
             using (var cmd = new NpgsqlCommand(
-                "SELECT Id FROM ParentDocuments WHERE FilePath = @fp OR FilePath LIKE @pattern;", conn))
+                "SELECT Id FROM ParentDocuments WHERE FileName = @fn;", conn))
             {
-                cmd.Parameters.AddWithValue("fp", parentFilePath);
-                cmd.Parameters.AddWithValue("pattern", $"%{fileName}");
+                cmd.Parameters.AddWithValue("fn", fileName);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
                     parentIds.Add(reader.GetInt32(0));
             }
             if (parentIds.Count == 0) return;
 
+            // Determine which OS-specific column to write
+            string winFullPath = IsWindows ? fullPath : null!;
+            string linFullPath = !IsWindows ? fullPath : null!;
+            string winThumbPath = IsWindows ? thumbPath : null!;
+            string linThumbPath = !IsWindows ? thumbPath : null!;
+
             string upsertSql = @"
-                INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, Width, Height)
-                VALUES (@pid, 'jpg', @size, @path, @w, @h)
+                INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, WindowsFilePath, LinuxFilePath, Width, Height)
+                VALUES (@pid, 'jpg', @size, @path, @winPath, @linPath, @w, @h)
                 ON CONFLICT (ParentId, ImageSize)
                 DO UPDATE SET
-                    FilePath = EXCLUDED.FilePath,
+                    FilePath = COALESCE(EXCLUDED.FilePath, DocumentImages.FilePath),
+                    WindowsFilePath = COALESCE(EXCLUDED.WindowsFilePath, DocumentImages.WindowsFilePath),
+                    LinuxFilePath = COALESCE(EXCLUDED.LinuxFilePath, DocumentImages.LinuxFilePath),
                     Width = EXCLUDED.Width,
                     Height = EXCLUDED.Height,
                     CreatedAt = NOW();
@@ -583,28 +784,35 @@ public class DbService
             using var trans = conn.BeginTransaction();
             try
             {
-                // Upsert full only if dimensions provided
-                if (fullWidth > 0 && fullHeight > 0)
+                foreach (var pid in parentIds)
                 {
-                    using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
-                    cmd.Parameters.AddWithValue("pid", parentId);
-                    cmd.Parameters.AddWithValue("size", "full");
-                    cmd.Parameters.AddWithValue("path", fullPath);
-                    cmd.Parameters.AddWithValue("w", fullWidth);
-                    cmd.Parameters.AddWithValue("h", fullHeight);
-                    cmd.ExecuteNonQuery();
-                }
+                    // Upsert full only if dimensions provided
+                    if (fullWidth > 0 && fullHeight > 0)
+                    {
+                        using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
+                        cmd.Parameters.AddWithValue("pid", pid);
+                        cmd.Parameters.AddWithValue("size", "full");
+                        cmd.Parameters.AddWithValue("path", fullPath);
+                        cmd.Parameters.AddWithValue("winPath", (object?)winFullPath ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("linPath", (object?)linFullPath ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("w", fullWidth);
+                        cmd.Parameters.AddWithValue("h", fullHeight);
+                        cmd.ExecuteNonQuery();
+                    }
 
-                // Upsert thumb only if dimensions provided
-                if (thumbWidth > 0 && thumbHeight > 0)
-                {
-                    using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
-                    cmd.Parameters.AddWithValue("pid", parentId);
-                    cmd.Parameters.AddWithValue("size", "thumb");
-                    cmd.Parameters.AddWithValue("path", thumbPath);
-                    cmd.Parameters.AddWithValue("w", thumbWidth);
-                    cmd.Parameters.AddWithValue("h", thumbHeight);
-                    cmd.ExecuteNonQuery();
+                    // Upsert thumb only if dimensions provided
+                    if (thumbWidth > 0 && thumbHeight > 0)
+                    {
+                        using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
+                        cmd.Parameters.AddWithValue("pid", pid);
+                        cmd.Parameters.AddWithValue("size", "thumb");
+                        cmd.Parameters.AddWithValue("path", thumbPath);
+                        cmd.Parameters.AddWithValue("winPath", (object?)winThumbPath ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("linPath", (object?)linThumbPath ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("w", thumbWidth);
+                        cmd.Parameters.AddWithValue("h", thumbHeight);
+                        cmd.ExecuteNonQuery();
+                    }
                 }
 
                 trans.Commit();
@@ -621,9 +829,9 @@ public class DbService
         }
     }
 
-    public async Task<List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName, string? People)>> SearchSimilarAsync(string query, int limit = 20)
+    public async Task<List<DocumentSearchResult>> SearchSimilarAsync(string query, int limit = 20)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
+        var results = new List<DocumentSearchResult>();
 
         try
         {
@@ -654,12 +862,11 @@ public class DbService
         return results;
     }
 
-    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit)
+    private async Task<List<DocumentSearchResult>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
+        var results = new List<DocumentSearchResult>();
 
-        // Vector similarity search using cosine distance
-        // Find best matching chunk for ranking, but return ALL chunks combined for display
+        // Vector similarity search — returns BOTH Windows and Linux paths
         string sql = @"
             WITH ranked_chunks AS (
                 SELECT
@@ -676,13 +883,18 @@ public class DbService
                 FROM ranked_chunks
                 WHERE rn = 1
             )
-            SELECT p.FilePath,
+            SELECT p.FileName,
+                   p.FilePath, p.WindowsFilePath, p.LinuxFilePath,
                    (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
                    bm.distance,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
+                   (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as WinThumbPath,
+                   (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as LinThumbPath,
+                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                   (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as WinFullImgPath,
+                   (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as LinFullImgPath,
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'People' as People
@@ -701,29 +913,17 @@ public class DbService
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            results.Add((
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetDouble(2),
-                reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8),
-                reader.IsDBNull(9) ? null : reader.GetString(9)
-            ));
+            results.Add(ReadSearchResult(reader));
         }
 
         return results;
     }
 
-    private async Task<List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit)
+    private async Task<List<DocumentSearchResult>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
+        var results = new List<DocumentSearchResult>();
 
-        // Full-text search using PostgreSQL tsvector
-        // Find best matching chunk for ranking, but return ALL chunks combined for display
+        // Full-text search — returns BOTH Windows and Linux paths
         string sql = @"
             WITH matching_docs AS (
                 SELECT DISTINCT c.ParentId,
@@ -735,13 +935,18 @@ public class DbService
                 ORDER BY score DESC
                 LIMIT @limit
             )
-            SELECT p.FilePath,
+            SELECT p.FileName,
+                   p.FilePath, p.WindowsFilePath, p.LinuxFilePath,
                    (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
                    md.score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
                    (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
+                   (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as WinThumbPath,
+                   (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as LinThumbPath,
+                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                   (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as WinFullImgPath,
+                   (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as LinFullImgPath,
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'People' as People
@@ -760,18 +965,7 @@ public class DbService
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            results.Add((
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.IsDBNull(2) ? 0.0 : reader.GetDouble(2),
-                reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
-                reader.IsDBNull(8) ? null : reader.GetString(8),
-                reader.IsDBNull(9) ? null : reader.GetString(9)
-            ));
+            results.Add(ReadSearchResult(reader));
         }
 
         return results;
@@ -780,15 +974,14 @@ public class DbService
     /// <summary>
     /// Exact text match search - only returns documents containing the exact query string
     /// </summary>
-    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName, string? People)> SearchExactMatch(string query, int limit = 20)
+    public List<DocumentSearchResult> SearchExactMatch(string query, int limit = 20)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
+        var results = new List<DocumentSearchResult>();
 
         try
         {
             using var conn = _dataSource.OpenConnection();
 
-            // Exact text match - only returns docs where the chunk contains the exact query string
             string sql = @"
                 WITH matching_docs AS (
                     SELECT DISTINCT c.ParentId
@@ -796,13 +989,18 @@ public class DbService
                     WHERE c.TextContent ILIKE @pattern
                     LIMIT @limit
                 )
-                SELECT p.FilePath,
+                SELECT p.FileName,
+                       p.FilePath, p.WindowsFilePath, p.LinuxFilePath,
                        (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
                        1.0 as score,
                        (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (p.Metadata->>'PageCount')::int as PageCount,
                        (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
+                       (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as WinThumbPath,
+                       (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as LinThumbPath,
+                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                       (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as WinFullImgPath,
+                       (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as LinFullImgPath,
                        s.Name as SourceName,
                        d.Name as DataSetName,
                        p.Metadata->>'People' as People
@@ -819,18 +1017,7 @@ public class DbService
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add((
-                    reader.GetString(0),
-                    reader.IsDBNull(1) ? "No text content" : reader.GetString(1),
-                    reader.GetDouble(2),
-                    reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5),
-                    reader.IsDBNull(6) ? null : reader.GetString(6),
-                    reader.IsDBNull(7) ? null : reader.GetString(7),
-                    reader.IsDBNull(8) ? null : reader.GetString(8),
-                    reader.IsDBNull(9) ? null : reader.GetString(9)
-                ));
+                results.Add(ReadSearchResult(reader));
             }
         }
         catch (Exception ex)
@@ -841,20 +1028,25 @@ public class DbService
         return results;
     }
 
-    public List<(string FilePath, string Text, double Distance, DateTime? Date, int PageCount, string? Thumbnail, string? FullImage, string? SourceName, string? DataSetName, string? People)> GetRecentDocuments(int limit = 10)
+    public List<DocumentSearchResult> GetRecentDocuments(int limit = 10)
     {
-        var results = new List<(string, string, double, DateTime?, int, string?, string?, string?, string?, string?)>();
+        var results = new List<DocumentSearchResult>();
         try
         {
             using var conn = _dataSource.OpenConnection();
             string sql = @"
-                SELECT p.FilePath,
+                SELECT p.FileName,
+                       p.FilePath, p.WindowsFilePath, p.LinuxFilePath,
                        (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as Text,
                        0.0 as Distance,
                        (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (p.Metadata->>'PageCount')::int as PageCount,
                        (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullPath,
+                       (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as WinThumbPath,
+                       (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as LinThumbPath,
+                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                       (SELECT WindowsFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as WinFullImgPath,
+                       (SELECT LinuxFilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as LinFullImgPath,
                        s.Name as SourceName,
                        d.Name as DataSetName,
                        p.Metadata->>'People' as People
@@ -871,18 +1063,7 @@ public class DbService
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                results.Add((
-                    reader.GetString(0),
-                    reader.IsDBNull(1) ? "No text content" : reader.GetString(1),
-                    reader.GetDouble(2),
-                    reader.IsDBNull(3) ? null : reader.GetDateTime(3),
-                    reader.IsDBNull(4) ? 0 : reader.GetInt32(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5),
-                    reader.IsDBNull(6) ? null : reader.GetString(6),
-                    reader.IsDBNull(7) ? null : reader.GetString(7),
-                    reader.IsDBNull(8) ? null : reader.GetString(8),
-                    reader.IsDBNull(9) ? null : reader.GetString(9)
-                ));
+                results.Add(ReadSearchResult(reader));
             }
         }
         catch (Exception ex)
@@ -913,6 +1094,36 @@ public class DbService
             Console.WriteLine($"Error getting counts: {ex.Message}");
             return (0, 0, 0);
         }
+    }
+
+    /// <summary>
+    /// Shared reader for the standardized 17-column search result layout.
+    /// Column order: FileName, FilePath, WindowsFilePath, LinuxFilePath, Text, Distance/Score,
+    /// DocDate, PageCount, ThumbPath, WinThumbPath, LinThumbPath, FullImgPath, WinFullImgPath, LinFullImgPath,
+    /// SourceName, DataSetName, People
+    /// </summary>
+    private static DocumentSearchResult ReadSearchResult(NpgsqlDataReader reader)
+    {
+        return new DocumentSearchResult
+        {
+            FileName        = reader.IsDBNull(0) ? "" : reader.GetString(0),
+            FilePath        = reader.IsDBNull(1) ? null : reader.GetString(1),
+            WindowsFilePath = reader.IsDBNull(2) ? null : reader.GetString(2),
+            LinuxFilePath   = reader.IsDBNull(3) ? null : reader.GetString(3),
+            Text            = reader.IsDBNull(4) ? "No text content" : reader.GetString(4),
+            Distance        = reader.IsDBNull(5) ? 0.0 : reader.GetDouble(5),
+            Date            = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+            PageCount       = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+            ThumbnailPath        = reader.IsDBNull(8) ? null : reader.GetString(8),
+            WindowsThumbnailPath = reader.IsDBNull(9) ? null : reader.GetString(9),
+            LinuxThumbnailPath   = reader.IsDBNull(10) ? null : reader.GetString(10),
+            FullImagePath        = reader.IsDBNull(11) ? null : reader.GetString(11),
+            WindowsFullImagePath = reader.IsDBNull(12) ? null : reader.GetString(12),
+            LinuxFullImagePath   = reader.IsDBNull(13) ? null : reader.GetString(13),
+            SourceName      = reader.IsDBNull(14) ? null : reader.GetString(14),
+            DataSetName     = reader.IsDBNull(15) ? null : reader.GetString(15),
+            People          = reader.IsDBNull(16) ? null : reader.GetString(16)
+        };
     }
 
     /// <summary>
@@ -1027,6 +1238,7 @@ public class DbService
         }
         return stats;
     }
+} // end DbService
 
 public class DataSetStats
 {
@@ -1038,6 +1250,55 @@ public class DataSetStats
     public long ChunkCount { get; set; }
     public DateTime? FirstProcessed { get; set; }
     public DateTime? LastProcessed { get; set; }
+}
+
+/// <summary>
+/// OS-agnostic search result from DbService. Carries BOTH Windows and Linux paths
+/// for documents, thumbnails, and full images. The consumer calls DbService.ResolvePath()
+/// to pick the right one for their OS.
+/// </summary>
+public class DocumentSearchResult
+{
+    public string FileName { get; set; } = "";
+    
+    // Document file paths — all three stored, consumer picks
+    public string? FilePath { get; set; }           // Legacy / fallback
+    public string? WindowsFilePath { get; set; }
+    public string? LinuxFilePath { get; set; }
+
+    // Thumbnail image paths
+    public string? ThumbnailPath { get; set; }      // Legacy
+    public string? WindowsThumbnailPath { get; set; }
+    public string? LinuxThumbnailPath { get; set; }
+
+    // Full image paths
+    public string? FullImagePath { get; set; }       // Legacy
+    public string? WindowsFullImagePath { get; set; }
+    public string? LinuxFullImagePath { get; set; }
+
+    // Content & metadata
+    public string Text { get; set; } = "";
+    public double Distance { get; set; }
+    public DateTime? Date { get; set; }
+    public int PageCount { get; set; }
+    public string? SourceName { get; set; }
+    public string? DataSetName { get; set; }
+    public string? People { get; set; }
+
+    /// <summary>
+    /// Resolve the document file path for the current OS.
+    /// </summary>
+    public string? ResolvedFilePath => DbService.ResolvePath(WindowsFilePath, LinuxFilePath, FilePath);
+
+    /// <summary>
+    /// Resolve the thumbnail path for the current OS.
+    /// </summary>
+    public string? ResolvedThumbnailPath => DbService.ResolvePath(WindowsThumbnailPath, LinuxThumbnailPath, ThumbnailPath);
+
+    /// <summary>
+    /// Resolve the full image path for the current OS.
+    /// </summary>
+    public string? ResolvedFullImagePath => DbService.ResolvePath(WindowsFullImagePath, LinuxFullImagePath, FullImagePath);
 }
 
 public class SystemStats
@@ -1053,6 +1314,8 @@ public class SystemStats
     public DateTime? LastProcessedAt { get; set; }
 }
 
+public partial class DbService
+{
     // ============================================================
     // REPROCESS MODE helpers
     // ============================================================
@@ -1067,8 +1330,8 @@ public class SystemStats
         {
             using var conn = _dataSource.OpenConnection();
             using var cmd = new NpgsqlCommand(@"
-                SELECT Id, FilePath, Metadata::text 
-                FROM ParentDocuments 
+                SELECT Id, COALESCE(FileName, FilePath, ''), Metadata::text 
+                FROM ParentDocuments p
                 ORDER BY Id
                 LIMIT @limit OFFSET @offset;", conn);
             cmd.Parameters.AddWithValue("limit", limit);
@@ -1157,7 +1420,7 @@ public class SystemStats
         {
             using var conn = _dataSource.OpenConnection();
             string sql = @"
-                SELECT c.Id, c.ParentId, c.TextContent, p.FilePath
+                SELECT c.Id, c.ParentId, c.TextContent, COALESCE(p.FileName, p.FilePath, '')
                 FROM DocumentChunks c
                 JOIN ParentDocuments p ON c.ParentId = p.Id
                 WHERE c.Embedding IS NULL
@@ -1230,22 +1493,23 @@ public class SystemStats
         }
     }
 
-    public List<(string ImageType, string ImageSize, string FilePath, int Width, int Height)> GetDocumentImages(string parentFilePath)
+    public List<(string ImageType, string ImageSize, string? FilePath, string? WindowsFilePath, string? LinuxFilePath, int Width, int Height)> GetDocumentImages(string parentFilePath)
     {
-        var results = new List<(string, string, string, int, int)>();
+        var results = new List<(string, string, string?, string?, string?, int, int)>();
         try
         {
             using var conn = _dataSource.OpenConnection();
+            string fileName = ExtractFileName(parentFilePath);
             string sql = @"
-                SELECT i.ImageType, i.ImageSize, i.FilePath, i.Width, i.Height
+                SELECT i.ImageType, i.ImageSize, i.FilePath, i.WindowsFilePath, i.LinuxFilePath, i.Width, i.Height
                 FROM DocumentImages i
                 JOIN ParentDocuments p ON i.ParentId = p.Id
-                WHERE p.FilePath = @fp
+                WHERE p.FileName = @fn
                 ORDER BY i.ImageSize;
             ";
             
             using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("fp", parentFilePath);
+            cmd.Parameters.AddWithValue("fn", fileName);
             
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -1253,9 +1517,11 @@ public class SystemStats
                 results.Add((
                     reader.GetString(0),
                     reader.GetString(1),
-                    reader.GetString(2),
-                    reader.GetInt32(3),
-                    reader.GetInt32(4)
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.GetInt32(5),
+                    reader.GetInt32(6)
                 ));
             }
         }
