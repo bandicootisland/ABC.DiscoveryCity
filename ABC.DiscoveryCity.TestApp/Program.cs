@@ -107,7 +107,7 @@ catch (Exception ex)
 
 // Initialize Services
 ThumbnailService? thumbnailService = null;
-TelerikThumbnailService? telerikThumbnailService = null;
+PdfImageExtractor? pdfImageExtractor = null;
 
 if (noImages)
 {
@@ -115,8 +115,8 @@ if (noImages)
 }
 else if (renderDirect)
 {
-    Console.WriteLine("Using Telerik direct rendering for thumbnails (no browser)");
-    telerikThumbnailService = new TelerikThumbnailService();
+    Console.WriteLine("Using Telerik direct image extraction for thumbnails (no browser)");
+    pdfImageExtractor = new PdfImageExtractor();
 }
 else
 {
@@ -470,7 +470,7 @@ foreach (var folder in targetFolders)
             int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
             Console.WriteLine($"[{currentCount}] Processing: {System.IO.Path.GetFileName(pdfPath)}");
             
-            await ProcessPdf(pdfPath, thumbnailService, telerikThumbnailService, dataSetId);
+            await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId);
             
             // Mark text extraction as done
             System.IO.File.Create(doneFile).Dispose();
@@ -513,7 +513,7 @@ if (pendingImageTasks.Count > 0)
     Console.WriteLine("All image tasks completed.");
 }
 
-async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, TelerikThumbnailService? telerikThumbnailService, int? dataSetId = null, bool inspectMode = false)
+async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfImageExtractor? pdfImageExtractor, int? dataSetId = null, bool inspectMode = false)
 {
     // Skip if already processed (for distributed processing)
     if (dbService.DocumentExists(pdfPath))
@@ -627,20 +627,18 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
                 string thumbPath = ""; int thumbW = 0, thumbH = 0;
                 string fullPath = ""; int fullW = 0, fullH = 0;
 
-                if (telerikThumbnailService != null)
+                if (pdfImageExtractor != null)
                 {
-                    // Use Telerik direct rendering (no browser needed)
-                    var (tPath, fPath) = telerikThumbnailService.GenerateThumbnails(telerikDoc, pdfPath);
+                    // Use Telerik direct image extraction (no browser needed)
+                    var (fPath, tPath, w, h) = pdfImageExtractor.ExtractPageImage(pdfPath);
 
-                    if (!string.IsNullOrEmpty(tPath) && System.IO.File.Exists(tPath))
+                    if (!string.IsNullOrEmpty(fPath))
                     {
-                        using var img = SixLabors.ImageSharp.Image.Load(tPath);
-                        (thumbPath, thumbW, thumbH) = (tPath, img.Width, img.Height);
+                        (fullPath, fullW, fullH) = (fPath, w, h);
                     }
-                    if (!string.IsNullOrEmpty(fPath) && System.IO.File.Exists(fPath))
+                    if (!string.IsNullOrEmpty(tPath))
                     {
-                        using var img = SixLabors.ImageSharp.Image.Load(fPath);
-                        (fullPath, fullW, fullH) = (fPath, img.Width, img.Height);
+                        (thumbPath, thumbW, thumbH) = (tPath, 100, h > 0 && w > 0 ? (int)(100.0 * h / w) : 0);
                     }
                 }
                 else if (thumbnailService != null)

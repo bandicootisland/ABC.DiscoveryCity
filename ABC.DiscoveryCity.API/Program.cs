@@ -80,6 +80,8 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("AllowAll");
 
+app.UseStaticFiles(); // Serve wwwroot (pdf.js viewer, etc.)
+
 app.UseAuthorization();
 
 app.MapControllers();

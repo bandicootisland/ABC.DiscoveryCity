@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>PDF Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #fff; }
+        #pdf-canvas { display: block; }
+    </style>
+</head>
+<body>
+    <canvas id="pdf-canvas"></canvas>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs" type="module"></script>
+    <script type="module">
+        // pdf.js 4.x uses ES modules
+        const pdfjsLib = await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs';
+
+        const params = new URLSearchParams(window.location.search);
+        const pdfUrl = params.get('file');
+        const pageNum = parseInt(params.get('page') || '1');
+        const scale = parseFloat(params.get('scale') || '1.5');
+
+        if (!pdfUrl) {
+            document.body.innerHTML = '<p style="color:red;padding:20px">No file parameter</p>';
+            throw new Error('No file parameter');
+        }
+
+        try {
+            const pdf = await pdfjsLib.getDocument(pdfUrl).promise;
+            const page = await pdf.getPage(pageNum);
+            
+            const viewport = page.getViewport({ scale });
+            const canvas = document.getElementById('pdf-canvas');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            
+            // Resize body to match canvas
+            document.body.style.width = viewport.width + 'px';
+            document.body.style.height = viewport.height + 'px';
+
+            const ctx = canvas.getContext('2d');
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            
+            // Signal to Playwright that rendering is complete
+            document.title = 'PDF_RENDERED';
+        } catch (err) {
+            document.body.innerHTML = `<p style="color:red;padding:20px">Error: ${err.message}</p>`;
+            document.title = 'PDF_ERROR';
+        }
+    </script>
+</body>
+</html>
