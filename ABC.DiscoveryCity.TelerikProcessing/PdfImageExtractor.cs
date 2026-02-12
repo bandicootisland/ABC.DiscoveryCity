@@ -123,6 +123,80 @@ public class PdfImageExtractor
     }
 
     /// <summary>
+    /// Diagnostic: dump ImageSource colorspace internals for a PDF image.
+    /// Useful for identifying colorspace types and palette data.
+    /// </summary>
+    public void DiagnoseDump(string pdfPath, int pageIndex = 0)
+    {
+        var provider = new PdfFormatProvider();
+        RadFixedDocument doc;
+        using (var stream = File.OpenRead(pdfPath))
+            doc = provider.Import(stream);
+
+        var page = doc.Pages[pageIndex];
+        Console.WriteLine($"Page {pageIndex + 1}: Size={page.Size.Width:F0}x{page.Size.Height:F0}, Content elements: {page.Content.Count}");
+
+        foreach (var element in page.Content)
+        {
+            if (element is Telerik.Windows.Documents.Fixed.Model.Objects.Image img && img.ImageSource != null)
+            {
+                var src = img.ImageSource;
+                var encodedData = src.GetEncodedImageData();
+                Console.WriteLine($"  Image: {(int)encodedData.Width}x{(int)encodedData.Height}, Filter={encodedData.Filters?.FirstOrDefault()}, " +
+                    $"ColorSpace={encodedData.ColorSpace}, BPC={encodedData.BitsPerComponent}, Data={encodedData.Data?.Length:N0} bytes");
+
+                // Extract internal colorspace object via reflection
+                var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                var (csObj, _) = GetColorSpaceObject(src);
+                if (csObj != null)
+                {
+                    Console.WriteLine($"  ColorSpace object: {csObj.GetType().FullName}");
+                    var lookupProp = csObj.GetType().GetProperty("Lookup", flags);
+                    var baseProp = csObj.GetType().GetProperty("Base", flags);
+                    var hiValProp = csObj.GetType().GetProperty("HiVal", flags);
+                    if (lookupProp != null)
+                    {
+                        var palette = lookupProp.GetValue(csObj) as byte[];
+                        Console.WriteLine($"  Palette: {palette?.Length ?? 0} bytes, Base={baseProp?.GetValue(csObj)}, HiVal={hiValProp?.GetValue(csObj)}");
+                        if (palette != null)
+                        {
+                            // Print hash + first/last few entries for comparison
+                            var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(palette))[..16];
+                            Console.WriteLine($"  Palette SHA256 prefix: {hash}");
+                            Console.WriteLine($"  First 5 entries: {string.Join(" | ", Enumerable.Range(0, Math.Min(5, palette.Length / 3)).Select(i => $"[{i}]=({palette[i*3]},{palette[i*3+1]},{palette[i*3+2]})"))}");
+                            int maxIdx = palette.Length / 3;
+                            Console.WriteLine($"  Last 5 entries: {string.Join(" | ", Enumerable.Range(Math.Max(0, maxIdx - 5), Math.Min(5, maxIdx)).Select(i => $"[{i}]=({palette[i*3]},{palette[i*3+1]},{palette[i*3+2]})"))}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Extract the internal ColorSpace object from an ImageSource via reflection.
+    /// Returns (colorSpaceObject, typeName) or (null, null) on failure.
+    /// Path: ImageSource.colorSpace (PdfProperty&lt;ColorSpaceBase&gt;) → .Value
+    /// </summary>
+    private static (object? csObj, string? typeName) GetColorSpaceObject(ImageSource imageSource)
+    {
+        try
+        {
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var csField = imageSource.GetType().GetField("colorSpace", flags);
+            if (csField == null) return (null, null);
+
+            var csWrapper = csField.GetValue(imageSource);
+            if (csWrapper == null) return (null, null);
+
+            var valueProp = csWrapper.GetType().GetProperty("Value", flags);
+            var csObj = valueProp?.GetValue(csWrapper);
+            return (csObj, csObj?.GetType().Name);
+        }
+        catch { return (null, null); }
+    }
+
+    /// <summary>
     /// Extracts the largest image from the first page and saves it as JPEG.
     /// Handles FlateDecode (zlib), DCTDecode (JPEG) with DeviceGray, DeviceRGB, Indexed colorspaces.
     /// Returns (fullImagePath, thumbPath, width, height) or empty strings on failure.
@@ -188,6 +262,8 @@ public class PdfImageExtractor
         string colorSpace = encodedData.ColorSpace?.ToString() ?? "";
         int bpc = encodedData.BitsPerComponent;
 
+        Console.WriteLine($"  [IMG] {Path.GetFileName(pdfPath)}: {imgWidth}x{imgHeight}, Filter={filter}, ColorSpace={colorSpace} (Type={encodedData.ColorSpace?.GetType().Name}), BPC={bpc}");
+
         // Output paths
         string baseName = Path.GetFileNameWithoutExtension(pdfPath);
         string dir = outputDir ?? Path.GetDirectoryName(pdfPath) ?? ".";
@@ -223,9 +299,8 @@ public class PdfImageExtractor
                 else if (colorSpace.Contains("Indexed"))
                 {
                     // Indexed: 1 byte per pixel indexing into a palette
-                    // The palette is embedded in the colorspace definition
-                    // For scanned docs, usually grayscale palette
-                    resultImage = BuildIndexedImage(rawPixels, imgWidth, imgHeight, encodedData);
+                    // Extract palette from ImageSource's internal Indexed colorspace object
+                    resultImage = BuildIndexedImage(rawPixels, imgWidth, imgHeight, largestImage.ImageSource);
                 }
                 else
                 {
@@ -377,71 +452,80 @@ public class PdfImageExtractor
 
     /// <summary>
     /// Build image from indexed (palette) pixel data.
-    /// For scanned documents, the palette is typically grayscale.
-    /// We attempt to extract the palette from EncodedImageData; if unavailable, use linear grayscale.
+    /// Extracts the palette from Telerik's internal Indexed colorspace object
+    /// (via ImageSource → PdfProperty&lt;ColorSpaceBase&gt; → Indexed.Lookup).
+    /// Preserves colour when the palette contains distinct RGB entries;
+    /// falls back to grayscale only when the palette is absent or purely gray.
     /// </summary>
-    private static SixLabors.ImageSharp.Image BuildIndexedImage(byte[] rawPixels, int width, int height, EncodedImageData encodedData)
+    private static SixLabors.ImageSharp.Image BuildIndexedImage(byte[] rawPixels, int width, int height, ImageSource imageSource)
     {
-        // Try to extract palette via reflection from the colorspace
         byte[]? palette = null;
-        int paletteSize = 256; // Typical for 8bpc indexed
 
         try
         {
-            // EncodedImageData.ColorSpace might have palette info
-            var csType = encodedData.ColorSpace?.GetType();
-            if (csType != null)
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var (csObj, _) = GetColorSpaceObject(imageSource);
+            if (csObj != null)
             {
-                // Look for palette/lookup/colors property
-                var props = csType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                foreach (var p in props)
+                var lookupProp = csObj.GetType().GetProperty("Lookup", flags);
+                palette = lookupProp?.GetValue(csObj) as byte[];
+                if (palette != null)
                 {
-                    if (p.PropertyType == typeof(byte[]) && p.Name.Contains("ookup", StringComparison.OrdinalIgnoreCase))
-                    {
-                        palette = p.GetValue(encodedData.ColorSpace) as byte[];
-                        break;
-                    }
+                    var baseProp = csObj.GetType().GetProperty("Base", flags);
+                    var hiValProp = csObj.GetType().GetProperty("HiVal", flags);
+                    Console.WriteLine($"  [INDEXED] Palette extracted: {palette.Length} bytes, Base={baseProp?.GetValue(csObj)}, HiVal={hiValProp?.GetValue(csObj)}");
                 }
             }
         }
-        catch { }
-
-        var image = new Image<L8>(width, height);
+        catch (Exception ex) { Console.WriteLine($"  [INDEXED] Palette extraction error: {ex.Message}"); }
 
         if (palette != null && palette.Length >= 3)
         {
-            // Palette has RGB entries: each index maps to 3 bytes (R,G,B)
             int maxIdx = palette.Length / 3;
-            for (int y = 0; y < height && y * width < rawPixels.Length; y++)
+
+            // Detect whether the palette is truly grayscale (every entry has R==G==B)
+            bool isGrayPalette = true;
+            for (int i = 0; i < maxIdx && isGrayPalette; i++)
             {
-                for (int x = 0; x < width && (y * width + x) < rawPixels.Length; x++)
-                {
-                    int idx = rawPixels[y * width + x];
-                    if (idx < maxIdx)
+                byte r = palette[i * 3], g = palette[i * 3 + 1], b = palette[i * 3 + 2];
+                if (r != g || g != b) isGrayPalette = false;
+            }
+
+            if (isGrayPalette)
+            {
+                // Pure grayscale palette — output L8
+                var grayImage = new Image<L8>(width, height);
+                for (int y = 0; y < height && y * width < rawPixels.Length; y++)
+                    for (int x = 0; x < width && (y * width + x) < rawPixels.Length; x++)
                     {
-                        byte r = palette[idx * 3];
-                        byte g = palette[idx * 3 + 1];
-                        byte b = palette[idx * 3 + 2];
-                        // Convert to grayscale luminance
-                        byte gray = (byte)(0.299 * r + 0.587 * g + 0.114 * b);
-                        image[x, y] = new L8(gray);
+                        int idx = rawPixels[y * width + x];
+                        grayImage[x, y] = new L8(idx < maxIdx ? palette[idx * 3] : (byte)0);
                     }
-                }
+                return grayImage;
+            }
+            else
+            {
+                // Colour palette — preserve full RGB
+                var rgbImage = new Image<Rgb24>(width, height);
+                for (int y = 0; y < height && y * width < rawPixels.Length; y++)
+                    for (int x = 0; x < width && (y * width + x) < rawPixels.Length; x++)
+                    {
+                        int idx = rawPixels[y * width + x];
+                        if (idx < maxIdx)
+                            rgbImage[x, y] = new Rgb24(palette[idx * 3], palette[idx * 3 + 1], palette[idx * 3 + 2]);
+                    }
+                return rgbImage;
             }
         }
         else
         {
             // No palette found — assume linear grayscale mapping
+            var grayImage = new Image<L8>(width, height);
             for (int y = 0; y < height && y * width < rawPixels.Length; y++)
-            {
                 for (int x = 0; x < width && (y * width + x) < rawPixels.Length; x++)
-                {
-                    image[x, y] = new L8(rawPixels[y * width + x]);
-                }
-            }
+                    grayImage[x, y] = new L8(rawPixels[y * width + x]);
+            return grayImage;
         }
-
-        return image;
     }
 
 }

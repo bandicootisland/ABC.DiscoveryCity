@@ -57,6 +57,16 @@ for (int i = 0; i < args.Length; i++)
 }
 string[] priorityDataSets = positionalArgs.Count > 0 ? positionalArgs.ToArray() : new[] { "DataSet 11" };
 
+// Quick diagnostic: dump ImageSource internals for a PDF
+if (args.Any(a => a.Equals("--diag-image", StringComparison.OrdinalIgnoreCase)))
+{
+    string diagPdf = args.SkipWhile(a => !a.Equals("--diag-image", StringComparison.OrdinalIgnoreCase)).Skip(1).FirstOrDefault()
+        ?? "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/DataSet 10/PDFs/EFTA01302373.pdf";
+    var ext = new PdfImageExtractor();
+    ext.DiagnoseDump(diagPdf);
+    return;
+}
+
 // Quick Test Commands
 if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.OrdinalIgnoreCase))
 {
@@ -408,7 +418,8 @@ if (imagesOnly)
 // BATCH TEST LIMIT - set to 0 for unlimited, or a number to limit processing
 int MAX_FILES = limitFiles;
 int totalFiles = 0;
-int processedFiles = 0;
+int startedFiles = 0;   // Atomically claimed BEFORE work begins (for accurate limit enforcement)
+int processedFiles = 0;  // Incremented AFTER work completes
 int skippedFiles = 0;
 var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>(); 
 
@@ -479,8 +490,8 @@ foreach (var folder in targetFolders)
     var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism };
     await Parallel.ForEachAsync(pdfFiles, parallelOptions, async (pdfPath, ct) =>
     {
-        // Check global processed count loosely
-        if (MAX_FILES > 0 && processedFiles >= MAX_FILES) return;
+        // Atomically claim a slot before doing any work — prevents over-processing
+        if (MAX_FILES > 0 && System.Threading.Interlocked.Increment(ref startedFiles) > MAX_FILES) return;
 
         try 
         {
