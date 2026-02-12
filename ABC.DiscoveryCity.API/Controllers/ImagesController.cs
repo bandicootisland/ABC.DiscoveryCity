@@ -32,7 +32,8 @@ public class ImagesController : ControllerBase
                     FileName = i.FileName,
                     Width = i.Width,
                     Height = i.Height,
-                    Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(resolvedPath)}"
+                    HasData = i.ImageData != null,
+                    Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(i.FileName ?? resolvedPath)}"
                 };
             })
             .ToList();
@@ -49,24 +50,31 @@ public class ImagesController : ControllerBase
         // Resolve the path for the current OS — handles Windows paths on Linux and vice versa
         var resolvedPath = DbService.ResolveFilePathForCurrentOs(path);
 
-        if (!System.IO.File.Exists(resolvedPath))
+        if (System.IO.File.Exists(resolvedPath))
         {
-            return NotFound($"File not found: {resolvedPath}");
+            var extension = Path.GetExtension(resolvedPath).ToLowerInvariant();
+            string contentType = extension switch
+            {
+                ".pdf" => "application/pdf",
+                ".jpg" => "image/jpeg",
+                ".jpeg" => "image/jpeg",
+                ".png" => "image/png",
+                ".json" => "application/json",
+                _ => "application/octet-stream"
+            };
+            
+            var stream = System.IO.File.OpenRead(resolvedPath);
+            return File(stream, contentType);
         }
 
-        var extension = Path.GetExtension(resolvedPath).ToLowerInvariant();
-        string contentType = extension switch
+        // File not on disk — try serving from DB binary data
+        var imageData = _dbService.GetImageData(path);
+        if (imageData != null)
         {
-            ".pdf" => "application/pdf",
-            ".jpg" => "image/jpeg",
-            ".jpeg" => "image/jpeg",
-            ".png" => "image/png",
-            ".json" => "application/json",
-            _ => "application/octet-stream"
-        };
-        
-        var stream = System.IO.File.OpenRead(resolvedPath);
-        return File(stream, contentType);
+            return File(imageData, "image/jpeg");
+        }
+
+        return NotFound($"File not found: {resolvedPath}");
     }
 }
 
@@ -78,5 +86,6 @@ public class ImageDto
     public string? FileName { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
+    public bool HasData { get; set; }
     public string Url { get; set; } = string.Empty;
 }

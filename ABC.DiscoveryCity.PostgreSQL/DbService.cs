@@ -750,7 +750,8 @@ public partial class DbService
     /// </summary>
     public void UpsertDocumentImages(string parentFilePath,
         string fullPath, int fullWidth, int fullHeight,
-        string thumbPath, int thumbWidth, int thumbHeight)
+        string thumbPath, int thumbWidth, int thumbHeight,
+        byte[]? previewData = null, byte[]? thumbData = null)
     {
         // Skip if nothing to update
         if (fullWidth <= 0 && fullHeight <= 0 && thumbWidth <= 0 && thumbHeight <= 0) return;
@@ -773,14 +774,15 @@ public partial class DbService
             if (parentIds.Count == 0) return;
 
             string upsertSql = @"
-                INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, FileName, Width, Height)
-                VALUES (@pid, 'jpg', @size, @path, @fname, @w, @h)
+                INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, FileName, Width, Height, ImageData)
+                VALUES (@pid, 'jpg', @size, @path, @fname, @w, @h, @data)
                 ON CONFLICT (ParentId, ImageSize)
                 DO UPDATE SET
                     FilePath = COALESCE(EXCLUDED.FilePath, DocumentImages.FilePath),
                     FileName = COALESCE(EXCLUDED.FileName, DocumentImages.FileName),
                     Width = EXCLUDED.Width,
                     Height = EXCLUDED.Height,
+                    ImageData = COALESCE(EXCLUDED.ImageData, DocumentImages.ImageData),
                     CreatedAt = NOW();
             ";
 
@@ -789,7 +791,7 @@ public partial class DbService
             {
                 foreach (var pid in parentIds)
                 {
-                    // Upsert full only if dimensions provided
+                    // Upsert full/preview only if dimensions provided
                     if (fullWidth > 0 && fullHeight > 0)
                     {
                         using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
@@ -799,6 +801,7 @@ public partial class DbService
                         cmd.Parameters.AddWithValue("fname", ExtractFileName(fullPath));
                         cmd.Parameters.AddWithValue("w", fullWidth);
                         cmd.Parameters.AddWithValue("h", fullHeight);
+                        cmd.Parameters.AddWithValue("data", (object?)previewData ?? DBNull.Value);
                         cmd.ExecuteNonQuery();
                     }
 
@@ -812,6 +815,7 @@ public partial class DbService
                         cmd.Parameters.AddWithValue("fname", ExtractFileName(thumbPath));
                         cmd.Parameters.AddWithValue("w", thumbWidth);
                         cmd.Parameters.AddWithValue("h", thumbHeight);
+                        cmd.Parameters.AddWithValue("data", (object?)thumbData ?? DBNull.Value);
                         cmd.ExecuteNonQuery();
                     }
                 }
@@ -1553,15 +1557,15 @@ public partial class DbService
         }
     }
 
-    public List<(string ImageType, string ImageSize, string? FilePath, string? FileName, int Width, int Height)> GetDocumentImages(string parentFilePath)
+    public List<(string ImageType, string ImageSize, string? FilePath, string? FileName, int Width, int Height, byte[]? ImageData)> GetDocumentImages(string parentFilePath)
     {
-        var results = new List<(string, string, string?, string?, int, int)>();
+        var results = new List<(string, string, string?, string?, int, int, byte[]?)>();
         try
         {
             using var conn = _dataSource.OpenConnection();
             string fileName = ExtractFileName(parentFilePath);
             string sql = @"
-                SELECT i.ImageType, i.ImageSize, i.FilePath, i.FileName, i.Width, i.Height
+                SELECT i.ImageType, i.ImageSize, i.FilePath, i.FileName, i.Width, i.Height, i.ImageData
                 FROM DocumentImages i
                 JOIN ParentDocuments p ON i.ParentId = p.Id
                 WHERE p.FileName = @fn
@@ -1580,7 +1584,8 @@ public partial class DbService
                     reader.IsDBNull(2) ? null : reader.GetString(2),
                     reader.IsDBNull(3) ? null : reader.GetString(3),
                     reader.GetInt32(4),
-                    reader.GetInt32(5)
+                    reader.GetInt32(5),
+                    reader.IsDBNull(6) ? null : (byte[])reader[6]
                 ));
             }
         }
@@ -1589,5 +1594,36 @@ public partial class DbService
             Console.WriteLine($"Error getting images: {ex.Message}");
         }
         return results;
+    }
+
+    /// <summary>
+    /// Get image binary data directly from DB by file path.
+    /// Used as fallback when image file is not available on the local OS.
+    /// </summary>
+    public byte[]? GetImageData(string imagePath)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            string fileName = ExtractFileName(imagePath);
+
+            // Try matching by FileName in documentimages
+            string sql = @"
+                SELECT ImageData FROM DocumentImages 
+                WHERE FileName = @fn AND ImageData IS NOT NULL
+                LIMIT 1;
+            ";
+
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("fn", fileName);
+
+            var result = cmd.ExecuteScalar();
+            return result as byte[];
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting image data: {ex.Message}");
+            return null;
+        }
     }
 }

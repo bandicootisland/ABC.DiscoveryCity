@@ -105,10 +105,11 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
     
     /// <summary>
     /// Generate screenshots of the first 3 pages of the PDF.
+    /// Returns (FilePath, Width, Height, ImageData) for each image.
     /// </summary>
-    public async Task<List<(string FilePath, int Width, int Height)>> GeneratePageImagesAsync(string pdfPath)
+    public async Task<List<(string FilePath, int Width, int Height, byte[]? ImageData)>> GeneratePageImagesAsync(string pdfPath)
     {
-        var results = new List<(string, int, int)>();
+        var results = new List<(string, int, int, byte[]?)>();
 
         if (!_initialized || _browserinstances.Count==0)
         {
@@ -213,11 +214,28 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
             //results.Add((outputPath, original.Width, original.Height)); but dont kjnow height width
             if (File.Exists(outputPath))
                 {
-                    // Resize to thumbnail using ImageSharp
+                    // Resize preview and create thumbnail using ImageSharp
                     try
                     {
                         using var original = Image.Load(outputPath);
-                        results.Add((outputPath, original.Width, original.Height));
+
+                        // Resize preview to max 400px wide for compact storage
+                        int previewMaxWidth = 400;
+                        if (original.Width > previewMaxWidth)
+                        {
+                            int previewHeight = (int)Math.Round(original.Height * (previewMaxWidth / (double)original.Width));
+                            original.Mutate(ctx => ctx.Resize(previewMaxWidth, previewHeight));
+                        }
+                        original.SaveAsJpeg(outputPath, new JpegEncoder { Quality = 70 });
+
+                        // Capture preview bytes
+                        byte[]? previewBytes;
+                        using (var ms = new MemoryStream())
+                        {
+                            original.SaveAsJpeg(ms, new JpegEncoder { Quality = 70 });
+                            previewBytes = ms.ToArray();
+                        }
+                        results.Add((outputPath, original.Width, original.Height, previewBytes));
 
                         int targetWidth = 100; // Small thumbnail for shape preview
                         int targetHeight = (int)((float)original.Height / original.Width * targetWidth);
@@ -226,15 +244,23 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
 
                         // Clone and resize for thumbnail
                         using var thumbnail = original.Clone(ctx => ctx.Resize(targetWidth, targetHeight));
-                        thumbnail.Save(thumbPath, new JpegEncoder { Quality = 85 });
+                        thumbnail.Save(thumbPath, new JpegEncoder { Quality = 75 });
 
-                        Console.WriteLine($"  Page{pageNum}: Resized to {targetWidth}x{targetHeight} ({outputPath})");
-                        results.Add((thumbPath, targetWidth, targetHeight));
+                        // Capture thumb bytes
+                        byte[]? thumbBytes;
+                        using (var ms = new MemoryStream())
+                        {
+                            thumbnail.SaveAsJpeg(ms, new JpegEncoder { Quality = 75 });
+                            thumbBytes = ms.ToArray();
+                        }
+
+                        Console.WriteLine($"  Page{pageNum}: Preview {original.Width}x{original.Height}, Thumb {targetWidth}x{targetHeight} ({outputPath})");
+                        results.Add((thumbPath, targetWidth, targetHeight, thumbBytes));
                     }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"  [WARN] Resize failed page {pageNum}: {ex.Message}");
-                        results.Add((outputPath, 0, 0));
+                        results.Add((outputPath, 0, 0, null));
                     }
                 }
                 else
