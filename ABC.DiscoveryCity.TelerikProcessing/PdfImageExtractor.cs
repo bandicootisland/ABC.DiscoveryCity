@@ -207,7 +207,7 @@ public class PdfImageExtractor
     /// Optional output directory for generated images.
     /// If null, images are saved alongside the PDF.
     /// </param>
-    public (string FullPath, string ThumbPath, int Width, int Height) ExtractPageImage(string pdfPath, int pageIndex = 0, string? outputDir = null)
+    public (string FullPath, string ThumbPath, int Width, int Height, byte[] PreviewData, byte[] ThumbData) ExtractPageImage(string pdfPath, int pageIndex = 0, string? outputDir = null)
     {
         var provider = new PdfFormatProvider();
         RadFixedDocument doc;
@@ -218,7 +218,7 @@ public class PdfImageExtractor
         }
 
         if (doc.Pages.Count == 0 || pageIndex >= doc.Pages.Count)
-            return (string.Empty, string.Empty, 0, 0);
+            return (string.Empty, string.Empty, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
 
         var page = doc.Pages[pageIndex];
 
@@ -240,7 +240,7 @@ public class PdfImageExtractor
         }
 
         if (largestImage?.ImageSource == null)
-            return (string.Empty, string.Empty, 0, 0);
+            return (string.Empty, string.Empty, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
 
         // Get encoded image data
         EncodedImageData? encodedData = null;
@@ -250,11 +250,11 @@ public class PdfImageExtractor
         }
         catch
         {
-            return (string.Empty, string.Empty, 0, 0);
+            return (string.Empty, string.Empty, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
         }
 
         if (encodedData?.Data == null || encodedData.Data.Length == 0)
-            return (string.Empty, string.Empty, 0, 0);
+            return (string.Empty, string.Empty, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
 
         int imgWidth = (int)encodedData.Width;
         int imgHeight = (int)encodedData.Height;
@@ -312,31 +312,57 @@ public class PdfImageExtractor
             else
             {
                 Console.Error.WriteLine($"  [WARN] Unsupported filter: {filter}");
-                return (string.Empty, string.Empty, 0, 0);
+                return (string.Empty, string.Empty, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
             }
 
             if (resultImage == null)
-                return (string.Empty, string.Empty, 0, 0);
+                return (string.Empty, string.Empty, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
 
-            // Save full-size JPEG
+            // Save preview JPEG — resized to max 400px wide for compact storage
+            byte[] previewBytes = Array.Empty<byte>();
+            byte[] thumbBytes = Array.Empty<byte>();
+            int finalW = 0, finalH = 0;
             using (resultImage)
             {
-                resultImage.SaveAsJpeg(fullPath, new JpegEncoder { Quality = 85 });
+                int previewMaxWidth = 400;
+                if (resultImage.Width > previewMaxWidth)
+                {
+                    int previewHeight = (int)Math.Round(resultImage.Height * (previewMaxWidth / (double)resultImage.Width));
+                    resultImage.Mutate(ctx => ctx.Resize(previewMaxWidth, previewHeight));
+                }
+                finalW = resultImage.Width;
+                finalH = resultImage.Height;
+
+                resultImage.SaveAsJpeg(fullPath, new JpegEncoder { Quality = 70 });
+
+                // Capture preview bytes for DB storage
+                using (var ms = new MemoryStream())
+                {
+                    resultImage.SaveAsJpeg(ms, new JpegEncoder { Quality = 70 });
+                    previewBytes = ms.ToArray();
+                }
 
                 // Create thumbnail
                 int thumbWidth = 100;
                 int thumbHeight = (int)Math.Round(resultImage.Height * (thumbWidth / (double)resultImage.Width));
 
                 using var thumb = resultImage.Clone(ctx => ctx.Resize(thumbWidth, thumbHeight));
-                thumb.SaveAsJpeg(thumbPath, new JpegEncoder { Quality = 85 });
+                thumb.SaveAsJpeg(thumbPath, new JpegEncoder { Quality = 75 });
+
+                // Capture thumb bytes for DB storage
+                using (var ms = new MemoryStream())
+                {
+                    thumb.SaveAsJpeg(ms, new JpegEncoder { Quality = 75 });
+                    thumbBytes = ms.ToArray();
+                }
             }
 
-            return (fullPath, thumbPath, imgWidth, imgHeight);
+            return (fullPath, thumbPath, finalW, finalH, previewBytes, thumbBytes);
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"  [ERROR] Image extraction: {ex.Message}");
-            return (string.Empty, string.Empty, 0, 0);
+            return (string.Empty, string.Empty, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
         }
     }
 

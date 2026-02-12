@@ -372,20 +372,28 @@ if (imagesOnly)
 
                     string thumbPath = ""; int thumbW = 0, thumbH = 0;
                     string fullPath = ""; int fullW = 0, fullH = 0;
+                    byte[] previewData = Array.Empty<byte>(); byte[] thumbData = Array.Empty<byte>();
 
-                    foreach (var (filePath, width, height) in pageImages)
+                    foreach (var (filePath, width, height, imgData) in pageImages)
                     {
                         if (filePath.Contains("_thumb."))
+                        {
                             (thumbPath, thumbW, thumbH) = (filePath, width, height);
+                            thumbData = imgData;
+                        }
                         else
+                        {
                             (fullPath, fullW, fullH) = (filePath, width, height);
+                            previewData = imgData;
+                        }
                     }
 
                     if (!string.IsNullOrEmpty(thumbPath) || !string.IsNullOrEmpty(fullPath))
                     {
                         lock (imgDbService)
                         {
-                            imgDbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+                            imgDbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH,
+                                previewData: previewData, thumbData: thumbData);
                         }
                         // Mark images as done
                         System.IO.File.Create(doneImages).Dispose();
@@ -705,20 +713,23 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
             {
                 string thumbPath = ""; int thumbW = 0, thumbH = 0;
                 string fullPath = ""; int fullW = 0, fullH = 0;
+                byte[] previewData = Array.Empty<byte>(); byte[] thumbData = Array.Empty<byte>();
 
                 if (pdfImageExtractor != null)
                 {
                     // Use Telerik direct image extraction (no browser needed)
                     // outputDir = publishedDir so images land in Published/
-                    var (fPath, tPath, w, h) = pdfImageExtractor.ExtractPageImage(pdfPath, outputDir: publishedDir);
+                    var (fPath, tPath, w, h, pData, tData) = pdfImageExtractor.ExtractPageImage(pdfPath, outputDir: publishedDir);
 
                     if (!string.IsNullOrEmpty(fPath))
                     {
                         (fullPath, fullW, fullH) = (fPath, w, h);
+                        previewData = pData;
                     }
                     if (!string.IsNullOrEmpty(tPath))
                     {
                         (thumbPath, thumbW, thumbH) = (tPath, 100, h > 0 && w > 0 ? (int)(100.0 * h / w) : 0);
+                        thumbData = tData;
                     }
                 }
                 else if (thumbnailService != null)
@@ -726,12 +737,18 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
                     // Use Playwright browser rendering
                     var pageImages = await thumbnailService.GeneratePageImagesAsync(pdfPath);
 
-                    foreach (var (filePath, width, height) in pageImages)
+                    foreach (var (filePath, width, height, imgData) in pageImages)
                     {
                         if (filePath.Contains("_thumb."))
+                        {
                             (thumbPath, thumbW, thumbH) = (filePath, width, height);
+                            thumbData = imgData;
+                        }
                         else
+                        {
                             (fullPath, fullW, fullH) = (filePath, width, height);
+                            previewData = imgData;
+                        }
                     }
                 }
 
@@ -740,7 +757,8 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
                 {
                     lock (dbService)
                     {
-                        dbService.UpsertDocumentImages(publishedPdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+                        dbService.UpsertDocumentImages(publishedPdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH,
+                            previewData: previewData, thumbData: thumbData);
                     }
                 }
             }

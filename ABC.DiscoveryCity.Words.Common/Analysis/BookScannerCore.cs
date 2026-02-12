@@ -1,3 +1,4 @@
+using ABC.DiscoveryCity.Words.Common.Processing;
 using System.Collections.Frozen;
 using System.Collections.Immutable;
 
@@ -497,6 +498,8 @@ namespace ABC.DiscoveryCity.Words.Common.Analysis
             analysis.TotalTokens = words.Count;
             analysis.UniqueWordCount = vocabOrdinals.Count;
             analysis.SentenceCount = sentences.Count;
+
+            SentencePostProcessor.Process(sentences);
 
             var content = new BookContent
             {
