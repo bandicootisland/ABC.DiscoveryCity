@@ -53,7 +53,8 @@ public class SearchController : ControllerBase
         PageCount = r.PageCount,
         SourceName = r.SourceName,
         DataSetName = r.DataSetName,
-        People = ParsePeopleJson(r.People)
+        People = ParsePeopleJson(r.People),
+        MetadataJson = r.MetadataJson
     };
 
     [HttpGet("counts")]
@@ -75,6 +76,13 @@ public class SearchController : ControllerBase
     {
         var stats = _dbService.GetDataSetStats();
         return Ok(stats);
+    }
+
+    [HttpGet("datasets")]
+    public IActionResult GetDataSetNames()
+    {
+        var names = _dbService.GetDataSetNames();
+        return Ok(names);
     }
 
     /// <summary>
@@ -110,4 +118,5 @@ public class SearchResultDto
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public List<string>? People { get; set; }
+    public string MetadataJson { get; set; } = "{}";
 }

@@ -920,7 +920,8 @@ public partial class DbService
                    (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                    s.Name as SourceName,
                    d.Name as DataSetName,
-                   p.Metadata->>'People' as People
+                   p.Metadata->>'People' as People,
+                   p.Metadata::text as MetadataJson
             FROM best_matches bm
             JOIN ParentDocuments p ON bm.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -988,7 +989,8 @@ public partial class DbService
                    (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                    s.Name as SourceName,
                    d.Name as DataSetName,
-                   p.Metadata->>'People' as People
+                   p.Metadata->>'People' as People,
+                   p.Metadata::text as MetadataJson
             FROM matching_docs md
             JOIN ParentDocuments p ON md.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -1057,7 +1059,8 @@ public partial class DbService
                        (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                        s.Name as SourceName,
                        d.Name as DataSetName,
-                       p.Metadata->>'People' as People
+                       p.Metadata->>'People' as People,
+                       p.Metadata::text as MetadataJson
                 FROM matching_docs md
                 JOIN ParentDocuments p ON md.ParentId = p.Id
                 LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -1118,7 +1121,8 @@ public partial class DbService
                        (SELECT filename FROM DocumentImages WHERE ParentId = r.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                        r.SourceName,
                        r.DataSetName,
-                       r.Metadata->>'People' as People
+                       r.Metadata->>'People' as People,
+                       r.Metadata::text as MetadataJson
                 FROM ranked r
                 WHERE r.rn <= @perDataSet
                 ORDER BY r.ProcessedAt DESC
@@ -1199,7 +1203,8 @@ public partial class DbService
             FullImageFileName  = reader.IsDBNull(9) ? null : reader.GetString(9),
             SourceName         = reader.IsDBNull(10) ? null : reader.GetString(10),
             DataSetName        = reader.IsDBNull(11) ? null : reader.GetString(11),
-            People             = reader.IsDBNull(12) ? null : reader.GetString(12)
+            People             = reader.IsDBNull(12) ? null : reader.GetString(12),
+            MetadataJson       = reader.IsDBNull(13) ? "{}" : reader.GetString(13)
         };
     }
 
@@ -1315,6 +1320,32 @@ public partial class DbService
         }
         return stats;
     }
+    /// <summary>
+    /// Get distinct dataset names that have documents.
+    /// </summary>
+    public List<string> GetDataSetNames()
+    {
+        var names = new List<string>();
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                SELECT DISTINCT d.Name 
+                FROM DataSets d 
+                INNER JOIN ParentDocuments p ON p.DataSetId = d.Id 
+                ORDER BY d.Name;", conn);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                if (!reader.IsDBNull(0)) names.Add(reader.GetString(0));
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting dataset names: {ex.Message}");
+        }
+        return names;
+    }
 } // end DbService
 
 public class DataSetStats
@@ -1350,6 +1381,7 @@ public class DocumentSearchResult
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public string? People { get; set; }
+    public string MetadataJson { get; set; } = "{}";
 
     /// <summary>Resolve the document file path for the current OS.</summary>
     public string? ResolvedFilePath => 
