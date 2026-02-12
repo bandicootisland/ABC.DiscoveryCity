@@ -511,7 +511,7 @@ foreach (var folder in targetFolders)
             int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
             Console.WriteLine($"[{currentCount}] Processing: {System.IO.Path.GetFileName(pdfPath)}");
             
-            await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir);
+            await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
             
             // Mark text extraction as done
             System.IO.File.Create(doneFile).Dispose();
@@ -554,7 +554,7 @@ if (pendingImageTasks.Count > 0)
     Console.WriteLine("All image tasks completed.");
 }
 
-async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfImageExtractor? pdfImageExtractor, int? dataSetId = null, bool inspectMode = false, string? publishedDir = null)
+async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfImageExtractor? pdfImageExtractor, int? dataSetId = null, bool inspectMode = false, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
 {
     // Skip if already processed (for distributed processing)
     if (dbService.DocumentExists(pdfPath))
@@ -600,19 +600,40 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
         return; 
     }
 
+    // Gather file-level info for enriched metadata
+    var fileInfo = new System.IO.FileInfo(pdfPath);
+    int wordCount = string.IsNullOrWhiteSpace(fullText) ? 0 : fullText.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries).Length;
+    // Source subfolder relative to root (e.g., "VOL00008/IMAGES/0001")
+    string? sourceSubFolder = null;
+    try
+    {
+        var pdfDir = System.IO.Path.GetDirectoryName(pdfPath);
+        if (pdfDir != null && publishedDir != null)
+        {
+            // Strip from the dataset folder down, exclude Published
+            var dataSetDir = System.IO.Path.GetDirectoryName(publishedDir.TrimEnd(System.IO.Path.DirectorySeparatorChar));
+            if (dataSetDir != null && pdfDir.StartsWith(dataSetDir))
+                sourceSubFolder = pdfDir.Substring(dataSetDir.Length).TrimStart(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+        }
+    }
+    catch { }
+
     var metadata = new PdfMetadata
     {
         FileName = System.IO.Path.GetFileName(pdfPath),
         Title = deducedTitle,
-        Author = null, 
-        Subject = null,
-        Keywords = null,
-        Producer = null,
         PageCount = telerikDoc.Pages.Count,
-        CreationDate = null, 
-        DeducedDate = deducedDate,
+        DeducedDate = deducedDate ?? DateTime.MinValue,
         Text = RunCleanUp(digitalBook.Sentences.Select(s => s.text).ToList()),
-        People = extractedPeople.Count > 0 ? extractedPeople : null
+        People = extractedPeople,
+        // Enriched metadata
+        DataSetName = dataSetName ?? "",
+        SourceName = sourceFolderName ?? "",
+        OriginalFilePath = pdfPath,
+        SourceFolder = sourceSubFolder ?? "",
+        IngestedAtUtc = DateTime.UtcNow,
+        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
+        WordCount = wordCount
     };
 
     List<string> RunCleanUp(List<string> input)
@@ -641,7 +662,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
     string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
     
     // 4. Determine Output Filename & Published output location
-    string dateStr = metadata.DeducedDate?.ToString("yyyy-MM-dd") ?? "UnknownDate";
+    string dateStr = metadata.DeducedDate != DateTime.MinValue ? metadata.DeducedDate.ToString("yyyy-MM-dd") : "UnknownDate";
     string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(pdfPath)}_{dateStr}";
     string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(pdfPath) ?? "";
     
