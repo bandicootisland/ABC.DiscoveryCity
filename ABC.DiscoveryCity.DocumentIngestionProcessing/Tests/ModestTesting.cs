@@ -8,7 +8,7 @@ using static ABC.DiscoveryCity.Words.Words.W;
 using ABC.DiscoveryCity.Words;
 using System;
 
-namespace ABC.DiscoveryCity.TestApp.Tests
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 {
     public class ModestTesting
     {

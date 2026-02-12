@@ -30,7 +30,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.TelerikPr
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.Words.Common", "ABC.DiscoveryCity.Words.Common\ABC.DiscoveryCity.Words.Common.csproj", "{EA76503E-6A91-C9F3-20D4-11C692E3E765}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.TestApp", "ABC.DiscoveryCity.TestApp\ABC.DiscoveryCity.TestApp.csproj", "{B798A2F3-6872-F5D9-88A4-92F20EEF782B}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.DocumentIngestionProcessing", "ABC.DiscoveryCity.DocumentIngestionProcessing\ABC.DiscoveryCity.DocumentIngestionProcessing.csproj", "{B798A2F3-6872-F5D9-88A4-92F20EEF782B}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.Words", "ABC.DiscoveryCity.Words\ABC.DiscoveryCity.Words.csproj", "{A694135C-EBF3-7B5F-E14A-072923C65BB5}"
 EndProject

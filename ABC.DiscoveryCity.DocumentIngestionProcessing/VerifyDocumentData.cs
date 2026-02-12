@@ -4,7 +4,7 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace ABC.DiscoveryCity.TestApp
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing
 {
     public class VerifyDocumentData
     {

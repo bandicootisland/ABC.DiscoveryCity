@@ -2,7 +2,7 @@
 //using System.Collections.Generic;
 //using System.Text;
 
-//namespace ABC.DiscoveryCity.TestApp
+//namespace ABC.DiscoveryCity.DocumentIngestionProcessing
 //{
 //    using ABC.BookPack.Dictionaries;
 //    using ABC.DiscoveryCity.Words.Common;

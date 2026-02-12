@@ -43,6 +43,41 @@ public partial class DbService
         return IsWindows ? fullPath.Replace('/', '\\') : fullPath.Replace('\\', '/');
     }
 
+    /// <summary>
+    /// Resolve a file path for the current OS. If the path contains a known base path
+    /// from the other OS (e.g. Windows path on Linux), translate it.
+    /// Falls back to the original path if no translation is possible.
+    /// </summary>
+    public static string ResolveFilePathForCurrentOs(string path)
+    {
+        if (string.IsNullOrEmpty(path)) return path;
+
+        // Already valid on current OS?
+        if (System.IO.File.Exists(path)) return path;
+
+        // Try to translate: extract the relative portion after the foreign base path
+        string? foreignBase = IsWindows ? _linuxBasePath : _windowsBasePath;
+        string? localBase = IsWindows ? _windowsBasePath : _linuxBasePath;
+
+        if (foreignBase != null && localBase != null)
+        {
+            // Normalise separators for comparison
+            string normPath = path.Replace('\\', '/');
+            string normForeignBase = foreignBase.Replace('\\', '/');
+
+            if (normPath.StartsWith(normForeignBase, StringComparison.OrdinalIgnoreCase))
+            {
+                string relativePart = normPath.Substring(normForeignBase.Length);
+                string resolved = localBase + relativePart;
+                resolved = IsWindows ? resolved.Replace('/', '\\') : resolved.Replace('\\', '/');
+                return resolved;
+            }
+        }
+
+        // Last resort: just fix separators for current OS
+        return IsWindows ? path.Replace('/', '\\') : path.Replace('\\', '/');
+    }
+
     // Default connection string for convenience, but allows override
     private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
 
@@ -460,18 +495,21 @@ public partial class DbService
     /// <summary>
     /// Get or create a DataSet by name for a given Source. Returns the DataSet Id.
     /// </summary>
-    public int GetOrCreateDataSet(int sourceId, string name)
+    public int GetOrCreateDataSet(int sourceId, string name, string? pdfFolder = null)
     {
         using var conn = _dataSource.OpenConnection();
         string sql = @"
-            INSERT INTO DataSets (SourceId, Name)
-            VALUES (@sourceId, @name)
-            ON CONFLICT (SourceId, Name) DO UPDATE SET Name = EXCLUDED.Name
+            INSERT INTO DataSets (SourceId, Name, PdfFolder, ImageFolder)
+            VALUES (@sourceId, @name, @pdfFolder, @pdfFolder)
+            ON CONFLICT (SourceId, Name) DO UPDATE SET 
+                PdfFolder = COALESCE(EXCLUDED.PdfFolder, DataSets.PdfFolder),
+                ImageFolder = COALESCE(EXCLUDED.ImageFolder, DataSets.ImageFolder)
             RETURNING Id;
         ";
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("sourceId", sourceId);
         cmd.Parameters.AddWithValue("name", name);
+        cmd.Parameters.AddWithValue("pdfFolder", (object?)pdfFolder ?? DBNull.Value);
         return (int)(cmd.ExecuteScalar() ?? 0);
     }
 
@@ -576,7 +614,7 @@ public partial class DbService
                     string updateSql = @"UPDATE ParentDocuments 
                         SET Metadata = @meta::jsonb, 
                             DataSetId = COALESCE(@dataSetId, DataSetId),
-                            FilePath = COALESCE(FilePath, @fp),
+                            FilePath = @fp,
                             ProcessedAt = NOW()
                         WHERE Id = @id;";
 
@@ -1245,13 +1283,17 @@ public class DocumentSearchResult
     public string? People { get; set; }
 
     /// <summary>Resolve the document file path for the current OS.</summary>
-    public string? ResolvedFilePath => DbService.BuildPath(PdfFolder, FileName) ?? FilePath;
+    public string? ResolvedFilePath => 
+        DbService.BuildPath(PdfFolder, FileName) 
+        ?? (FilePath != null ? DbService.ResolveFilePathForCurrentOs(FilePath) : null);
 
     /// <summary>Resolve the thumbnail path for the current OS.</summary>
-    public string? ResolvedThumbnailPath => DbService.BuildPath(ImageFolder ?? PdfFolder, ThumbnailFileName);
+    public string? ResolvedThumbnailPath => 
+        DbService.BuildPath(ImageFolder ?? PdfFolder, ThumbnailFileName);
 
     /// <summary>Resolve the full image path for the current OS.</summary>
-    public string? ResolvedFullImagePath => DbService.BuildPath(ImageFolder ?? PdfFolder, FullImageFileName);
+    public string? ResolvedFullImagePath => 
+        DbService.BuildPath(ImageFolder ?? PdfFolder, FullImageFileName);
 }
 
 public class SystemStats

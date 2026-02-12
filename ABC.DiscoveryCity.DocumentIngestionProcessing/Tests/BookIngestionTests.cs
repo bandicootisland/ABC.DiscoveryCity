@@ -4,7 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 
-namespace ABC.DiscoveryCity.TestApp.Tests
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 {
     public class BookIngestionTests
     {

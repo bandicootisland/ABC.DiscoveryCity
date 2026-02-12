@@ -1,7 +1,7 @@
 using ABC.DiscoveryCity.Embeddings;
 using ABC.DiscoveryCity.PostgreSQL;
 
-namespace ABC.DiscoveryCity.TestApp;
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing;
 
 public class Verification
 {

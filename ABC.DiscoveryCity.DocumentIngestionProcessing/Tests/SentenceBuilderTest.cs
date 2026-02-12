@@ -30,7 +30,7 @@
 
 //using System;
 
-//namespace ABC.DiscoveryCity.TestApp.Tests
+//namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 //{
 //    public static class SentenceBuilderTest
 //    {

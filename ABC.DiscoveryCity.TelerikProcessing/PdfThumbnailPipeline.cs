@@ -55,12 +55,13 @@ public class PdfThumbnailPipeline : IAsyncDisposable
     /// Generate a page image + thumbnail for a PDF.  Returns unified result.
     /// Thread-safe — can be called from Parallel.ForEachAsync.
     /// </summary>
-    public async Task<PipelineResult> ProcessAsync(string pdfPath, int pageIndex = 0)
+    /// <param name="outputDir">Optional directory for output files.  When null, images are saved alongside the source PDF.</param>
+    public async Task<PipelineResult> ProcessAsync(string pdfPath, int pageIndex = 0, string? outputDir = null)
     {
         // ---- Primary: direct extraction ----
         try
         {
-            var (fullPath, thumbPath, w, h) = _extractor.ExtractPageImage(pdfPath, pageIndex);
+            var (fullPath, thumbPath, w, h) = _extractor.ExtractPageImage(pdfPath, pageIndex, outputDir);
             if (!string.IsNullOrEmpty(fullPath) && File.Exists(fullPath))
             {
                 Interlocked.Increment(ref _extractOk);

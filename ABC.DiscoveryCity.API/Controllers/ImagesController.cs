@@ -22,9 +22,8 @@ public class ImagesController : ControllerBase
         var images = _dbService.GetDocumentImages(documentPath)
             .Select(i => 
             {
-                // Build the resolved path for the API server's OS
-                // For now use legacy FilePath if available, otherwise the filename alone
-                var resolvedPath = i.FilePath ?? i.FileName ?? "";
+                // Resolve the path for the current OS (handles Windows↔Linux translation)
+                var resolvedPath = DbService.ResolveFilePathForCurrentOs(i.FilePath ?? i.FileName ?? "");
                 return new ImageDto
                 {
                     ImageType = i.ImageType,
@@ -44,12 +43,18 @@ public class ImagesController : ControllerBase
     [HttpGet("view")]
     public IActionResult ViewFile([FromQuery] string path)
     {
-        if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
-        {
+        if (string.IsNullOrWhiteSpace(path))
             return NotFound("File not found.");
+
+        // Resolve the path for the current OS — handles Windows paths on Linux and vice versa
+        var resolvedPath = DbService.ResolveFilePathForCurrentOs(path);
+
+        if (!System.IO.File.Exists(resolvedPath))
+        {
+            return NotFound($"File not found: {resolvedPath}");
         }
 
-        var extension = Path.GetExtension(path).ToLowerInvariant();
+        var extension = Path.GetExtension(resolvedPath).ToLowerInvariant();
         string contentType = extension switch
         {
             ".pdf" => "application/pdf",
@@ -60,7 +65,7 @@ public class ImagesController : ControllerBase
             _ => "application/octet-stream"
         };
         
-        var stream = System.IO.File.OpenRead(path);
+        var stream = System.IO.File.OpenRead(resolvedPath);
         return File(stream, contentType);
     }
 }

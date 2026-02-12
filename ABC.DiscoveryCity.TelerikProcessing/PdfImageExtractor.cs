@@ -127,7 +127,13 @@ public class PdfImageExtractor
     /// Handles FlateDecode (zlib), DCTDecode (JPEG) with DeviceGray, DeviceRGB, Indexed colorspaces.
     /// Returns (fullImagePath, thumbPath, width, height) or empty strings on failure.
     /// </summary>
-    public (string FullPath, string ThumbPath, int Width, int Height) ExtractPageImage(string pdfPath, int pageIndex = 0)
+    /// <param name="pdfPath">Path to the source PDF.</param>
+    /// <param name="pageIndex">Zero-based page index.</param>
+    /// <param name="outputDir">
+    /// Optional output directory for generated images.
+    /// If null, images are saved alongside the PDF.
+    /// </param>
+    public (string FullPath, string ThumbPath, int Width, int Height) ExtractPageImage(string pdfPath, int pageIndex = 0, string? outputDir = null)
     {
         var provider = new PdfFormatProvider();
         RadFixedDocument doc;
@@ -184,7 +190,8 @@ public class PdfImageExtractor
 
         // Output paths
         string baseName = Path.GetFileNameWithoutExtension(pdfPath);
-        string dir = Path.GetDirectoryName(pdfPath) ?? ".";
+        string dir = outputDir ?? Path.GetDirectoryName(pdfPath) ?? ".";
+        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
         string fullPath = Path.Combine(dir, $"{baseName}_page{pageIndex + 1}.jpg");
         string thumbPath = Path.Combine(dir, $"{baseName}_page{pageIndex + 1}_thumb.jpg");
 
