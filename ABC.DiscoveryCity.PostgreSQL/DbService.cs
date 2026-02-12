@@ -801,7 +801,7 @@ public partial class DbService
                         cmd.Parameters.AddWithValue("fname", ExtractFileName(fullPath));
                         cmd.Parameters.AddWithValue("w", fullWidth);
                         cmd.Parameters.AddWithValue("h", fullHeight);
-                        cmd.Parameters.AddWithValue("data", (object?)previewData ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("data", previewData is { Length: > 0 } ? (object)previewData : DBNull.Value);
                         cmd.ExecuteNonQuery();
                     }
 
@@ -815,7 +815,7 @@ public partial class DbService
                         cmd.Parameters.AddWithValue("fname", ExtractFileName(thumbPath));
                         cmd.Parameters.AddWithValue("w", thumbWidth);
                         cmd.Parameters.AddWithValue("h", thumbHeight);
-                        cmd.Parameters.AddWithValue("data", (object?)thumbData ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("data", thumbData is { Length: > 0 } ? (object)thumbData : DBNull.Value);
                         cmd.ExecuteNonQuery();
                     }
                 }
@@ -1557,9 +1557,9 @@ public partial class DbService
         }
     }
 
-    public List<(string ImageType, string ImageSize, string? FilePath, string? FileName, int Width, int Height, byte[]? ImageData)> GetDocumentImages(string parentFilePath)
+    public List<(string ImageType, string ImageSize, string FilePath, string FileName, int Width, int Height, byte[] ImageData)> GetDocumentImages(string parentFilePath)
     {
-        var results = new List<(string, string, string?, string?, int, int, byte[]?)>();
+        var results = new List<(string, string, string, string, int, int, byte[])>();
         try
         {
             using var conn = _dataSource.OpenConnection();
@@ -1581,11 +1581,11 @@ public partial class DbService
                 results.Add((
                     reader.GetString(0),
                     reader.GetString(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    reader.IsDBNull(3) ? "" : reader.GetString(3),
                     reader.GetInt32(4),
                     reader.GetInt32(5),
-                    reader.IsDBNull(6) ? null : (byte[])reader[6]
+                    reader.IsDBNull(6) ? Array.Empty<byte>() : (byte[])reader[6]
                 ));
             }
         }
@@ -1600,7 +1600,7 @@ public partial class DbService
     /// Get image binary data directly from DB by file path.
     /// Used as fallback when image file is not available on the local OS.
     /// </summary>
-    public byte[]? GetImageData(string imagePath)
+    public byte[] GetImageData(string imagePath)
     {
         try
         {
@@ -1618,12 +1618,12 @@ public partial class DbService
             cmd.Parameters.AddWithValue("fn", fileName);
 
             var result = cmd.ExecuteScalar();
-            return result as byte[];
+            return result as byte[] ?? Array.Empty<byte>();
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Error getting image data: {ex.Message}");
-            return null;
+            return Array.Empty<byte>();
         }
     }
 }

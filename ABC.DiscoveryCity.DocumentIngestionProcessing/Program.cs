@@ -372,7 +372,7 @@ if (imagesOnly)
 
                     string thumbPath = ""; int thumbW = 0, thumbH = 0;
                     string fullPath = ""; int fullW = 0, fullH = 0;
-                    byte[]? previewData = null; byte[]? thumbData = null;
+                    byte[] previewData = Array.Empty<byte>(); byte[] thumbData = Array.Empty<byte>();
 
                     foreach (var (filePath, width, height, imgData) in pageImages)
                     {
@@ -713,7 +713,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
             {
                 string thumbPath = ""; int thumbW = 0, thumbH = 0;
                 string fullPath = ""; int fullW = 0, fullH = 0;
-                byte[]? previewData = null; byte[]? thumbData = null;
+                byte[] previewData = Array.Empty<byte>(); byte[] thumbData = Array.Empty<byte>();
 
                 if (pdfImageExtractor != null)
                 {

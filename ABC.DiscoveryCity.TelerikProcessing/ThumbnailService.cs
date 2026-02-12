@@ -107,9 +107,9 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
     /// Generate screenshots of the first 3 pages of the PDF.
     /// Returns (FilePath, Width, Height, ImageData) for each image.
     /// </summary>
-    public async Task<List<(string FilePath, int Width, int Height, byte[]? ImageData)>> GeneratePageImagesAsync(string pdfPath)
+    public async Task<List<(string FilePath, int Width, int Height, byte[] ImageData)>> GeneratePageImagesAsync(string pdfPath)
     {
-        var results = new List<(string, int, int, byte[]?)>();
+        var results = new List<(string, int, int, byte[])>();
 
         if (!_initialized || _browserinstances.Count==0)
         {
@@ -229,7 +229,7 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
                         original.SaveAsJpeg(outputPath, new JpegEncoder { Quality = 70 });
 
                         // Capture preview bytes
-                        byte[]? previewBytes;
+                        byte[] previewBytes;
                         using (var ms = new MemoryStream())
                         {
                             original.SaveAsJpeg(ms, new JpegEncoder { Quality = 70 });
@@ -247,7 +247,7 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
                         thumbnail.Save(thumbPath, new JpegEncoder { Quality = 75 });
 
                         // Capture thumb bytes
-                        byte[]? thumbBytes;
+                        byte[] thumbBytes;
                         using (var ms = new MemoryStream())
                         {
                             thumbnail.SaveAsJpeg(ms, new JpegEncoder { Quality = 75 });
@@ -260,7 +260,7 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
                     catch (Exception ex)
                     {
                         Console.WriteLine($"  [WARN] Resize failed page {pageNum}: {ex.Message}");
-                        results.Add((outputPath, 0, 0, null));
+                        results.Add((outputPath, 0, 0, Array.Empty<byte>()));
                     }
                 }
                 else

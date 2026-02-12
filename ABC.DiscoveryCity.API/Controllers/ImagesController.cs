@@ -23,7 +23,7 @@ public class ImagesController : ControllerBase
             .Select(i => 
             {
                 // Resolve the path for the current OS (handles Windows↔Linux translation)
-                var resolvedPath = DbService.ResolveFilePathForCurrentOs(i.FilePath ?? i.FileName ?? "");
+                var resolvedPath = DbService.ResolveFilePathForCurrentOs(i.FilePath.Length > 0 ? i.FilePath : i.FileName);
                 return new ImageDto
                 {
                     ImageType = i.ImageType,
@@ -32,8 +32,8 @@ public class ImagesController : ControllerBase
                     FileName = i.FileName,
                     Width = i.Width,
                     Height = i.Height,
-                    HasData = i.ImageData != null,
-                    Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(i.FileName ?? resolvedPath)}"
+                    HasData = i.ImageData.Length > 0,
+                    Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(i.FileName.Length > 0 ? i.FileName : resolvedPath)}"
                 };
             })
             .ToList();
@@ -69,7 +69,7 @@ public class ImagesController : ControllerBase
 
         // File not on disk — try serving from DB binary data
         var imageData = _dbService.GetImageData(path);
-        if (imageData != null)
+        if (imageData.Length > 0)
         {
             return File(imageData, "image/jpeg");
         }

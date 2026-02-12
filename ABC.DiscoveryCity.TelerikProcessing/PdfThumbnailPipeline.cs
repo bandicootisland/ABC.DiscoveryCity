@@ -61,7 +61,7 @@ public class PdfThumbnailPipeline : IAsyncDisposable
         // ---- Primary: direct extraction ----
         try
         {
-            var (fullPath, thumbPath, w, h) = _extractor.ExtractPageImage(pdfPath, pageIndex, outputDir);
+            var (fullPath, thumbPath, w, h, previewData, thumbData) = _extractor.ExtractPageImage(pdfPath, pageIndex, outputDir);
             if (!string.IsNullOrEmpty(fullPath) && File.Exists(fullPath))
             {
                 Interlocked.Increment(ref _extractOk);
@@ -72,7 +72,9 @@ public class PdfThumbnailPipeline : IAsyncDisposable
                     FullPath = fullPath,
                     ThumbPath = thumbPath,
                     Width = w,
-                    Height = h
+                    Height = h,
+                    PreviewData = previewData,
+                    ThumbData = thumbData
                 };
             }
         }
@@ -90,13 +92,20 @@ public class PdfThumbnailPipeline : IAsyncDisposable
 
             string thumbPath = ""; int thumbW = 0, thumbH = 0;
             string fullPath = ""; int fullW = 0, fullH = 0;
+            byte[] pData = Array.Empty<byte>(); byte[] tData = Array.Empty<byte>();
 
-            foreach (var (filePath, width, height) in pageImages)
+            foreach (var (filePath, width, height, imgData) in pageImages)
             {
                 if (filePath.Contains("_thumb."))
+                {
                     (thumbPath, thumbW, thumbH) = (filePath, width, height);
+                    tData = imgData;
+                }
                 else
+                {
                     (fullPath, fullW, fullH) = (filePath, width, height);
+                    pData = imgData;
+                }
             }
 
             if (!string.IsNullOrEmpty(fullPath) || !string.IsNullOrEmpty(thumbPath))
@@ -111,7 +120,9 @@ public class PdfThumbnailPipeline : IAsyncDisposable
                     Width = fullW,
                     Height = fullH,
                     ThumbWidth = thumbW,
-                    ThumbHeight = thumbH
+                    ThumbHeight = thumbH,
+                    PreviewData = pData,
+                    ThumbData = tData
                 };
             }
         }
@@ -175,4 +186,6 @@ public class PipelineResult
     public int Height { get; init; }
     public int ThumbWidth { get; init; }
     public int ThumbHeight { get; init; }
+    public byte[] PreviewData { get; init; } = Array.Empty<byte>();
+    public byte[] ThumbData { get; init; } = Array.Empty<byte>();
 }
