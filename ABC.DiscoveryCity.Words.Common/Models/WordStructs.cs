@@ -1,5 +1,6 @@
 ﻿using ABC.DiscoveryCity.Words.Common;
 using ABC.DiscoveryCity.Words.Common.Ontology;
+using ABC.DiscoveryCity.Words.Common.Processing;
 using System.Collections.Frozen;
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
@@ -415,6 +416,8 @@ namespace ABC.DiscoveryCity.Words.Common
                  sentences.Add(new Sentence(currentSentenceData));
             }
 
+            SentencePostProcessor.Process(sentences);
+
             WordStructs.words = words.ToImmutableArray();
             vocabulary = vocabOrdinals.ToFrozenDictionary(
                 kvp => kvp.Key, 
@@ -665,6 +668,8 @@ namespace ABC.DiscoveryCity.Words.Common
                 currentSentenceData.Words = currentSentenceWords.ToArray();
                 sentences.Add(new Sentence(currentSentenceData));
             }
+
+            SentencePostProcessor.Process(sentences);
 
             return new BookContent
             {
