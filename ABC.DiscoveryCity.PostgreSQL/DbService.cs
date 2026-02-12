@@ -854,7 +854,7 @@ public partial class DbService
         }
     }
 
-    public async Task<List<DocumentSearchResult>> SearchSimilarAsync(string query, int limit = 20)
+    public async Task<List<DocumentSearchResult>> SearchSimilarAsync(string query, int limit = 20, List<string>? datasetNames = null)
     {
         var results = new List<DocumentSearchResult>();
 
@@ -868,7 +868,7 @@ public partial class DbService
                 try
                 {
                     var queryEmbedding = await _embeddingService.GetEmbeddingAsync(query);
-                    results = await SearchByVectorAsync(conn, queryEmbedding, limit);
+                    results = await SearchByVectorAsync(conn, queryEmbedding, limit, datasetNames);
                     if (results.Count > 0) return results;
                 }
                 catch (Exception embEx)
@@ -878,7 +878,7 @@ public partial class DbService
             }
 
             // Fallback to full-text search
-            results = await SearchByTextAsync(conn, query, limit);
+            results = await SearchByTextAsync(conn, query, limit, datasetNames);
         }
         catch (Exception ex)
         {
@@ -887,12 +887,13 @@ public partial class DbService
         return results;
     }
 
-    private async Task<List<DocumentSearchResult>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit)
+    private async Task<List<DocumentSearchResult>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit, List<string>? datasetNames = null)
     {
         var results = new List<DocumentSearchResult>();
+        var datasetFilter = datasetNames is { Count: > 0 };
 
         // Vector similarity search — returns BOTH Windows and Linux paths
-        string sql = @"
+        string sql = $@"
             WITH ranked_chunks AS (
                 SELECT
                     c.ParentId,
@@ -926,6 +927,7 @@ public partial class DbService
             JOIN ParentDocuments p ON bm.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
             LEFT JOIN Sources s ON d.SourceId = s.Id
+            {(datasetFilter ? "WHERE d.Name = ANY(@datasetNames)" : "")}
             ORDER BY bm.distance
             LIMIT @limit;
         ";
@@ -933,6 +935,7 @@ public partial class DbService
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("queryVector", new Vector(queryEmbedding));
         cmd.Parameters.AddWithValue("limit", limit);
+        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
 
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -943,28 +946,33 @@ public partial class DbService
         return results;
     }
 
-    private async Task<List<DocumentSearchResult>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit)
+    private async Task<List<DocumentSearchResult>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit, List<string>? datasetNames = null)
     {
         var results = new List<DocumentSearchResult>();
+        var datasetFilter = datasetNames is { Count: > 0 };
 
         // Full-text search across chunk text AND JSONB metadata (Title, People, FileName, DataSetName)
-        string sql = @"
+        string sql = $@"
             WITH chunk_matches AS (
                 SELECT DISTINCT c.ParentId,
                        MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
                 FROM DocumentChunks c
-                WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
-                   OR c.TextContent ILIKE @pattern
+                {(datasetFilter ? "JOIN ParentDocuments pd ON c.ParentId = pd.Id JOIN DataSets dd ON pd.DataSetId = dd.Id" : "")}
+                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                   OR c.TextContent ILIKE @pattern)
+                {(datasetFilter ? "AND dd.Name = ANY(@datasetNames)" : "")}
                 GROUP BY c.ParentId
             ),
             metadata_matches AS (
                 SELECT p.Id as ParentId, 0.5 as score
                 FROM ParentDocuments p
-                WHERE p.Metadata->>'Title' ILIKE @pattern
+                {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
+                WHERE (p.Metadata->>'Title' ILIKE @pattern
                    OR p.Metadata->>'People' ILIKE @pattern
                    OR p.Metadata->>'FileName' ILIKE @pattern
                    OR p.Metadata->>'DataSetName' ILIKE @pattern
-                   OR p.FileName ILIKE @pattern
+                   OR p.FileName ILIKE @pattern)
+                {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
             ),
             matching_docs AS (
                 SELECT ParentId, MAX(score) as score
@@ -1002,6 +1010,7 @@ public partial class DbService
         cmd.Parameters.AddWithValue("query", query);
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
         cmd.Parameters.AddWithValue("limit", limit);
+        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
 
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -1015,29 +1024,34 @@ public partial class DbService
     /// <summary>
     /// Exact text match search - only returns documents containing the exact query string
     /// </summary>
-    public List<DocumentSearchResult> SearchExactMatch(string query, int limit = 20)
+    public List<DocumentSearchResult> SearchExactMatch(string query, int limit = 20, List<string>? datasetNames = null)
     {
         var results = new List<DocumentSearchResult>();
 
         try
         {
             using var conn = _dataSource.OpenConnection();
+            var datasetFilter = datasetNames is { Count: > 0 };
 
             // Exact match across chunk text AND JSONB metadata (Title, People, FileName, DataSetName)
-            string sql = @"
+            string sql = $@"
                 WITH chunk_matches AS (
                     SELECT DISTINCT c.ParentId
                     FROM DocumentChunks c
+                    {(datasetFilter ? "JOIN ParentDocuments pd ON c.ParentId = pd.Id JOIN DataSets dd ON pd.DataSetId = dd.Id" : "")}
                     WHERE c.TextContent ILIKE @pattern
+                    {(datasetFilter ? "AND dd.Name = ANY(@datasetNames)" : "")}
                 ),
                 metadata_matches AS (
                     SELECT p.Id as ParentId
                     FROM ParentDocuments p
-                    WHERE p.Metadata->>'Title' ILIKE @pattern
+                    {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
+                    WHERE (p.Metadata->>'Title' ILIKE @pattern
                        OR p.Metadata->>'People' ILIKE @pattern
                        OR p.Metadata->>'FileName' ILIKE @pattern
                        OR p.Metadata->>'DataSetName' ILIKE @pattern
-                       OR p.FileName ILIKE @pattern
+                       OR p.FileName ILIKE @pattern)
+                    {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
                 ),
                 matching_docs AS (
                     SELECT DISTINCT ParentId FROM (
@@ -1070,6 +1084,7 @@ public partial class DbService
             using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("pattern", $"%{query}%");
             cmd.Parameters.AddWithValue("limit", limit);
+            if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -1085,19 +1100,20 @@ public partial class DbService
         return results;
     }
 
-    public List<DocumentSearchResult> GetRecentDocuments(int limit = 10)
+    public List<DocumentSearchResult> GetRecentDocuments(int limit = 10, List<string>? datasetNames = null)
     {
         var results = new List<DocumentSearchResult>();
         try
         {
             using var conn = _dataSource.OpenConnection();
+            var datasetFilter = datasetNames is { Count: > 0 };
 
             // Sample recent docs from EACH dataset so all datasets are represented,
             // not just the one with the most recent ProcessedAt timestamps.
-            int dataSetCount = GetDataSetCount(conn);
+            int dataSetCount = datasetFilter ? datasetNames!.Count : GetDataSetCount(conn);
             int perDataSet = Math.Max(3, limit / Math.Max(1, dataSetCount));
 
-            string sql = @"
+            string sql = $@"
                 WITH ranked AS (
                     SELECT p.*,
                            d.pdffolder,
@@ -1108,6 +1124,7 @@ public partial class DbService
                     FROM ParentDocuments p
                     LEFT JOIN DataSets d ON p.DataSetId = d.Id
                     LEFT JOIN Sources s ON d.SourceId = s.Id
+                    {(datasetFilter ? "WHERE d.Name = ANY(@datasetNames)" : "")}
                 )
                 SELECT r.FileName,
                        r.FilePath,
@@ -1132,6 +1149,7 @@ public partial class DbService
             using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("perDataSet", perDataSet);
             cmd.Parameters.AddWithValue("limit", limit);
+            if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())

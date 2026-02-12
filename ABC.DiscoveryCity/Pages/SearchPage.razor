@@ -30,7 +30,6 @@
                                 Placeholder="All DataSets"
                                 Width="100%"
                                 AutoClose="false"
-                                ClearButton="true"
                                 OnChange="@OnDataSetFilterChanged" />
         </div>
     </div>
@@ -49,7 +48,7 @@
     }
     else
     {
-        <TelerikGrid Data="@FilteredResults" Pageable="true" PageSize="10" Sortable="true" Resizable="true" FilterMode="@GridFilterMode.FilterRow" Height="calc(100vh - 200px)">
+        <TelerikGrid Data="@SearchResults" Pageable="true" PageSize="10" Sortable="true" Resizable="true" FilterMode="@GridFilterMode.FilterRow" Height="calc(100vh - 200px)">
             <GridColumns>
                 <GridColumn Title="Thumb" Width="80px">
                      <Template>
@@ -142,11 +141,9 @@
     private List<string> AvailableDataSets { get; set; } = new();
     private List<string> SelectedDataSets { get; set; } = new();
     
-    // Filtered results based on dataset selection
-    private IEnumerable<SearchResultDto> FilteredResults => 
-        SelectedDataSets == null || SelectedDataSets.Count == 0 
-            ? SearchResults ?? new List<SearchResultDto>() 
-            : (SearchResults ?? new List<SearchResultDto>()).Where(r => SelectedDataSets.Contains(r.DataSetName ?? ""));
+    // Active datasets for API queries (empty = all)
+    private List<string>? ActiveDataSetFilter => 
+        SelectedDataSets is { Count: > 0 } ? SelectedDataSets : null;
 
     private bool ShowPdfWindow { get; set; } = false;
     private SearchResultDto? SelectedPdf { get; set; }
@@ -162,7 +159,7 @@
         IsSearching = true;
         try
         {
-            SearchResults = await SearchService.GetRecentDocumentsAsync(50);
+            SearchResults = await SearchService.GetRecentDocumentsAsync(50, ActiveDataSetFilter);
         }
         finally
         {
@@ -170,9 +167,13 @@
         }
     }
 
-    private void OnDataSetFilterChanged()
+    private async Task OnDataSetFilterChanged()
     {
-        StateHasChanged();
+        // Re-query server with new dataset filter
+        if (!string.IsNullOrWhiteSpace(SearchQuery))
+            await PerformSearch();
+        else
+            await LoadRecentDocuments();
     }
 
     private async Task PerformSearch()
@@ -185,7 +186,7 @@
 
         try
         {
-            SearchResults = await SearchService.SearchAsync(SearchQuery, 20, ExactMatchOnly);
+            SearchResults = await SearchService.SearchAsync(SearchQuery, 20, ExactMatchOnly, ActiveDataSetFilter);
         }
         catch (Exception ex)
         {

@@ -16,16 +16,18 @@ public class SearchController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> Search([FromQuery] string query, [FromQuery] int limit = 20, [FromQuery] bool exactMatch = false)
+    public async Task<IActionResult> Search([FromQuery] string query, [FromQuery] int limit = 20, [FromQuery] bool exactMatch = false, [FromQuery] List<string>? datasets = null)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
             return BadRequest("Query is required.");
         }
 
+        var datasetNames = datasets?.Where(s => !string.IsNullOrEmpty(s)).ToList();
+
         var results = exactMatch
-            ? _dbService.SearchExactMatch(query, limit)
-            : await _dbService.SearchSimilarAsync(query, limit);
+            ? _dbService.SearchExactMatch(query, limit, datasetNames)
+            : await _dbService.SearchSimilarAsync(query, limit, datasetNames);
         
         // Map to DTO — pass both OS paths so the client can resolve
         var dtos = results.Select(MapToDto).ToList();
@@ -34,9 +36,10 @@ public class SearchController : ControllerBase
     }
 
     [HttpGet("recent")]
-    public IActionResult SearchRecent([FromQuery] int limit = 10)
+    public IActionResult SearchRecent([FromQuery] int limit = 10, [FromQuery] List<string>? datasets = null)
     {
-        var results = _dbService.GetRecentDocuments(limit);
+        var datasetNames = datasets?.Where(s => !string.IsNullOrEmpty(s)).ToList();
+        var results = _dbService.GetRecentDocuments(limit, datasetNames);
         var dtos = results.Select(MapToDto).ToList();
         return Ok(dtos);
     }

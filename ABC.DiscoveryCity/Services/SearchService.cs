@@ -11,11 +11,13 @@ public class SearchService
         _httpClient = httpClient;
     }
 
-    public async Task<List<SearchResultDto>> SearchAsync(string query, int limit = 20, bool exactMatch = false)
+    public async Task<List<SearchResultDto>> SearchAsync(string query, int limit = 20, bool exactMatch = false, List<string>? datasets = null)
     {
         try
         {
             var url = $"api/search?query={Uri.EscapeDataString(query)}&limit={limit}&exactMatch={exactMatch}";
+            if (datasets is { Count: > 0 })
+                url += "&" + string.Join("&", datasets.Select(d => $"datasets={Uri.EscapeDataString(d)}"));
             var response = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>(url);
             return response ?? new List<SearchResultDto>();
         }
@@ -26,11 +28,14 @@ public class SearchService
         }
     }
 
-    public async Task<List<SearchResultDto>> GetRecentDocumentsAsync(int limit = 10)
+    public async Task<List<SearchResultDto>> GetRecentDocumentsAsync(int limit = 10, List<string>? datasets = null)
     {
         try
         {
-            var response = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>($"api/search/recent?limit={limit}");
+            var url = $"api/search/recent?limit={limit}";
+            if (datasets is { Count: > 0 })
+                url += "&" + string.Join("&", datasets.Select(d => $"datasets={Uri.EscapeDataString(d)}"));
+            var response = await _httpClient.GetFromJsonAsync<List<SearchResultDto>>(url);
             return response ?? new List<SearchResultDto>();
         }
         catch (Exception ex)
