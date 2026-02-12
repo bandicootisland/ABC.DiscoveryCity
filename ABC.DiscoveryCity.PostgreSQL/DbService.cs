@@ -942,15 +942,33 @@ public partial class DbService
     {
         var results = new List<DocumentSearchResult>();
 
-        // Full-text search — returns BOTH Windows and Linux paths
+        // Full-text search across chunk text AND JSONB metadata (Title, People, FileName, DataSetName)
         string sql = @"
-            WITH matching_docs AS (
+            WITH chunk_matches AS (
                 SELECT DISTINCT c.ParentId,
                        MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
                 FROM DocumentChunks c
                 WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                    OR c.TextContent ILIKE @pattern
                 GROUP BY c.ParentId
+            ),
+            metadata_matches AS (
+                SELECT p.Id as ParentId, 0.5 as score
+                FROM ParentDocuments p
+                WHERE p.Metadata->>'Title' ILIKE @pattern
+                   OR p.Metadata->>'People' ILIKE @pattern
+                   OR p.Metadata->>'FileName' ILIKE @pattern
+                   OR p.Metadata->>'DataSetName' ILIKE @pattern
+                   OR p.FileName ILIKE @pattern
+            ),
+            matching_docs AS (
+                SELECT ParentId, MAX(score) as score
+                FROM (
+                    SELECT ParentId, score FROM chunk_matches
+                    UNION ALL
+                    SELECT ParentId, score FROM metadata_matches
+                ) combined
+                GROUP BY ParentId
                 ORDER BY score DESC
                 LIMIT @limit
             )
@@ -999,11 +1017,28 @@ public partial class DbService
         {
             using var conn = _dataSource.OpenConnection();
 
+            // Exact match across chunk text AND JSONB metadata (Title, People, FileName, DataSetName)
             string sql = @"
-                WITH matching_docs AS (
+                WITH chunk_matches AS (
                     SELECT DISTINCT c.ParentId
                     FROM DocumentChunks c
                     WHERE c.TextContent ILIKE @pattern
+                ),
+                metadata_matches AS (
+                    SELECT p.Id as ParentId
+                    FROM ParentDocuments p
+                    WHERE p.Metadata->>'Title' ILIKE @pattern
+                       OR p.Metadata->>'People' ILIKE @pattern
+                       OR p.Metadata->>'FileName' ILIKE @pattern
+                       OR p.Metadata->>'DataSetName' ILIKE @pattern
+                       OR p.FileName ILIKE @pattern
+                ),
+                matching_docs AS (
+                    SELECT DISTINCT ParentId FROM (
+                        SELECT ParentId FROM chunk_matches
+                        UNION
+                        SELECT ParentId FROM metadata_matches
+                    ) combined
                     LIMIT @limit
                 )
                 SELECT p.FileName,
@@ -1049,28 +1084,45 @@ public partial class DbService
         try
         {
             using var conn = _dataSource.OpenConnection();
+
+            // Sample recent docs from EACH dataset so all datasets are represented,
+            // not just the one with the most recent ProcessedAt timestamps.
+            int dataSetCount = GetDataSetCount(conn);
+            int perDataSet = Math.Max(3, limit / Math.Max(1, dataSetCount));
+
             string sql = @"
-                SELECT p.FileName,
-                       p.FilePath,
-                       d.pdffolder as PdfFolder,
-                       COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                       (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as Text,
+                WITH ranked AS (
+                    SELECT p.*,
+                           d.pdffolder,
+                           COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
+                           d.Name as DataSetName,
+                           s.Name as SourceName,
+                           ROW_NUMBER() OVER (PARTITION BY p.DataSetId ORDER BY p.ProcessedAt DESC) as rn
+                    FROM ParentDocuments p
+                    LEFT JOIN DataSets d ON p.DataSetId = d.Id
+                    LEFT JOIN Sources s ON d.SourceId = s.Id
+                )
+                SELECT r.FileName,
+                       r.FilePath,
+                       r.pdffolder as PdfFolder,
+                       r.ImageFolder,
+                       (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = r.Id) as Text,
                        0.0 as Distance,
-                       (p.Metadata->>'DeducedDate')::timestamp as DocDate,
-                       (p.Metadata->>'PageCount')::int as PageCount,
-                       (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
-                       (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
-                       s.Name as SourceName,
-                       d.Name as DataSetName,
-                       p.Metadata->>'People' as People
-                FROM ParentDocuments p
-                LEFT JOIN DataSets d ON p.DataSetId = d.Id
-                LEFT JOIN Sources s ON d.SourceId = s.Id
-                ORDER BY p.ProcessedAt DESC
+                       (r.Metadata->>'DeducedDate')::timestamp as DocDate,
+                       (r.Metadata->>'PageCount')::int as PageCount,
+                       (SELECT filename FROM DocumentImages WHERE ParentId = r.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                       (SELECT filename FROM DocumentImages WHERE ParentId = r.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
+                       r.SourceName,
+                       r.DataSetName,
+                       r.Metadata->>'People' as People
+                FROM ranked r
+                WHERE r.rn <= @perDataSet
+                ORDER BY r.ProcessedAt DESC
                 LIMIT @limit;
             ";
 
             using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("perDataSet", perDataSet);
             cmd.Parameters.AddWithValue("limit", limit);
 
             using var reader = cmd.ExecuteReader();
@@ -1084,6 +1136,19 @@ public partial class DbService
             Console.WriteLine($"Error getting recent docs: {ex.Message}");
         }
         return results;
+    }
+
+    /// <summary>
+    /// Quick count of datasets for per-dataset sampling.
+    /// </summary>
+    private static int GetDataSetCount(NpgsqlConnection conn)
+    {
+        try
+        {
+            using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM DataSets", conn);
+            return Convert.ToInt32(cmd.ExecuteScalar() ?? 1);
+        }
+        catch { return 1; }
     }
 
     public (long Docs, long Images, long Chunks) GetCounts()
