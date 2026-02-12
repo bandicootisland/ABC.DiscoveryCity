@@ -57,7 +57,7 @@
                 <SplitterPane Size="66%">
                     @if (Document != null && !string.IsNullOrEmpty(Document.FilePath))
                     {
-                        <iframe src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.FilePath)}"))" style="width:100%; height:100%; border:none;"></iframe>
+                        <iframe src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.FilePath)}")" style="width:100%; height:100%; border:none;"></iframe>
                     }
                 </SplitterPane>
                 <SplitterPane>
