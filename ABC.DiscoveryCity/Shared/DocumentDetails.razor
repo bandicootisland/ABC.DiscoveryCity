@@ -1,4 +1,5 @@
 @using ABC.DiscoveryCity.Services
+@using System.Text.Json
 @using static ABC.DiscoveryCity.Services.TextFormatExtensions
 @using Telerik.Blazor
 @using Telerik.Blazor.Components
@@ -76,9 +77,102 @@
             </SplitterPanes>
         </TelerikSplitter>
     </TabStripTab>
+    <TabStripTab Title="Metadata">
+        <div class="p-3">
+            @if (!string.IsNullOrEmpty(RemoteUrl))
+            {
+                <div class="mb-3 p-3 bg-light border rounded">
+                    <h6 class="border-bottom pb-2">Remote Source</h6>
+                    <a href="@RemoteUrl" target="_blank" rel="noopener noreferrer" class="text-break">
+                        <TelerikIcon Icon="@SvgIcon.HyperlinkOpen" /> @RemoteUrl
+                    </a>
+                </div>
+            }
+            <div class="card">
+                <div class="card-header"><strong>Document Metadata (JSONB)</strong></div>
+                <div class="card-body" style="max-height: 600px; overflow-y: auto;">
+                    @if (MetadataEntries.Count > 0)
+                    {
+                        <table class="table table-sm table-striped mb-0">
+                            <thead>
+                                <tr><th style="width: 200px;">Property</th><th>Value</th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var entry in MetadataEntries)
+                                {
+                                    <tr>
+                                        <td><strong>@entry.Key</strong></td>
+                                        <td class="text-break" style="font-family: 'Consolas', monospace; font-size: 0.9em;">@entry.Value</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                    else
+                    {
+                        <span class="text-muted fst-italic">No metadata available.</span>
+                    }
+                </div>
+            </div>
+        </div>
+    </TabStripTab>
 </TelerikTabStrip>
 
 @code {
     [Parameter]
     public SearchResultDto? Document { get; set; }
+
+    private string RemoteUrl => BuildRemoteUrl();
+    private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
+
+    private string BuildRemoteUrl()
+    {
+        if (Document == null) return "";
+
+        // Derive remote URL from Source + DataSet + FileName
+        // For DOJ Disclosures, the public archive pattern is known
+        var source = Document.SourceName ?? "";
+        var dataSet = Document.DataSetName ?? "";
+        var fileName = Document.FileName ?? "";
+
+        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(fileName)) return "";
+
+        // DOJ Epstein disclosures are hosted on Journalist Studio / Archive.org
+        // Construct a search-friendly URL
+        if (source.Contains("DepartmentofJustice", StringComparison.OrdinalIgnoreCase))
+        {
+            // Journalist Studio (Google Pinpoint) - the primary hosting
+            return $"https://journaliststudio.google.com/pinpoint/search?collection=epstein-documents&q={Uri.EscapeDataString(System.IO.Path.GetFileNameWithoutExtension(fileName))}";
+        }
+
+        return "";
+    }
+
+    private List<KeyValuePair<string, string>> ParseMetadata()
+    {
+        var entries = new List<KeyValuePair<string, string>>();
+        if (Document == null || string.IsNullOrEmpty(Document.MetadataJson) || Document.MetadataJson == "{}") 
+            return entries;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(Document.MetadataJson);
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                string value = prop.Value.ValueKind switch
+                {
+                    JsonValueKind.Array => string.Join(", ", prop.Value.EnumerateArray().Select(e => e.ToString())),
+                    JsonValueKind.Null => "",
+                    _ => prop.Value.ToString()
+                };
+                if (!string.IsNullOrEmpty(value))
+                {
+                    entries.Add(new KeyValuePair<string, string>(prop.Name, value));
+                }
+            }
+        }
+        catch { }
+
+        return entries;
+    }
 }

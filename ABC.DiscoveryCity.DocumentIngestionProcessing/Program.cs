@@ -1093,6 +1093,7 @@ void CleanGeneratedFiles(string folder)
 // Helper extension
 public static class StringExtensions
 {
+    public static string D = "";
     public static string Truncate(this string value, int maxLength)
     {
         if (string.IsNullOrEmpty(value)) return value;

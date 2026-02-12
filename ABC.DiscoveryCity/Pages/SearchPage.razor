@@ -24,12 +24,14 @@
             <TelerikCheckBox @bind-Value="@ExactMatchOnly" Id="exactMatch" />
             <label for="exactMatch" class="ms-1" title="Only return documents containing the exact search text">Exact Match</label>
         </div>
-        <div class="col-md-3">
-            <TelerikDropDownList Data="@AvailableSources"
-                                 @bind-Value="@SelectedSource"
-                                 DefaultText="All Sources"
-                                 Width="100%"
-                                 OnChange="@OnSourceFilterChanged" />
+        <div class="col-md-4">
+            <TelerikMultiSelect Data="@AvailableDataSets"
+                                @bind-Value="@SelectedDataSets"
+                                Placeholder="All DataSets"
+                                Width="100%"
+                                AutoClose="false"
+                                ClearButton="true"
+                                OnChange="@OnDataSetFilterChanged" />
         </div>
     </div>
 
@@ -136,21 +138,22 @@
     private bool IsSearching { get; set; } = false;
     private bool ExactMatchOnly { get; set; } = false;
 
-    // Source filter
-    private List<string> AvailableSources { get; set; } = new();
-    private string? SelectedSource { get; set; }
+    // DataSet filter
+    private List<string> AvailableDataSets { get; set; } = new();
+    private List<string> SelectedDataSets { get; set; } = new();
     
-    // Filtered results based on source selection
+    // Filtered results based on dataset selection
     private IEnumerable<SearchResultDto> FilteredResults => 
-        string.IsNullOrEmpty(SelectedSource) 
+        SelectedDataSets == null || SelectedDataSets.Count == 0 
             ? SearchResults ?? new List<SearchResultDto>() 
-            : (SearchResults ?? new List<SearchResultDto>()).Where(r => r.SourceName == SelectedSource);
+            : (SearchResults ?? new List<SearchResultDto>()).Where(r => SelectedDataSets.Contains(r.DataSetName ?? ""));
 
     private bool ShowPdfWindow { get; set; } = false;
     private SearchResultDto? SelectedPdf { get; set; }
 
     protected override async Task OnInitializedAsync()
     {
+        AvailableDataSets = await SearchService.GetDataSetNamesAsync();
         await LoadRecentDocuments();
     }
 
@@ -160,13 +163,6 @@
         try
         {
             SearchResults = await SearchService.GetRecentDocumentsAsync(50);
-            // Populate available sources from results
-            AvailableSources = SearchResults
-                .Where(r => !string.IsNullOrEmpty(r.SourceName))
-                .Select(r => r.SourceName!)
-                .Distinct()
-                .OrderBy(s => s)
-                .ToList();
         }
         finally
         {
@@ -174,9 +170,8 @@
         }
     }
 
-    private void OnSourceFilterChanged()
+    private void OnDataSetFilterChanged()
     {
-        // FilteredResults is a computed property, so just trigger re-render
         StateHasChanged();
     }
 

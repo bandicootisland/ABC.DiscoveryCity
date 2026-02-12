@@ -80,6 +80,20 @@ public class SearchService
             return new List<DataSetStatsDto>();
         }
     }
+
+    public async Task<List<string>> GetDataSetNamesAsync()
+    {
+        try
+        {
+            var response = await _httpClient.GetFromJsonAsync<List<string>>("api/search/datasets");
+            return response ?? new List<string>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetDataSetNames error: {ex.Message}");
+            return new List<string>();
+        }
+    }
 }
 
 public class SearchResultDto
@@ -97,6 +111,7 @@ public class SearchResultDto
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public List<string>? People { get; set; }
+    public string MetadataJson { get; set; } = "{}";
 }
 
 public class ImageDto
