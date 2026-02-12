@@ -1,6 +1,6 @@
 {
   "profiles": {
-    "ABC.DiscoveryCity.TestApp": {
+    "ABC.DiscoveryCity.DocumentIngestionProcessing": {
       "commandName": "Project"
     },
     "WSL": {

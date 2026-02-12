@@ -3,7 +3,7 @@ using ABC.DiscoveryCity.Words.Common.Structure;
 using ABC.DiscoveryCity.Words.Structure;
 using System.Diagnostics;
 
-namespace ABC.DiscoveryCity.TestApp.Tests
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 {
     public class WordWebTesting
     {

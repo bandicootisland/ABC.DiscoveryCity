@@ -166,23 +166,8 @@ namespace ABC.DiscoveryCity.TelerikProcessing
         {
             var images = new List<PdfPageImage>();
             
-            // Note: Thumbnail generation requires Telerik.Documents.Fixed and Skia.
-            // Since we are prioritizing 'Flow' for text extraction and avoiding 'Windows' framework namespace confusion,
-            // we will temporarily disable thumbnail generation.
-            // Converting PDF to Images via Flow is not natively supported (Flow is for reflowable text).
-            
-            /*
-            // Implementation using Fixed + Skia (if references allowed)
-            try
-            {
-                var provider = new Telerik.Windows.Documents.Fixed.FormatProviders.Pdf.PdfFormatProvider();
-                using var ms = new MemoryStream(pdfData);
-                var document = provider.Import(ms);
-                
-                // ... Export logic ...
-            }
-            catch {}
-            */
+            // Thumbnail generation is handled by PdfThumbnailPipeline (extract → browser fallback).
+            // This stub is kept for interface compatibility.
 
              return images;
         }

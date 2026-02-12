@@ -1,7 +1,7 @@
-﻿using ABC.DiscoveryCity.TestApp.Tests;
+﻿using ABC.DiscoveryCity.DocumentIngestionProcessing.Tests;
 using ABC.DiscoveryCity.Words.Common;
 using ABC.DiscoveryCity.Words.Common.Domain;
-using ABC.DiscoveryCity.TestApp;
+using ABC.DiscoveryCity.DocumentIngestionProcessing;
 using ABC.DiscoveryCity.Embeddings;
 using ABC.DiscoveryCity.TelerikProcessing;
 using ABC.DiscoveryCity.PostgreSQL;
@@ -24,16 +24,48 @@ bool forceReprocess = args.Any(a => a.Equals("--force", StringComparison.Ordinal
 bool reprocessMode = args.Any(a => a.Equals("--reprocess", StringComparison.OrdinalIgnoreCase));
 bool extractPeopleLlm = args.Any(a => a.Equals("--extract-people-llm", StringComparison.OrdinalIgnoreCase));
 int limitFiles = 0;
+string? folderArg = null;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i].Equals("--limit", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
     {
         int.TryParse(args[i + 1], out limitFiles);
     }
+    if (args[i].Equals("--folder", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+    {
+        folderArg = args[i + 1];
+    }
 }
 
-string[] priorityDataSets = args.Where(a => !a.StartsWith("--") && int.TryParse(a, out _) == false).ToArray();
-if (priorityDataSets.Length == 0) priorityDataSets = new[] { "DataSet 11" };
+// Resolve root folder: --folder arg > environment variable > default
+string rootFolder = folderArg
+    ?? Environment.GetEnvironmentVariable("DISCOVERYCITY_ROOT_FOLDER")
+    ?? "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/";
+
+// Ensure trailing separator
+if (!rootFolder.EndsWith(Path.DirectorySeparatorChar) && !rootFolder.EndsWith(Path.AltDirectorySeparatorChar))
+    rootFolder += Path.DirectorySeparatorChar;
+
+// Filter out --folder value and --limit value from positional args
+var skipArgs = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--folder", "--limit" };
+var positionalArgs = new List<string>();
+for (int i = 0; i < args.Length; i++)
+{
+    if (skipArgs.Contains(args[i]) && i + 1 < args.Length) { i++; continue; } // skip flag + value
+    if (!args[i].StartsWith("--") && !int.TryParse(args[i], out _))
+        positionalArgs.Add(args[i]);
+}
+string[] priorityDataSets = positionalArgs.Count > 0 ? positionalArgs.ToArray() : new[] { "DataSet 11" };
+
+// Quick diagnostic: dump ImageSource internals for a PDF
+if (args.Any(a => a.Equals("--diag-image", StringComparison.OrdinalIgnoreCase)))
+{
+    string diagPdf = args.SkipWhile(a => !a.Equals("--diag-image", StringComparison.OrdinalIgnoreCase)).Skip(1).FirstOrDefault()
+        ?? "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/DataSet 10/PDFs/EFTA01302373.pdf";
+    var ext = new PdfImageExtractor();
+    ext.DiagnoseDump(diagPdf);
+    return;
+}
 
 // Quick Test Commands
 if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.OrdinalIgnoreCase))
@@ -107,7 +139,7 @@ catch (Exception ex)
 
 // Initialize Services
 ThumbnailService? thumbnailService = null;
-TelerikThumbnailService? telerikThumbnailService = null;
+PdfImageExtractor? pdfImageExtractor = null;
 
 if (noImages)
 {
@@ -115,8 +147,8 @@ if (noImages)
 }
 else if (renderDirect)
 {
-    Console.WriteLine("Using Telerik direct rendering for thumbnails (no browser)");
-    telerikThumbnailService = new TelerikThumbnailService();
+    Console.WriteLine("Using Telerik direct image extraction for thumbnails (no browser)");
+    pdfImageExtractor = new PdfImageExtractor();
 }
 else
 {
@@ -285,7 +317,7 @@ if (imagesOnly)
     int imgTotal = 0;
     var imgPendingTasks = new System.Collections.Concurrent.ConcurrentBag<Task>();
 
-    string imgRootFolder = "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/";
+    string imgRootFolder = rootFolder;
     var imgSubDirs = System.IO.Directory.GetDirectories(imgRootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
     var imgTargetFolders = new List<string>();
     var imgAddedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -309,7 +341,9 @@ if (imagesOnly)
     foreach (var folder in imgTargetFolders)
     {
         Console.WriteLine($"Scanning for images: {folder}");
-        var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories);
+        var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories)
+            .Where(f => !f.Contains(System.IO.Path.DirectorySeparatorChar + "Published" + System.IO.Path.DirectorySeparatorChar))
+            .ToArray();
 
         foreach (var pdfPath in pdfFiles)
         {
@@ -384,13 +418,12 @@ if (imagesOnly)
 // BATCH TEST LIMIT - set to 0 for unlimited, or a number to limit processing
 int MAX_FILES = limitFiles;
 int totalFiles = 0;
-int processedFiles = 0;
+int startedFiles = 0;   // Atomically claimed BEFORE work begins (for accurate limit enforcement)
+int processedFiles = 0;  // Incremented AFTER work completes
 int skippedFiles = 0;
 var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>(); 
 
-string rootFolder = "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/"; 
-
-Console.WriteLine($"Default Root Folder: {rootFolder}");
+Console.WriteLine($"Root Folder: {rootFolder}");
 
 // Find DataSet folders
 var subDirs = System.IO.Directory.GetDirectories(rootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
@@ -431,8 +464,13 @@ foreach (var folder in targetFolders)
 {
     // Extract DataSet name from folder (e.g., "DataSet_9")
     string dataSetName = System.IO.Path.GetFileName(folder) ?? "Default";
-    int dataSetId = dbService.GetOrCreateDataSet(sourceId, dataSetName);
+    // Published folder: standardised output location for all processed files
+    // Relative path is "DataSet N/Published/" — identical on Windows and Linux
+    string publishedRelFolder = dataSetName + "/Published/";
+    string publishedDir = System.IO.Path.Combine(folder, "Published");
+    int dataSetId = dbService.GetOrCreateDataSet(sourceId, dataSetName, publishedRelFolder);
     Console.WriteLine($"Created/Found DataSet: {dataSetName} (Id: {dataSetId}) for Source: {sourceName}");
+    Console.WriteLine($"  Published folder: {publishedDir}");
 
     Console.WriteLine($"Scanning folder: {folder}");
 
@@ -442,15 +480,18 @@ foreach (var folder in targetFolders)
         CleanGeneratedFiles(folder);
     }
 
-    var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories);
+    // Scan for source PDFs, excluding the Published output directory
+    var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories)
+        .Where(f => !f.Contains(System.IO.Path.DirectorySeparatorChar + "Published" + System.IO.Path.DirectorySeparatorChar))
+        .ToArray();
 
     // Use Parallel.ForEachAsync to process files concurrently
     int maxDegreeOfParallelism = 5;
     var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism };
     await Parallel.ForEachAsync(pdfFiles, parallelOptions, async (pdfPath, ct) =>
     {
-        // Check global processed count loosely
-        if (MAX_FILES > 0 && processedFiles >= MAX_FILES) return;
+        // Atomically claim a slot before doing any work — prevents over-processing
+        if (MAX_FILES > 0 && System.Threading.Interlocked.Increment(ref startedFiles) > MAX_FILES) return;
 
         try 
         {
@@ -470,7 +511,7 @@ foreach (var folder in targetFolders)
             int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
             Console.WriteLine($"[{currentCount}] Processing: {System.IO.Path.GetFileName(pdfPath)}");
             
-            await ProcessPdf(pdfPath, thumbnailService, telerikThumbnailService, dataSetId);
+            await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir);
             
             // Mark text extraction as done
             System.IO.File.Create(doneFile).Dispose();
@@ -513,7 +554,7 @@ if (pendingImageTasks.Count > 0)
     Console.WriteLine("All image tasks completed.");
 }
 
-async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, TelerikThumbnailService? telerikThumbnailService, int? dataSetId = null, bool inspectMode = false)
+async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfImageExtractor? pdfImageExtractor, int? dataSetId = null, bool inspectMode = false, string? publishedDir = null)
 {
     // Skip if already processed (for distributed processing)
     if (dbService.DocumentExists(pdfPath))
@@ -532,6 +573,10 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
     {
          fullText = string.Join(" ", digitalBook.Words.Select(w => w.text));
     }
+
+    // Ensure Published output directory exists
+    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
+        System.IO.Directory.CreateDirectory(publishedDir);
 
     // NOTE: Do NOT clean fullText — raw OCR text is evidence and must be preserved exactly.
     // MIME artifacts (= replacing characters) are handled as a matching problem in people extraction.
@@ -595,21 +640,33 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
     // 3. Serialize to JSON
     string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
     
-    // 4. Determine Output Filename
+    // 4. Determine Output Filename & Published output location
     string dateStr = metadata.DeducedDate?.ToString("yyyy-MM-dd") ?? "UnknownDate";
     string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(pdfPath)}_{dateStr}";
+    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(pdfPath) ?? "";
     
-    string jsonPath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(pdfPath) ?? "", newFileNameBase + ".json");
+    // Copy source PDF to Published folder (if Published dir is set and different from source)
+    string publishedPdfPath = pdfPath; // default: original location
+    if (!string.IsNullOrEmpty(publishedDir))
+    {
+        publishedPdfPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(pdfPath));
+        if (!System.IO.File.Exists(publishedPdfPath))
+        {
+            System.IO.File.Copy(pdfPath, publishedPdfPath);
+            Console.WriteLine($"  Copied PDF → Published: {System.IO.Path.GetFileName(pdfPath)}");
+        }
+    }
     
+    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
     System.IO.File.WriteAllText(jsonPath, json);
     Console.WriteLine($"Saved JSON: {jsonPath}");
 
-    // 5. Insert into Postgres (lock for thread-safety with parallel processing)
+    // 5. Insert into Postgres — store the Published path (lock for thread-safety with parallel processing)
     try
     {
         lock (dbService)
         {
-            dbService.InsertDocument(pdfPath, metadata, dataSetId);
+            dbService.InsertDocument(publishedPdfPath, metadata, dataSetId);
         }
     }
     catch(Exception ex)
@@ -618,6 +675,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
     }
 
     // 6. Generate page images (thumb + full) - skip if --no-images flag is set
+    //    Images go to Published folder when set, otherwise alongside source PDF
     if (!noImages)
     {
         var imageTask = Task.Run(async () =>
@@ -627,20 +685,19 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
                 string thumbPath = ""; int thumbW = 0, thumbH = 0;
                 string fullPath = ""; int fullW = 0, fullH = 0;
 
-                if (telerikThumbnailService != null)
+                if (pdfImageExtractor != null)
                 {
-                    // Use Telerik direct rendering (no browser needed)
-                    var (tPath, fPath) = telerikThumbnailService.GenerateThumbnails(telerikDoc, pdfPath);
+                    // Use Telerik direct image extraction (no browser needed)
+                    // outputDir = publishedDir so images land in Published/
+                    var (fPath, tPath, w, h) = pdfImageExtractor.ExtractPageImage(pdfPath, outputDir: publishedDir);
 
-                    if (!string.IsNullOrEmpty(tPath) && System.IO.File.Exists(tPath))
+                    if (!string.IsNullOrEmpty(fPath))
                     {
-                        using var img = SixLabors.ImageSharp.Image.Load(tPath);
-                        (thumbPath, thumbW, thumbH) = (tPath, img.Width, img.Height);
+                        (fullPath, fullW, fullH) = (fPath, w, h);
                     }
-                    if (!string.IsNullOrEmpty(fPath) && System.IO.File.Exists(fPath))
+                    if (!string.IsNullOrEmpty(tPath))
                     {
-                        using var img = SixLabors.ImageSharp.Image.Load(fPath);
-                        (fullPath, fullW, fullH) = (fPath, img.Width, img.Height);
+                        (thumbPath, thumbW, thumbH) = (tPath, 100, h > 0 && w > 0 ? (int)(100.0 * h / w) : 0);
                     }
                 }
                 else if (thumbnailService != null)
@@ -662,7 +719,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, Teleri
                 {
                     lock (dbService)
                     {
-                        dbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
+                        dbService.UpsertDocumentImages(publishedPdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH);
                     }
                 }
             }

@@ -26,48 +26,56 @@ public partial class DbService
     /// </summary>
     public static string ExtractFileName(string filePath) => System.IO.Path.GetFileName(filePath);
 
+    // Cached basepaths from filesources table (loaded once at startup)
+    private static string? _windowsBasePath;
+    private static string? _linuxBasePath;
+
     /// <summary>
-    /// Resolves a stored file path to the correct OS path using file sources.
-    /// If the stored path starts with a known base path from FileSources,
-    /// replaces it with the matching base path for the current OS.
-    /// Falls back to the stored path if no match.
+    /// Build a full file path for the current OS from folder + filename.
+    /// Uses cached basepaths from the filesources table.
     /// </summary>
-    public static string? ResolvePath(string? storedPath, List<FileSourceEntry>? fileSources)
+    public static string? BuildPath(string? folder, string? filename)
     {
-        if (string.IsNullOrEmpty(storedPath) || fileSources == null || fileSources.Count == 0)
-            return storedPath;
-
-        // Normalise separators for comparison
-        string normalised = storedPath.Replace('\\', '/');
-
-        foreach (var fs in fileSources)
-        {
-            string normBase = fs.BasePath.Replace('\\', '/');
-            if (normalised.StartsWith(normBase, StringComparison.OrdinalIgnoreCase))
-            {
-                // Already matches this base path — find sibling for current OS
-                string relative = normalised[normBase.Length..];
-                var osMatch = fileSources.FirstOrDefault(f =>
-                    IsWindows ? f.BasePath.Contains('\\') || f.BasePath.Contains(":") 
-                              : f.BasePath.StartsWith('/'));
-                if (osMatch != null && osMatch.Id != fs.Id)
-                {
-                    return Path.Combine(osMatch.BasePath, relative.Replace('/', Path.DirectorySeparatorChar));
-                }
-                return storedPath; // already matches current OS or no sibling
-            }
-        }
-        return storedPath;
+        if (string.IsNullOrEmpty(filename)) return null;
+        var basePath = IsWindows ? _windowsBasePath : _linuxBasePath;
+        if (basePath == null) return null;
+        var fullPath = basePath + (folder ?? "") + filename;
+        return IsWindows ? fullPath.Replace('/', '\\') : fullPath.Replace('\\', '/');
     }
 
     /// <summary>
-    /// Legacy overload for backward compat.
+    /// Resolve a file path for the current OS. If the path contains a known base path
+    /// from the other OS (e.g. Windows path on Linux), translate it.
+    /// Falls back to the original path if no translation is possible.
     /// </summary>
-    public static string? ResolvePath(string? windowsPath, string? linuxPath, string? legacyPath = null)
+    public static string ResolveFilePathForCurrentOs(string path)
     {
-        if (IsWindows)
-            return windowsPath ?? legacyPath;
-        return linuxPath ?? legacyPath;
+        if (string.IsNullOrEmpty(path)) return path;
+
+        // Already valid on current OS?
+        if (System.IO.File.Exists(path)) return path;
+
+        // Try to translate: extract the relative portion after the foreign base path
+        string? foreignBase = IsWindows ? _linuxBasePath : _windowsBasePath;
+        string? localBase = IsWindows ? _windowsBasePath : _linuxBasePath;
+
+        if (foreignBase != null && localBase != null)
+        {
+            // Normalise separators for comparison
+            string normPath = path.Replace('\\', '/');
+            string normForeignBase = foreignBase.Replace('\\', '/');
+
+            if (normPath.StartsWith(normForeignBase, StringComparison.OrdinalIgnoreCase))
+            {
+                string relativePart = normPath.Substring(normForeignBase.Length);
+                string resolved = localBase + relativePart;
+                resolved = IsWindows ? resolved.Replace('/', '\\') : resolved.Replace('\\', '/');
+                return resolved;
+            }
+        }
+
+        // Last resort: just fix separators for current OS
+        return IsWindows ? path.Replace('/', '\\') : path.Replace('\\', '/');
     }
 
     // Default connection string for convenience, but allows override
@@ -82,6 +90,33 @@ public partial class DbService
         var builder = new NpgsqlDataSourceBuilder(_connectionString);
         builder.UseVector();
         _dataSource = builder.Build();
+        LoadBasePaths();
+    }
+
+    /// <summary>
+    /// Load the Windows and Linux basepaths from the filesources table (2 rows).
+    /// </summary>
+    private void LoadBasePaths()
+    {
+        if (_windowsBasePath != null && _linuxBasePath != null) return;
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand("SELECT basepath FROM filesources ORDER BY id;", conn);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var path = reader.GetString(0);
+                if (path.Contains('\\') || path.StartsWith("S:"))
+                    _windowsBasePath = path;
+                else
+                    _linuxBasePath = path;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[WARN] Could not load basepaths from filesources: {ex.Message}");
+        }
     }
 
     private static void EnsurePgvectorMapping()
@@ -132,49 +167,41 @@ public partial class DbService
                 }
                 Console.WriteLine("Database Schema Verified Successfully.");
 
-                // --- MIGRATION: Ensure FileName columns exist ---
+                // --- MIGRATION: Ensure filesources + dataset folder schema ---
                 Console.WriteLine("Applying schema migrations (if needed)...");
 
-                // ParentDocuments: ensure FileName column
-                using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS FileName TEXT;", conn)) cmd.ExecuteNonQuery();
-
-                // Backfill FileName from existing FilePath where FileName is null
+                // Create filesources table
                 using (var cmd = new NpgsqlCommand(@"
-                    UPDATE ParentDocuments 
-                    SET FileName = REVERSE(SPLIT_PART(REVERSE(
-                        CASE WHEN FilePath LIKE '%\%' THEN REPLACE(FilePath, '\', '/') ELSE FilePath END
-                    ), '/', 1))
-                    WHERE FileName IS NULL AND FilePath IS NOT NULL;", conn)) 
-                {
-                    int rows = cmd.ExecuteNonQuery();
-                    if (rows > 0) Console.WriteLine($"  Backfilled FileName for {rows} ParentDocuments rows.");
-                }
+                    CREATE TABLE IF NOT EXISTS filesources (
+                        id SERIAL PRIMARY KEY,
+                        basepath TEXT NOT NULL UNIQUE,
+                        createdat TIMESTAMPTZ DEFAULT NOW()
+                    );", conn)) cmd.ExecuteNonQuery();
 
-                // Make FileName NOT NULL after backfill
+                // Add folder columns to datasets
+                using (var cmd = new NpgsqlCommand("ALTER TABLE DataSets ADD COLUMN IF NOT EXISTS pdffolder TEXT;", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("ALTER TABLE DataSets ADD COLUMN IF NOT EXISTS imagefolder TEXT;", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("ALTER TABLE DataSets ADD COLUMN IF NOT EXISTS m4folder TEXT;", conn)) cmd.ExecuteNonQuery();
+
+                // Ensure FileName column on ParentDocuments
+                using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS FileName TEXT;", conn)) cmd.ExecuteNonQuery();
                 using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ALTER COLUMN FileName SET NOT NULL;", conn))
-                    try { cmd.ExecuteNonQuery(); } catch (Exception ex) { Console.WriteLine($"  [WARN] Could not set FileName NOT NULL: {ex.Message}"); }
+                    try { cmd.ExecuteNonQuery(); } catch { /* already set */ }
 
-                // Drop old FilePath UNIQUE constraint and add new (DataSetId, FileName) unique constraint
+                // Ensure FileName column on DocumentImages
+                using (var cmd = new NpgsqlCommand("ALTER TABLE DocumentImages ADD COLUMN IF NOT EXISTS filename TEXT;", conn)) cmd.ExecuteNonQuery();
+
+                // Ensure unique constraint
                 using (var cmd = new NpgsqlCommand(@"
                     DO $$ BEGIN
-                        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parentdocuments_filepath_key') THEN
-                            ALTER TABLE ParentDocuments DROP CONSTRAINT parentdocuments_filepath_key;
-                        END IF;
                         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parentdocuments_datasetid_filename_key') THEN
                             ALTER TABLE ParentDocuments ADD CONSTRAINT parentdocuments_datasetid_filename_key UNIQUE (DataSetId, FileName);
                         END IF;
                     END $$;", conn)) cmd.ExecuteNonQuery();
 
-                // DocumentImages: ensure FileName column
-                using (var cmd = new NpgsqlCommand("ALTER TABLE DocumentImages ADD COLUMN IF NOT EXISTS FileName TEXT;", conn)) cmd.ExecuteNonQuery();
-
-                // Create FileSources table if not exists
-                using (var cmd = new NpgsqlCommand(@"
-                    CREATE TABLE IF NOT EXISTS FileSources (
-                        Id SERIAL PRIMARY KEY,
-                        BasePath TEXT NOT NULL,
-                        CreatedAt TIMESTAMPTZ DEFAULT NOW()
-                    );", conn)) cmd.ExecuteNonQuery();
+                // Make BaseFilePath nullable on Sources (legacy)
+                using (var cmd = new NpgsqlCommand("ALTER TABLE Sources ALTER COLUMN BaseFilePath DROP NOT NULL;", conn))
+                    try { cmd.ExecuteNonQuery(); } catch { /* already nullable */ }
 
                 Console.WriteLine("Schema migrations complete.");
                 return;
@@ -193,6 +220,15 @@ public partial class DbService
             ";
             using (var cmd = new NpgsqlCommand(createSourcesTableSql, conn)) cmd.ExecuteNonQuery();
 
+            // 1b. Create FileSources Table (root basepaths — 1 per OS)
+            Console.WriteLine("Creating FileSources table...");
+            using (var cmd = new NpgsqlCommand(@"
+                CREATE TABLE IF NOT EXISTS filesources (
+                    id SERIAL PRIMARY KEY,
+                    basepath TEXT NOT NULL UNIQUE,
+                    createdat TIMESTAMPTZ DEFAULT NOW()
+                );", conn)) cmd.ExecuteNonQuery();
+
             // 3. Create DataSets Table (child of Sources)
             Console.WriteLine("Creating DataSets table...");
             string createDataSetsTableSql = @"
@@ -200,6 +236,9 @@ public partial class DbService
                     Id SERIAL PRIMARY KEY,
                     SourceId INT REFERENCES Sources(Id) ON DELETE CASCADE,
                     Name TEXT NOT NULL,
+                    PdfFolder TEXT,
+                    ImageFolder TEXT,
+                    M4Folder TEXT,
                     CreatedAt TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE(SourceId, Name)
                 );
@@ -208,6 +247,7 @@ public partial class DbService
 
             // 4. Create Parent Documents Table (child of DataSets)
             //    Unique key is (DataSetId, FileName) — OS-independent.
+            //    Separate columns for Windows and Linux file paths.
             Console.WriteLine("Creating ParentDocuments table...");
             string createParentTableSql = @"
                 CREATE TABLE IF NOT EXISTS ParentDocuments (
@@ -273,6 +313,7 @@ public partial class DbService
             }
 
             // 6. Create DocumentImages Table
+            //    Separate columns for Windows and Linux image file paths.
             Console.WriteLine("Creating DocumentImages table...");
             string createImagesTableSql = @"
                 CREATE TABLE IF NOT EXISTS DocumentImages (
@@ -317,15 +358,6 @@ public partial class DbService
                 using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_textcontent ON DocumentChunks USING GIN (to_tsvector('english', TextContent));", conn)) cmd.ExecuteNonQuery();
                 using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_docimages_parentid ON DocumentImages(ParentId);", conn)) cmd.ExecuteNonQuery();
             }
-
-            // 7b. Create FileSources Table
-            Console.WriteLine("Creating FileSources table...");
-            using (var cmd = new NpgsqlCommand(@"
-                CREATE TABLE IF NOT EXISTS FileSources (
-                    Id SERIAL PRIMARY KEY,
-                    BasePath TEXT NOT NULL,
-                    CreatedAt TIMESTAMPTZ DEFAULT NOW()
-                );", conn)) cmd.ExecuteNonQuery();
 
             bool vectorIndexExists = false;
             using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'idx_chunks_embedding_hnsw';", conn))
@@ -440,35 +472,8 @@ public partial class DbService
     }
 
     /// <summary>
-    /// Get all file source base paths from the FileSources table.
-    /// Returns entries for each OS so consumers can resolve paths.
-    /// </summary>
-    public List<FileSourceEntry> GetFileSources()
-    {
-        var results = new List<FileSourceEntry>();
-        try
-        {
-            using var conn = _dataSource.OpenConnection();
-            using var cmd = new NpgsqlCommand("SELECT Id, BasePath FROM FileSources ORDER BY Id;", conn);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-            {
-                results.Add(new FileSourceEntry
-                {
-                    Id = reader.GetInt32(0),
-                    BasePath = reader.GetString(1)
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error getting file sources: {ex.Message}");
-        }
-        return results;
-    }
-
-    /// <summary>
     /// Get or create a Source by name. Returns the Source Id.
+    /// Stores OS-specific base path in the appropriate column.
     /// </summary>
     public int GetOrCreateSource(string name, string baseFilePath, string? url = null)
     {
@@ -490,18 +495,21 @@ public partial class DbService
     /// <summary>
     /// Get or create a DataSet by name for a given Source. Returns the DataSet Id.
     /// </summary>
-    public int GetOrCreateDataSet(int sourceId, string name)
+    public int GetOrCreateDataSet(int sourceId, string name, string? pdfFolder = null)
     {
         using var conn = _dataSource.OpenConnection();
         string sql = @"
-            INSERT INTO DataSets (SourceId, Name)
-            VALUES (@sourceId, @name)
-            ON CONFLICT (SourceId, Name) DO UPDATE SET Name = EXCLUDED.Name
+            INSERT INTO DataSets (SourceId, Name, PdfFolder, ImageFolder)
+            VALUES (@sourceId, @name, @pdfFolder, @pdfFolder)
+            ON CONFLICT (SourceId, Name) DO UPDATE SET 
+                PdfFolder = COALESCE(EXCLUDED.PdfFolder, DataSets.PdfFolder),
+                ImageFolder = COALESCE(EXCLUDED.ImageFolder, DataSets.ImageFolder)
             RETURNING Id;
         ";
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("sourceId", sourceId);
         cmd.Parameters.AddWithValue("name", name);
+        cmd.Parameters.AddWithValue("pdfFolder", (object?)pdfFolder ?? DBNull.Value);
         return (int)(cmd.ExecuteScalar() ?? 0);
     }
 
@@ -604,11 +612,11 @@ public partial class DbService
                 {
                     // 2a. UPDATE existing document
                     string updateSql = @"UPDATE ParentDocuments 
-                            SET Metadata = @meta::jsonb, 
-                                DataSetId = COALESCE(@dataSetId, DataSetId),
-                                FilePath = COALESCE(@fp, FilePath),
-                                ProcessedAt = NOW()
-                            WHERE Id = @id;";
+                        SET Metadata = @meta::jsonb, 
+                            DataSetId = COALESCE(@dataSetId, DataSetId),
+                            FilePath = @fp,
+                            ProcessedAt = NOW()
+                        WHERE Id = @id;";
 
                     using (var cmd = new NpgsqlCommand(updateSql, conn, trans))
                     {
@@ -764,14 +772,9 @@ public partial class DbService
             }
             if (parentIds.Count == 0) return;
 
-            // Extract the directory part of the path to store as FilePath in DocumentImages
-            string directory = Path.GetDirectoryName(fullPath) ?? "";
-            if (!directory.EndsWith(Path.DirectorySeparatorChar))
-                directory += Path.DirectorySeparatorChar;
-
             string upsertSql = @"
                 INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, FileName, Width, Height)
-                VALUES (@pid, 'jpg', @size, @dir, @imgName, @w, @h)
+                VALUES (@pid, 'jpg', @size, @path, @fname, @w, @h)
                 ON CONFLICT (ParentId, ImageSize)
                 DO UPDATE SET
                     FilePath = COALESCE(EXCLUDED.FilePath, DocumentImages.FilePath),
@@ -792,8 +795,8 @@ public partial class DbService
                         using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
                         cmd.Parameters.AddWithValue("pid", pid);
                         cmd.Parameters.AddWithValue("size", "full");
-                        cmd.Parameters.AddWithValue("dir", directory);
-                        cmd.Parameters.AddWithValue("imgName", ExtractFileName(fullPath));
+                        cmd.Parameters.AddWithValue("path", fullPath);
+                        cmd.Parameters.AddWithValue("fname", ExtractFileName(fullPath));
                         cmd.Parameters.AddWithValue("w", fullWidth);
                         cmd.Parameters.AddWithValue("h", fullHeight);
                         cmd.ExecuteNonQuery();
@@ -802,15 +805,11 @@ public partial class DbService
                     // Upsert thumb only if dimensions provided
                     if (thumbWidth > 0 && thumbHeight > 0)
                     {
-                        string thumbDir = Path.GetDirectoryName(thumbPath) ?? "";
-                        if (!thumbDir.EndsWith(Path.DirectorySeparatorChar))
-                            thumbDir += Path.DirectorySeparatorChar;
-
                         using var cmd = new NpgsqlCommand(upsertSql, conn, trans);
                         cmd.Parameters.AddWithValue("pid", pid);
                         cmd.Parameters.AddWithValue("size", "thumb");
-                        cmd.Parameters.AddWithValue("dir", thumbDir);
-                        cmd.Parameters.AddWithValue("imgName", ExtractFileName(thumbPath));
+                        cmd.Parameters.AddWithValue("path", thumbPath);
+                        cmd.Parameters.AddWithValue("fname", ExtractFileName(thumbPath));
                         cmd.Parameters.AddWithValue("w", thumbWidth);
                         cmd.Parameters.AddWithValue("h", thumbHeight);
                         cmd.ExecuteNonQuery();
@@ -907,12 +906,14 @@ public partial class DbService
             )
             SELECT p.FileName,
                    p.FilePath,
+                   d.pdffolder as PdfFolder,
+                   COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
                    (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
                    bm.distance,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
-                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'People' as People
@@ -955,12 +956,14 @@ public partial class DbService
             )
             SELECT p.FileName,
                    p.FilePath,
+                   d.pdffolder as PdfFolder,
+                   COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
                    (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
                    md.score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
-                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                   (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'People' as People
@@ -1005,12 +1008,14 @@ public partial class DbService
                 )
                 SELECT p.FileName,
                        p.FilePath,
+                       d.pdffolder as PdfFolder,
+                       COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
                        (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
                        1.0 as score,
                        (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (p.Metadata->>'PageCount')::int as PageCount,
-                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                       (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                       (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                        s.Name as SourceName,
                        d.Name as DataSetName,
                        p.Metadata->>'People' as People
@@ -1047,12 +1052,14 @@ public partial class DbService
             string sql = @"
                 SELECT p.FileName,
                        p.FilePath,
+                       d.pdffolder as PdfFolder,
+                       COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
                        (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as Text,
                        0.0 as Distance,
                        (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (p.Metadata->>'PageCount')::int as PageCount,
-                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbPath,
-                       (SELECT FilePath FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgPath,
+                       (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                       (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                        s.Name as SourceName,
                        d.Name as DataSetName,
                        p.Metadata->>'People' as People
@@ -1103,26 +1110,27 @@ public partial class DbService
     }
 
     /// <summary>
-    /// Shared reader for the standardized 11-column search result layout.
-    /// Column order: FileName, FilePath, Text, Distance/Score,
-    /// DocDate, PageCount, ThumbPath, FullImgPath,
-    /// SourceName, DataSetName, People
+    /// Shared reader for the standardized 13-column search result layout.
+    /// Column order: FileName, FilePath, PdfFolder, ImageFolder, Text, Distance/Score,
+    /// DocDate, PageCount, ThumbFileName, FullImgFileName, SourceName, DataSetName, People
     /// </summary>
     private static DocumentSearchResult ReadSearchResult(NpgsqlDataReader reader)
     {
         return new DocumentSearchResult
         {
-            FileName      = reader.IsDBNull(0) ? "" : reader.GetString(0),
-            FilePath      = reader.IsDBNull(1) ? null : reader.GetString(1),
-            Text          = reader.IsDBNull(2) ? "No text content" : reader.GetString(2),
-            Distance      = reader.IsDBNull(3) ? 0.0 : reader.GetDouble(3),
-            Date          = reader.IsDBNull(4) ? null : reader.GetDateTime(4),
-            PageCount     = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-            ThumbnailPath = reader.IsDBNull(6) ? null : reader.GetString(6),
-            FullImagePath = reader.IsDBNull(7) ? null : reader.GetString(7),
-            SourceName    = reader.IsDBNull(8) ? null : reader.GetString(8),
-            DataSetName   = reader.IsDBNull(9) ? null : reader.GetString(9),
-            People        = reader.IsDBNull(10) ? null : reader.GetString(10)
+            FileName           = reader.IsDBNull(0) ? "" : reader.GetString(0),
+            FilePath           = reader.IsDBNull(1) ? null : reader.GetString(1),
+            PdfFolder          = reader.IsDBNull(2) ? null : reader.GetString(2),
+            ImageFolder        = reader.IsDBNull(3) ? null : reader.GetString(3),
+            Text               = reader.IsDBNull(4) ? "No text content" : reader.GetString(4),
+            Distance           = reader.IsDBNull(5) ? 0.0 : reader.GetDouble(5),
+            Date               = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
+            PageCount          = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
+            ThumbnailFileName  = reader.IsDBNull(8) ? null : reader.GetString(8),
+            FullImageFileName  = reader.IsDBNull(9) ? null : reader.GetString(9),
+            SourceName         = reader.IsDBNull(10) ? null : reader.GetString(10),
+            DataSetName        = reader.IsDBNull(11) ? null : reader.GetString(11),
+            People             = reader.IsDBNull(12) ? null : reader.GetString(12)
         };
     }
 
@@ -1253,17 +1261,17 @@ public class DataSetStats
 }
 
 /// <summary>
-/// Search result from DbService. Contains file paths as stored in the DB.
-/// The consumer uses FileSources to resolve OS-appropriate paths.
+/// OS-agnostic search result from DbService. Carries folder + filename info.
+/// Full paths are constructed via DbService.BuildPath(folder, filename).
 /// </summary>
 public class DocumentSearchResult
 {
     public string FileName { get; set; } = "";
-    public string? FilePath { get; set; }
-
-    // Image paths (CONCAT of directory + filename from DocumentImages)
-    public string? ThumbnailPath { get; set; }
-    public string? FullImagePath { get; set; }
+    public string? FilePath { get; set; }           // Legacy full path
+    public string? PdfFolder { get; set; }          // Relative folder from datasets
+    public string? ImageFolder { get; set; }        // Image folder (falls back to PdfFolder)
+    public string? ThumbnailFileName { get; set; }
+    public string? FullImageFileName { get; set; }
 
     // Content & metadata
     public string Text { get; set; } = "";
@@ -1273,16 +1281,19 @@ public class DocumentSearchResult
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public string? People { get; set; }
-}
 
-/// <summary>
-/// Represents a file source base path entry from the FileSources table.
-/// Used by consumers to resolve OS-appropriate file paths.
-/// </summary>
-public class FileSourceEntry
-{
-    public int Id { get; set; }
-    public string BasePath { get; set; } = "";
+    /// <summary>Resolve the document file path for the current OS.</summary>
+    public string? ResolvedFilePath => 
+        DbService.BuildPath(PdfFolder, FileName) 
+        ?? (FilePath != null ? DbService.ResolveFilePathForCurrentOs(FilePath) : null);
+
+    /// <summary>Resolve the thumbnail path for the current OS.</summary>
+    public string? ResolvedThumbnailPath => 
+        DbService.BuildPath(ImageFolder ?? PdfFolder, ThumbnailFileName);
+
+    /// <summary>Resolve the full image path for the current OS.</summary>
+    public string? ResolvedFullImagePath => 
+        DbService.BuildPath(ImageFolder ?? PdfFolder, FullImageFileName);
 }
 
 public class SystemStats

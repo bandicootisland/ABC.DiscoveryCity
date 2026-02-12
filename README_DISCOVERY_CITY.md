@@ -8,7 +8,7 @@
 |-----------|---------|------|---------|
 | Blazor Frontend | ABC.DiscoveryCity | 5233 | Search UI with Telerik DataGrid |
 | REST API | ABC.DiscoveryCity.API | 5022 | Search endpoints, stats |
-| PDF Processor | ABC.DiscoveryCity.TestApp | CLI | Ingestion, embeddings, reprocessing |
+| PDF Processor | ABC.DiscoveryCity.DocumentIngestionProcessing | CLI | Ingestion, embeddings, reprocessing |
 | PostgreSQL + pgvector | Docker | 5435 | Document storage, vector search |
 | Ollama | systemd | 11434 | Embedding generation (all-minilm:latest, 384 dims) |
 
@@ -48,10 +48,10 @@
 
 3. **Dependencies**: Restored automatically on build. Telerik NuGet source required.
 
-## CLI Flags (TestApp)
+## CLI Flags (DocumentIngestionProcessing)
 
 ```bash
-cd ABC.DiscoveryCity.TestApp
+cd ABC.DiscoveryCity.DocumentIngestionProcessing
 dotnet run -- [DataSet] [flags]
 ```
 
@@ -111,7 +111,7 @@ dotnet run -- [DataSet] [flags]
 
 ```bash
 # 1. Reprocess all docs for People extraction (reads from DB, fast)
-cd ABC.DiscoveryCity.TestApp
+cd ABC.DiscoveryCity.DocumentIngestionProcessing
 nohup dotnet run -- --reprocess --no-images > reprocess.log 2>&1 &
 
 # 2. Backfill embeddings for chunks with NULL embeddings  

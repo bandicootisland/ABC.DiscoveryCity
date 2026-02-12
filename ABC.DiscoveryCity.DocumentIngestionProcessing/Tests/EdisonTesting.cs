@@ -2,7 +2,7 @@
 //using static ABC.DiscoveryCity.Lexicon.Edison.Words;
 //using EdisonWords = ABC.DiscoveryCity.Lexicon.Edison.Words;
 
-//namespace ABC.DiscoveryCity.TestApp.Tests
+//namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 //{
 //    public class EdisonTesting
 //    {

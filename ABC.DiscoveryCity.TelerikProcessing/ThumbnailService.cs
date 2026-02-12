@@ -24,6 +24,14 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
     private static bool _headless = true;
     private static readonly SemaphoreSlim _resetLock = new(1, 1);
     private const int RESET_EVERY_N_FILES = 100;
+    
+    /// <summary>
+    /// Optional: Set a remote viewer URL (e.g. "http://localhost:5022/pdfviewer.html")
+    /// When set, uses this URL instead of the local pdf_viewer.html, and passes the PDF
+    /// path via the API's /api/images/view endpoint.
+    /// </summary>
+    public string? RemoteViewerUrl { get; set; }
+    
     /// <summary>
     /// Initialize Playwright and launch the browser.
     /// Call this once before processing.
@@ -111,9 +119,22 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
         string dir = Path.GetDirectoryName(pdfPath) ?? "";
         string baseName = Path.GetFileNameWithoutExtension(pdfPath);
         
-        // Ensure PDF path is a valid URI
-        string pdfFileUrl = new Uri(pdfPath).AbsoluteUri;
-        string viewerUrl = new Uri(_viewerPath).AbsoluteUri;
+        // Construct the navigation URL based on whether we're using a remote viewer (pdf.js via API)
+        // or the local embedded pdf_viewer.html
+        string pageNavUrl;
+        if (!string.IsNullOrEmpty(RemoteViewerUrl))
+        {
+            // Remote viewer: pass PDF path via API endpoint
+            string encodedPath = System.Net.WebUtility.UrlEncode(pdfPath);
+            pageNavUrl = $"{RemoteViewerUrl}?file=/api/images/view?path={encodedPath}&page=1";
+        }
+        else
+        {
+            // Local viewer: use file:// URIs 
+            string pdfFileUrl = new Uri(pdfPath).AbsoluteUri;
+            string viewerUrl = new Uri(_viewerPath).AbsoluteUri;
+            pageNavUrl = $"{viewerUrl}?file={pdfFileUrl}&page=1";
+        }
 
         // Round-robin pick a browser slot and acquire its lock
         int slot = Interlocked.Increment(ref browserroundrobin) % _browserinstances.Count;
@@ -128,17 +149,31 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
             
                 string outputPath = Path.Combine(dir, $"{baseName}_page{pageNum}.jpg");
                 
-                // Construct URL with query params for viewer
-                string pageNavUrl = $"{viewerUrl}?file={System.Web.HttpUtility.UrlEncode(pdfFileUrl)}&page={pageNum}";
-                
-                pageNavUrl = $"{viewerUrl}?file={System.Net.WebUtility.UrlEncode(pdfFileUrl)}&page={pageNum}";
+                // URL already constructed above (local file:// or remote http://)
 
                 Console.Error.WriteLine($"  Navigate to: {pageNavUrl}");
                 
                 try 
                 {
                     await page.GotoAsync(pageNavUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Load });
-                    await page.WaitForTimeoutAsync(5000); // initial wait — retry catches slow loads
+                    
+                    if (!string.IsNullOrEmpty(RemoteViewerUrl))
+                    {
+                        // pdf.js viewer: wait for title to signal render complete (max 15s)
+                        try
+                        {
+                            await page.WaitForFunctionAsync("() => document.title === 'PDF_RENDERED' || document.title === 'PDF_ERROR'",
+                                new PageWaitForFunctionOptions { Timeout = 15000 });
+                        }
+                        catch (TimeoutException)
+                        {
+                            Console.Error.WriteLine($"  [WARN] pdf.js render timeout, taking screenshot anyway");
+                        }
+                    }
+                    else
+                    {
+                        await page.WaitForTimeoutAsync(5000); // local embed: fixed wait
+                    }
                 }
                 catch (Exception navEx)
                 {

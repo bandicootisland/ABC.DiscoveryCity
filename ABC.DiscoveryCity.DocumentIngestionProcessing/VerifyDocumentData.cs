@@ -4,7 +4,7 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 
-namespace ABC.DiscoveryCity.TestApp
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing
 {
     public class VerifyDocumentData
     {
@@ -101,7 +101,7 @@ namespace ABC.DiscoveryCity.TestApp
             int rank = 1;
             foreach (var result in results)
             {
-                string fName = result.FileName ?? Path.GetFileName(result.ResolvedFilePath ?? "");
+                string fName = result.FileName;
                 Console.WriteLine($"Rank {rank}: {fName} (Dist: {result.Distance:F4})");
                 if (fName.Contains("EFTA00072580"))
                 {

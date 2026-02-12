@@ -29,7 +29,7 @@
 //using ABC.DiscoveryCity.Lexicon.Modest;
 //using System;
 
-//namespace ABC.DiscoveryCity.TestApp.Tests
+//namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 //{
 //    public class WordsTesting
 //    {

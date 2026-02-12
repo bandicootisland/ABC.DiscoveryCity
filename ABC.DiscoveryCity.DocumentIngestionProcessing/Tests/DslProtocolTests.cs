@@ -7,7 +7,7 @@ using ABC.DiscoveryCity.Words.Common.Structure; // Your Namespace
 
 
 
-namespace ABC.DiscoveryCity.TestApp.Tests
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 {
     public class DslProtocolTests
     {

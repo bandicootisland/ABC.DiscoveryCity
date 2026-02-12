@@ -12,7 +12,7 @@ using static ABC.DiscoveryCity.Words.Words.P;
 using static ABC.DiscoveryCity.Words.Words.S;
 using static ABC.DiscoveryCity.Words.Words.T;
 
-namespace ABC.DiscoveryCity.TestApp.Tests
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 {
     internal class OntologyTests
     {

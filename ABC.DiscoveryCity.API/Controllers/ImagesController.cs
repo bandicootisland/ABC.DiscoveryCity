@@ -22,19 +22,17 @@ public class ImagesController : ControllerBase
         var images = _dbService.GetDocumentImages(documentPath)
             .Select(i => 
             {
-                // Combine directory + filename for the full path
-                var fullPath = !string.IsNullOrEmpty(i.FileName) && !string.IsNullOrEmpty(i.FilePath)
-                    ? Path.Combine(i.FilePath.TrimEnd(Path.DirectorySeparatorChar, '/'), i.FileName)
-                    : i.FilePath ?? "";
+                // Resolve the path for the current OS (handles Windows↔Linux translation)
+                var resolvedPath = DbService.ResolveFilePathForCurrentOs(i.FilePath ?? i.FileName ?? "");
                 return new ImageDto
                 {
                     ImageType = i.ImageType,
                     ImageSize = i.ImageSize,
-                    FilePath = fullPath,
+                    FilePath = resolvedPath,
                     FileName = i.FileName,
                     Width = i.Width,
                     Height = i.Height,
-                    Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(fullPath)}"
+                    Url = $"/api/images/view?path={System.Net.WebUtility.UrlEncode(resolvedPath)}"
                 };
             })
             .ToList();
@@ -45,12 +43,18 @@ public class ImagesController : ControllerBase
     [HttpGet("view")]
     public IActionResult ViewFile([FromQuery] string path)
     {
-        if (string.IsNullOrWhiteSpace(path) || !System.IO.File.Exists(path))
-        {
+        if (string.IsNullOrWhiteSpace(path))
             return NotFound("File not found.");
+
+        // Resolve the path for the current OS — handles Windows paths on Linux and vice versa
+        var resolvedPath = DbService.ResolveFilePathForCurrentOs(path);
+
+        if (!System.IO.File.Exists(resolvedPath))
+        {
+            return NotFound($"File not found: {resolvedPath}");
         }
 
-        var extension = Path.GetExtension(path).ToLowerInvariant();
+        var extension = Path.GetExtension(resolvedPath).ToLowerInvariant();
         string contentType = extension switch
         {
             ".pdf" => "application/pdf",
@@ -61,7 +65,7 @@ public class ImagesController : ControllerBase
             _ => "application/octet-stream"
         };
         
-        var stream = System.IO.File.OpenRead(path);
+        var stream = System.IO.File.OpenRead(resolvedPath);
         return File(stream, contentType);
     }
 }

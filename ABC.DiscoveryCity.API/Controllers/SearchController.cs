@@ -44,13 +44,13 @@ public class SearchController : ControllerBase
     private static SearchResultDto MapToDto(DocumentSearchResult r) => new()
     {
         FileName = r.FileName,
-        FilePath = r.FilePath,
+        FilePath = r.ResolvedFilePath,
+        ThumbnailPath = r.ResolvedThumbnailPath,
+        FullImagePath = r.ResolvedFullImagePath,
         Text = r.Text,
         Distance = r.Distance,
         Date = r.Date,
         PageCount = r.PageCount,
-        ThumbnailPath = r.ThumbnailPath,
-        FullImagePath = r.FullImagePath,
         SourceName = r.SourceName,
         DataSetName = r.DataSetName,
         People = ParsePeopleJson(r.People)
@@ -77,13 +77,6 @@ public class SearchController : ControllerBase
         return Ok(stats);
     }
 
-    [HttpGet("filesources")]
-    public IActionResult GetFileSources()
-    {
-        var sources = _dbService.GetFileSources();
-        return Ok(sources.Select(fs => new FileSourceDto { Id = fs.Id, BasePath = fs.BasePath }));
-    }
-
     /// <summary>
     /// Parse People JSON array string from JSONB metadata into a List.
     /// The DB returns it as a raw JSON string like ["Name1","Name2"].
@@ -106,8 +99,6 @@ public class SearchResultDto
 {
     public string FileName { get; set; } = string.Empty;
     public string? FilePath { get; set; }
-
-    // Image paths (directory + filename concatenated)
     public string? ThumbnailPath { get; set; }
     public string? FullImagePath { get; set; }
 
@@ -119,10 +110,4 @@ public class SearchResultDto
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public List<string>? People { get; set; }
-}
-
-public class FileSourceDto
-{
-    public int Id { get; set; }
-    public string BasePath { get; set; } = string.Empty;
 }

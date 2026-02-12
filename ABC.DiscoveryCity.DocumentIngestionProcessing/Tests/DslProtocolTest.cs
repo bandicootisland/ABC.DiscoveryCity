@@ -3,7 +3,7 @@ using ABC.DiscoveryCity.Words.Common;
 using ABC.DiscoveryCity.Words.Common.Domain;
 using ABC.DiscoveryCity.Words.Common.Structure; // For SentenceData if needed
 
-namespace ABC.DiscoveryCity.TestApp.Tests
+namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Tests
 {
     public static class DslProtocolTest
     {
