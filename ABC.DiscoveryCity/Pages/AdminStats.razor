@@ -54,8 +54,8 @@
             <div class="col-md-3">
                 <div class="card bg-warning text-dark">
                     <div class="card-body">
-                        <h5 class="card-title">Text Chunks</h5>
-                        <h2>@SystemStats.TotalChunks.ToString("N0")</h2>
+                        <h5 class="card-title">Sentences</h5>
+                        <h2>@SystemStats.TotalSentences.ToString("N0")</h2>
                     </div>
                 </div>
             </div>
@@ -117,7 +117,7 @@
                 <GridColumn Field="@nameof(DataSetStatsDto.DocumentCount)" Title="Documents" Width="100px" />
                 <GridColumn Field="@nameof(DataSetStatsDto.TotalPages)" Title="Pages" Width="100px" />
                 <GridColumn Field="@nameof(DataSetStatsDto.ImageCount)" Title="Images" Width="100px" />
-                <GridColumn Field="@nameof(DataSetStatsDto.ChunkCount)" Title="Chunks" Width="100px" />
+                <GridColumn Field="@nameof(DataSetStatsDto.SentenceCount)" Title="Sentences" Width="100px" />
                 <GridColumn Field="@nameof(DataSetStatsDto.FirstProcessed)" Title="First Processed" Width="150px" DisplayFormat="{0:yyyy-MM-dd HH:mm}" />
                 <GridColumn Field="@nameof(DataSetStatsDto.LastProcessed)" Title="Last Processed" Width="150px" DisplayFormat="{0:yyyy-MM-dd HH:mm}" />
             </GridColumns>

@@ -16,7 +16,8 @@ using System.Globalization;
 bool resetDb = args.Any(a => a.Equals("--reset-db", StringComparison.OrdinalIgnoreCase));
 bool cleanFiles = args.Any(a => a.Equals("--clean", StringComparison.OrdinalIgnoreCase));
 bool headless = args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgnoreCase));
-bool renderDirect = args.Any(a => a.Equals("--render-direct", StringComparison.OrdinalIgnoreCase));
+bool usePlaywright = args.Any(a => a.Equals("--use-playwright", StringComparison.OrdinalIgnoreCase));
+bool renderDirect = !usePlaywright && !args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase)); // render-direct is now the default
 bool noImages = args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase));
 bool embeddingsOnly = args.Any(a => a.Equals("--embeddings-only", StringComparison.OrdinalIgnoreCase));
 bool imagesOnly = args.Any(a => a.Equals("--images-only", StringComparison.OrdinalIgnoreCase));
@@ -83,7 +84,7 @@ if (args.Any(a => a.Equals("--stats", StringComparison.OrdinalIgnoreCase)))
         Console.WriteLine($"\n=== DATABASE STATE ===");
         Console.WriteLine($"Documents: {stats.TotalDocuments}");
         Console.WriteLine($"Images:    {stats.TotalImages}");
-        Console.WriteLine($"Chunks:    {stats.TotalChunks}");
+        Console.WriteLine($"Sentences: {stats.TotalSentences}");
         Console.WriteLine("======================\n");
     }
     catch (Exception ex)
@@ -145,16 +146,16 @@ if (noImages)
 {
     Console.WriteLine("Skipping image generation (--no-images flag)");
 }
-else if (renderDirect)
+else if (usePlaywright)
 {
-    Console.WriteLine("Using Telerik direct image extraction for thumbnails (no browser)");
-    pdfImageExtractor = new PdfImageExtractor();
+    Console.WriteLine("Using Playwright browser for thumbnails (--use-playwright)");
+    thumbnailService = new ThumbnailService();
+    await thumbnailService.InitializeAsync(headless: headless, instancecount: 10);
 }
 else
 {
-    Console.WriteLine("Using Playwright browser for thumbnails");
-    thumbnailService = new ThumbnailService();
-    await thumbnailService.InitializeAsync(headless: headless, instancecount: 10);
+    Console.WriteLine("Using Telerik direct image extraction for thumbnails (default, ~5x faster)");
+    pdfImageExtractor = new PdfImageExtractor();
 }
 var dbService = new DbService(embeddingService);
 
@@ -256,8 +257,8 @@ if (embeddingsOnly)
         return;
     }
 
-    long totalMissing = dbService.CountChunksWithoutEmbeddings();
-    Console.WriteLine($"Chunks without embeddings: {totalMissing}");
+    long totalMissing = dbService.CountDocsWithoutEmbeddings();
+    Console.WriteLine($"Documents without embeddings: {totalMissing}");
     if (totalMissing == 0) { Console.WriteLine("Nothing to do."); return; }
 
     int batchSize = 500;
@@ -267,18 +268,18 @@ if (embeddingsOnly)
 
     while (totalUpdated < batchLimit)
     {
-        var chunks = dbService.GetChunksWithoutEmbeddings(Math.Min(batchSize, batchLimit - totalUpdated));
-        if (chunks.Count == 0) break;
+        var docs = dbService.GetDocsWithoutEmbeddings(Math.Min(batchSize, batchLimit - totalUpdated));
+        if (docs.Count == 0) break;
 
-        Console.WriteLine($"  Batch: {chunks.Count} chunks (total updated so far: {totalUpdated}/{totalMissing})");
+        Console.WriteLine($"  Batch: {docs.Count} documents (total updated so far: {totalUpdated}/{totalMissing})");
 
         // Process in parallel (5 concurrent)
-        await Parallel.ForEachAsync(chunks, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (chunk, ct) =>
+        await Parallel.ForEachAsync(docs, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (doc, ct) =>
         {
             try
             {
-                var embedding = await embeddingService.GetEmbeddingAsync(chunk.TextContent);
-                if (dbService.UpdateChunkEmbedding(chunk.ChunkId, chunk.ParentId, embedding))
+                var embedding = await embeddingService.GetEmbeddingAsync(doc.SentencesText);
+                if (dbService.UpdateDocumentEmbedding(doc.DocId, embedding))
                 {
                     int count = System.Threading.Interlocked.Increment(ref totalUpdated);
                     if (count % 100 == 0)
@@ -289,7 +290,7 @@ if (embeddingsOnly)
             {
                 System.Threading.Interlocked.Increment(ref totalErrors);
                 if (totalErrors <= 5)
-                    Console.WriteLine($"    [WARN] Embedding error for chunk {chunk.ChunkId}: {ex.Message}");
+                    Console.WriteLine($"    [WARN] Embedding error for doc {doc.DocId}: {ex.Message}");
             }
         });
     }
@@ -453,8 +454,9 @@ foreach (var priorityDataSet in priorityDataSets)
     }
 }
 
-// Add remaining folders not already queued
-foreach (var dir in subDirs)
+// Add remaining folders not already queued (natural numeric sort so DataSet 9 < DataSet 10)
+foreach (var dir in subDirs
+    .OrderBy(d => Regex.Replace(System.IO.Path.GetFileName(d) ?? "", @"\d+", m => m.Value.PadLeft(10, '0'))))
 {
     if (!addedFolders.Contains(dir)) targetFolders.Add(dir);
 }

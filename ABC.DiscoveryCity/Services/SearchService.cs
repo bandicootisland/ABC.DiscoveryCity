@@ -189,7 +189,7 @@ public class SystemStatsDto
     public long TotalDocuments { get; set; }
     public long TotalPages { get; set; }
     public long TotalImages { get; set; }
-    public long TotalChunks { get; set; }
+    public long TotalSentences { get; set; }
     public long SourceCount { get; set; }
     public long DataSetCount { get; set; }
     public long DocumentsWithEmbeddings { get; set; }
@@ -204,7 +204,7 @@ public class DataSetStatsDto
     public long DocumentCount { get; set; }
     public long TotalPages { get; set; }
     public long ImageCount { get; set; }
-    public long ChunkCount { get; set; }
+    public long SentenceCount { get; set; }
     public DateTime? FirstProcessed { get; set; }
     public DateTime? LastProcessed { get; set; }
 }

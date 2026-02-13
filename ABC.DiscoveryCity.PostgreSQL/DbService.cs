@@ -266,6 +266,10 @@ public partial class DbService
             // Add DataSetId column if table already exists without it
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS DataSetId INT REFERENCES DataSets(Id);", conn)) cmd.ExecuteNonQuery();
 
+            // Option B: Add Sentences JSONB + Embedding columns to ParentDocuments
+            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Sentences JSONB;", conn)) cmd.ExecuteNonQuery();
+            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Embedding vector(384);", conn)) cmd.ExecuteNonQuery();
+
             // 5. Create DocumentChunks Table with HASH Partitioning (4 partitions for parallel vector search)
             Console.WriteLine("Creating DocumentChunks partitioned table...");
 
@@ -359,10 +363,31 @@ public partial class DbService
                 using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_docimages_parentid ON DocumentImages(ParentId);", conn)) cmd.ExecuteNonQuery();
             }
 
+            // Option B: Sentences full-text search index (on ParentDocuments.Sentences JSONB)
+            try
+            {
+                using (var cmd = new NpgsqlCommand(@"
+                    CREATE INDEX IF NOT EXISTS idx_parent_sentences_fts ON ParentDocuments 
+                    USING GIN (jsonb_to_tsvector('english', COALESCE(Sentences, '[]'::jsonb), '[""string""]'));", conn))
+                {
+                    cmd.CommandTimeout = 300;
+                    cmd.ExecuteNonQuery();
+                }
+                Console.WriteLine("  Sentences full-text search index created.");
+            }
+            catch (Exception ex) { Console.WriteLine($"  [WARN] Sentences FTS index: {ex.Message}"); }
+
             bool vectorIndexExists = false;
             using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'idx_chunks_embedding_hnsw';", conn))
             {
                 vectorIndexExists = ((long)(cmd.ExecuteScalar() ?? 0L)) > 0;
+            }
+
+            // Option B: Check for parent document embedding index too
+            bool parentVectorIndexExists = false;
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM pg_indexes WHERE indexname = 'idx_parent_embedding_hnsw';", conn))
+            {
+                parentVectorIndexExists = ((long)(cmd.ExecuteScalar() ?? 0L)) > 0;
             }
 
             // 8. Check pgvector version and create vector index if needed
@@ -419,6 +444,31 @@ public partial class DbService
                 }
             }
 
+            // Option B: HNSW vector index on ParentDocuments.Embedding
+            if (parentVectorIndexExists)
+            {
+                Console.WriteLine("Parent document vector index already exists, skipping.");
+            }
+            else
+            {
+                try
+                {
+                    using (var cmd = new NpgsqlCommand(@"
+                        CREATE INDEX IF NOT EXISTS idx_parent_embedding_hnsw ON ParentDocuments
+                        USING hnsw (Embedding vector_cosine_ops)
+                        WITH (m = 16, ef_construction = 64);", conn))
+                    {
+                        cmd.CommandTimeout = 300;
+                        cmd.ExecuteNonQuery();
+                    }
+                    Console.WriteLine("  Parent document HNSW vector index created.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  [WARN] Parent vector index creation failed: {ex.Message}");
+                }
+            }
+
             Console.WriteLine("Database Schema Initialized Successfully.");
 
             // Verify
@@ -456,7 +506,7 @@ public partial class DbService
 
             // Truncate all tables, reset identity sequences
             using (var cmd = new NpgsqlCommand(
-                "TRUNCATE DocumentImages, DocumentChunks, ParentDocuments, DataSets, Sources RESTART IDENTITY CASCADE;",
+                "TRUNCATE DocumentImages, ParentDocuments, DataSets, Sources RESTART IDENTITY CASCADE;",
                 conn))
             {
                 cmd.ExecuteNonQuery();
@@ -610,13 +660,35 @@ public partial class DbService
 
                 if (isUpdate)
                 {
-                    // 2a. UPDATE existing document
+                    // 2a. UPDATE existing document — Option B: store sentences + embedding on parent
                     string updateSql = @"UPDATE ParentDocuments 
                         SET Metadata = @meta::jsonb, 
                             DataSetId = COALESCE(@dataSetId, DataSetId),
                             FilePath = @fp,
+                            Sentences = @sentences::jsonb,
+                            Embedding = @emb,
                             ProcessedAt = NOW()
                         WHERE Id = @id;";
+
+                    // Prepare sentences and embedding
+                    var sentences = metadata.Text ?? new List<string>();
+                    var cleanSentences = sentences.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+                    string sentencesJson = JsonSerializer.Serialize(cleanSentences);
+
+                    float[]? embedding = null;
+                    if (_embeddingService != null && cleanSentences.Count > 0)
+                    {
+                        try
+                        {
+                            // Concatenate sentences for single document embedding
+                            string embeddingText = string.Join(" ", cleanSentences);
+                            embedding = _embeddingService.GetEmbeddingAsync(embeddingText).GetAwaiter().GetResult();
+                        }
+                        catch (Exception embEx)
+                        {
+                            Console.WriteLine($"  [WARN] Embedding failed: {embEx.Message}");
+                        }
+                    }
 
                     using (var cmd = new NpgsqlCommand(updateSql, conn, trans))
                     {
@@ -624,79 +696,7 @@ public partial class DbService
                         cmd.Parameters.AddWithValue("meta", json);
                         cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
                         cmd.Parameters.AddWithValue("fp", filePath);
-                        cmd.ExecuteNonQuery();
-                    }
-
-                    // Delete existing chunks (will be re-created below)
-                    using (var cmd = new NpgsqlCommand(
-                        "DELETE FROM DocumentChunks WHERE ParentId = @pid", conn, trans))
-                    {
-                        cmd.Parameters.AddWithValue("pid", parentId);
-                        cmd.ExecuteNonQuery();
-                    }
-                }
-                else
-                {
-                    // 2b. INSERT new document
-                    using (var cmd = new NpgsqlCommand(@"
-                        INSERT INTO ParentDocuments (FileName, FilePath, Metadata, DataSetId, ProcessedAt)
-                        VALUES (@fn, @fp, @meta::jsonb, @dataSetId, NOW())
-                        RETURNING Id;", conn, trans))
-                    {
-                        cmd.Parameters.AddWithValue("fn", fileName);
-                        cmd.Parameters.AddWithValue("fp", filePath);
-                        cmd.Parameters.AddWithValue("meta", json);
-                        cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
-                        var scalar = cmd.ExecuteScalar();
-                        parentId = scalar != null ? (int)scalar : 0;
-                    }
-                }
-
-                // 3. Chunk and Insert
-                // Strategy: Smart Chunking (max 2048 chars or 25 sentences)
-                var sentences = metadata.Text ?? new List<string>();
-
-                if (sentences.Count == 0)
-                {
-                    Console.WriteLine($"  [WARN] No sentences to chunk for {filePath}");
-                }
-
-                var currentChunk = new List<string>();
-                int currentLength = 0;
-                int chunkIndex = 0; // Use a local counter
-                int totalChunksCreated = 0;
-
-                // Local function to write chunk
-                void WriteChunk()
-                {
-                    if (currentChunk.Count == 0) return;
-                    
-                    string chunkText = string.Join(" ", currentChunk);
-                    
-                    // Generate embedding if service available
-                    float[]? embedding = null;
-                    if (_embeddingService != null)
-                    {
-                        try
-                        {
-                            embedding = _embeddingService.GetEmbeddingAsync(chunkText).GetAwaiter().GetResult();
-                        }
-                        catch (Exception embEx)
-                        {
-                            Console.WriteLine($"  [WARN] Embedding failed: {embEx.Message}");
-                        }
-                    }
-                    
-                    string chunkSql = @"
-                        INSERT INTO DocumentChunks (ParentId, ChunkIndex, TextContent, Embedding)
-                        VALUES (@pid, @idx, @txt, @emb);
-                    ";
-                    
-                    using (var cmd = new NpgsqlCommand(chunkSql, conn, trans))
-                    {
-                        cmd.Parameters.AddWithValue("pid", parentId);
-                        cmd.Parameters.AddWithValue("idx", chunkIndex);
-                        cmd.Parameters.AddWithValue("txt", chunkText);
+                        cmd.Parameters.AddWithValue("sentences", sentencesJson);
                         if (embedding != null)
                             cmd.Parameters.AddWithValue("emb", new Vector(embedding));
                         else
@@ -704,32 +704,51 @@ public partial class DbService
                         cmd.ExecuteNonQuery();
                     }
 
-                    chunkIndex++; // Increment for next chunk
-                    totalChunksCreated++;
-                    currentChunk.Clear();
-                    currentLength = 0;
+                    trans.Commit();
+                    Console.WriteLine($"Updated in DB: {filePath} with {cleanSentences.Count} sentences.");
                 }
-
-                foreach (var s in sentences)
+                else
                 {
-                    if (string.IsNullOrWhiteSpace(s)) continue;
-                    
-                    // If adding this sentence exceeds limits, write current chunk first
-                    // Limit: 2048 chars or 25 sentences
-                    if (currentChunk.Count > 0 && (currentLength + s.Length > 2048 || currentChunk.Count >= 25))
+                    // 2b. INSERT new document — Option B: sentences + embedding on parent row
+                    var sentences = metadata.Text ?? new List<string>();
+                    var cleanSentences = sentences.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+                    string sentencesJson = JsonSerializer.Serialize(cleanSentences);
+
+                    float[]? embedding = null;
+                    if (_embeddingService != null && cleanSentences.Count > 0)
                     {
-                        WriteChunk();
+                        try
+                        {
+                            string embeddingText = string.Join(" ", cleanSentences);
+                            embedding = _embeddingService.GetEmbeddingAsync(embeddingText).GetAwaiter().GetResult();
+                        }
+                        catch (Exception embEx)
+                        {
+                            Console.WriteLine($"  [WARN] Embedding failed: {embEx.Message}");
+                        }
                     }
 
-                    currentChunk.Add(s);
-                    currentLength += s.Length;
-                }
-                
-                // Write final chunk
-                WriteChunk();
+                    using (var cmd = new NpgsqlCommand(@"
+                        INSERT INTO ParentDocuments (FileName, FilePath, Metadata, DataSetId, Sentences, Embedding, ProcessedAt)
+                        VALUES (@fn, @fp, @meta::jsonb, @dataSetId, @sentences::jsonb, @emb, NOW())
+                        RETURNING Id;", conn, trans))
+                    {
+                        cmd.Parameters.AddWithValue("fn", fileName);
+                        cmd.Parameters.AddWithValue("fp", filePath);
+                        cmd.Parameters.AddWithValue("meta", json);
+                        cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
+                        cmd.Parameters.AddWithValue("sentences", sentencesJson);
+                        if (embedding != null)
+                            cmd.Parameters.AddWithValue("emb", new Vector(embedding));
+                        else
+                            cmd.Parameters.AddWithValue("emb", DBNull.Value);
+                        var scalar = cmd.ExecuteScalar();
+                        parentId = scalar != null ? (int)scalar : 0;
+                    }
 
-                trans.Commit();
-                Console.WriteLine($"Saved to DB: {filePath} with {totalChunksCreated} chunks (from {sentences.Count} sentences).");
+                    trans.Commit();
+                    Console.WriteLine($"Saved to DB: {filePath} with {cleanSentences.Count} sentences.");
+                }
             }
             catch
             {
@@ -906,31 +925,16 @@ public partial class DbService
         var whereClauses = new List<string>();
         if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
         if (namesFilter) whereClauses.Add(NamesAndClause("p"));
-        var whereClause = whereClauses.Count > 0 ? "WHERE " + string.Join(" AND ", whereClauses) : "";
+        var whereClause = whereClauses.Count > 0 ? "AND " + string.Join(" AND ", whereClauses) : "";
 
-        // Vector similarity search
+        // Option B: Vector similarity search on ParentDocuments.Embedding directly
         string sql = $@"
-            WITH ranked_chunks AS (
-                SELECT
-                    c.ParentId,
-                    c.Embedding <=> @queryVector AS distance,
-                    ROW_NUMBER() OVER (PARTITION BY c.ParentId ORDER BY c.Embedding <=> @queryVector) as rn
-                FROM DocumentChunks c
-                WHERE c.Embedding IS NOT NULL
-                ORDER BY c.Embedding <=> @queryVector
-                {(limit > 0 ? "LIMIT @limitX3" : "")}
-            ),
-            best_matches AS (
-                SELECT ParentId, distance
-                FROM ranked_chunks
-                WHERE rn = 1
-            )
             SELECT p.FileName,
                    p.FilePath,
                    d.pdffolder as PdfFolder,
                    COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
-                   bm.distance,
+                   (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as FullText,
+                   p.Embedding <=> @queryVector as distance,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
                    (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
@@ -940,18 +944,18 @@ public partial class DbService
                    p.Metadata->>'Names' as Names,
                    p.Metadata::text as MetadataJson,
                    s.Url as SourceUrl
-            FROM best_matches bm
-            JOIN ParentDocuments p ON bm.ParentId = p.Id
+            FROM ParentDocuments p
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
             LEFT JOIN Sources s ON d.SourceId = s.Id
+            WHERE p.Embedding IS NOT NULL
             {whereClause}
-            ORDER BY bm.distance
+            ORDER BY p.Embedding <=> @queryVector
             {(limit > 0 ? "LIMIT @limit" : "")};
         ";
 
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("queryVector", new Vector(queryEmbedding));
-        if (limit > 0) { cmd.Parameters.AddWithValue("limit", limit); cmd.Parameters.AddWithValue("limitX3", limit * 3); }
+        if (limit > 0) cmd.Parameters.AddWithValue("limit", limit);
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
 
@@ -970,51 +974,41 @@ public partial class DbService
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
 
-        // Build extra join/where for chunk_matches CTE
-        var chunkExtraJoin = "";
-        if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
-        var chunkExtraWhere = new List<string>();
-        if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
-        if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
+        // Option B: Search ParentDocuments.Sentences JSONB directly
+        var extraJoin = datasetFilter ? "JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
+        var extraWhere = new List<string>();
+        if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+        var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
-        // If we have names filter but no dataset filter, we need the join to ParentDocuments in chunk_matches
-        if (namesFilter && !datasetFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id";
-
-        var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
-        var metaExtraWhere = new List<string>();
-        if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
-        if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
-
-        var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
-        var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
-
-        // Full-text search across chunk text AND JSONB metadata
+        // Full-text search across Sentences JSONB AND metadata
         string sql = $@"
-            WITH chunk_matches AS (
-                SELECT DISTINCT c.ParentId,
-                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
-                FROM DocumentChunks c
-                {chunkExtraJoin}
-                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
-                   OR c.TextContent ILIKE @pattern)
-                {chunkWhereStr}
-                GROUP BY c.ParentId
+            WITH text_matches AS (
+                SELECT p.Id as ParentId,
+                       MAX(ts_rank(jsonb_to_tsvector('english', COALESCE(p.Sentences, '[]'::jsonb), '[""string""]'), plainto_tsquery('english', @query))) as score
+                FROM ParentDocuments p
+                {extraJoin}
+                WHERE (jsonb_to_tsvector('english', COALESCE(p.Sentences, '[]'::jsonb), '[""string""]') @@ plainto_tsquery('english', @query)
+                   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.Sentences) elem WHERE elem ILIKE @pattern))
+                {extraWhereStr}
+                GROUP BY p.Id
             ),
             metadata_matches AS (
                 SELECT p.Id as ParentId, 0.5 as score
                 FROM ParentDocuments p
-                {metaExtraJoin}
+                {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
                    OR p.Metadata->>'Names' ILIKE @pattern
                    OR p.Metadata->>'FileName' ILIKE @pattern
                    OR p.Metadata->>'DataSetName' ILIKE @pattern
                    OR p.FileName ILIKE @pattern)
-                {metaWhereStr}
+                {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                {(namesFilter ? "AND " + NamesAndClause("p") : "")}
             ),
             matching_docs AS (
                 SELECT ParentId, MAX(score) as score
                 FROM (
-                    SELECT ParentId, score FROM chunk_matches
+                    SELECT ParentId, score FROM text_matches
                     UNION ALL
                     SELECT ParentId, score FROM metadata_matches
                 ) combined
@@ -1026,7 +1020,7 @@ public partial class DbService
                    p.FilePath,
                    d.pdffolder as PdfFolder,
                    COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                   (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as FullText,
                    md.score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
@@ -1073,42 +1067,36 @@ public partial class DbService
             var datasetFilter = datasetNames is { Count: > 0 };
             var namesFilter = nameValues is { Count: > 0 };
 
-            var chunkExtraJoin = "";
-            if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
-            var chunkExtraWhere = new List<string>();
-            if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
-            if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
-
-            var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
-            var metaExtraWhere = new List<string>();
-            if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
-            if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
-
-            var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
-            var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
+            // Option B: Search Sentences JSONB for exact match
+            var extraJoin = datasetFilter ? "JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
+            var extraWhere = new List<string>();
+            if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
+            if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+            var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
             string sql = $@"
-                WITH chunk_matches AS (
-                    SELECT DISTINCT c.ParentId
-                    FROM DocumentChunks c
-                    {chunkExtraJoin}
-                    WHERE c.TextContent ILIKE @pattern
-                    {chunkWhereStr}
+                WITH text_matches AS (
+                    SELECT DISTINCT p.Id as ParentId
+                    FROM ParentDocuments p
+                    {extraJoin}
+                    WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.Sentences) elem WHERE elem ILIKE @pattern)
+                    {extraWhereStr}
                 ),
                 metadata_matches AS (
                     SELECT p.Id as ParentId
                     FROM ParentDocuments p
-                    {metaExtraJoin}
+                    {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                     WHERE (p.Metadata->>'Title' ILIKE @pattern
                        OR p.Metadata->>'Names' ILIKE @pattern
                        OR p.Metadata->>'FileName' ILIKE @pattern
                        OR p.Metadata->>'DataSetName' ILIKE @pattern
                        OR p.FileName ILIKE @pattern)
-                    {metaWhereStr}
+                    {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                    {(namesFilter ? "AND " + NamesAndClause("p") : "")}
                 ),
                 matching_docs AS (
                     SELECT DISTINCT ParentId FROM (
-                        SELECT ParentId FROM chunk_matches
+                        SELECT ParentId FROM text_matches
                         UNION
                         SELECT ParentId FROM metadata_matches
                     ) combined
@@ -1118,7 +1106,7 @@ public partial class DbService
                        p.FilePath,
                        d.pdffolder as PdfFolder,
                        COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                       (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                       (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as FullText,
                        1.0 as score,
                        (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (p.Metadata->>'PageCount')::int as PageCount,
@@ -1191,7 +1179,7 @@ public partial class DbService
                        r.FilePath,
                        r.pdffolder as PdfFolder,
                        r.ImageFolder,
-                       (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = r.Id) as Text,
+                       (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(r.Sentences) elem) as Text,
                        0.0 as Distance,
                        (r.Metadata->>'DeducedDate')::timestamp as DocDate,
                        (r.Metadata->>'PageCount')::int as PageCount,
@@ -1290,7 +1278,7 @@ public partial class DbService
                    p.FilePath,
                    d.pdffolder as PdfFolder,
                    COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as Text,
+                   (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as Text,
                    0.0 as Distance,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
@@ -1328,48 +1316,41 @@ public partial class DbService
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
 
-        var chunkExtraJoin = "";
-        if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
-        var chunkExtraWhere = new List<string>();
-        if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
-        if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
-        if (namesFilter && !datasetFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id";
-
-        var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
-        var metaExtraWhere = new List<string>();
-        if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
-        if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
-
-        var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
-        var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
+        // Option B: Search ParentDocuments.Sentences JSONB
+        var extraJoin = datasetFilter ? "JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
+        var extraWhere = new List<string>();
+        if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+        var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
         // CTE that finds all matching doc IDs with scores
         var matchesCte = $@"
-            WITH chunk_matches AS (
-                SELECT DISTINCT c.ParentId,
-                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
-                FROM DocumentChunks c
-                {chunkExtraJoin}
-                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
-                   OR c.TextContent ILIKE @pattern)
-                {chunkWhereStr}
-                GROUP BY c.ParentId
+            WITH text_matches AS (
+                SELECT p.Id as ParentId,
+                       MAX(ts_rank(jsonb_to_tsvector('english', COALESCE(p.Sentences, '[]'::jsonb), '[""string""]'), plainto_tsquery('english', @query))) as score
+                FROM ParentDocuments p
+                {extraJoin}
+                WHERE (jsonb_to_tsvector('english', COALESCE(p.Sentences, '[]'::jsonb), '[""string""]') @@ plainto_tsquery('english', @query)
+                   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.Sentences) elem WHERE elem ILIKE @pattern))
+                {extraWhereStr}
+                GROUP BY p.Id
             ),
             metadata_matches AS (
                 SELECT p.Id as ParentId, 0.5 as score
                 FROM ParentDocuments p
-                {metaExtraJoin}
+                {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
                    OR p.Metadata->>'Names' ILIKE @pattern
                    OR p.Metadata->>'FileName' ILIKE @pattern
                    OR p.Metadata->>'DataSetName' ILIKE @pattern
                    OR p.FileName ILIKE @pattern)
-                {metaWhereStr}
+                {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                {(namesFilter ? "AND " + NamesAndClause("p") : "")}
             ),
             matching_docs AS (
                 SELECT ParentId, MAX(score) as score
                 FROM (
-                    SELECT ParentId, score FROM chunk_matches
+                    SELECT ParentId, score FROM text_matches
                     UNION ALL
                     SELECT ParentId, score FROM metadata_matches
                 ) combined
@@ -1392,7 +1373,7 @@ public partial class DbService
                    p.FilePath,
                    d.pdffolder as PdfFolder,
                    COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                   (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as FullText,
                    md.score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
@@ -1432,42 +1413,36 @@ public partial class DbService
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
 
-        var chunkExtraJoin = "";
-        if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
-        var chunkExtraWhere = new List<string>();
-        if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
-        if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
-
-        var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
-        var metaExtraWhere = new List<string>();
-        if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
-        if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
-
-        var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
-        var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
+        // Option B: Search Sentences JSONB for exact match (paged)
+        var extraJoin = datasetFilter ? "JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
+        var extraWhere = new List<string>();
+        if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+        var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
         var matchesCte = $@"
-            WITH chunk_matches AS (
-                SELECT DISTINCT c.ParentId
-                FROM DocumentChunks c
-                {chunkExtraJoin}
-                WHERE c.TextContent ILIKE @pattern
-                {chunkWhereStr}
+            WITH text_matches AS (
+                SELECT DISTINCT p.Id as ParentId
+                FROM ParentDocuments p
+                {extraJoin}
+                WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.Sentences) elem WHERE elem ILIKE @pattern)
+                {extraWhereStr}
             ),
             metadata_matches AS (
                 SELECT p.Id as ParentId
                 FROM ParentDocuments p
-                {metaExtraJoin}
+                {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
                    OR p.Metadata->>'Names' ILIKE @pattern
                    OR p.Metadata->>'FileName' ILIKE @pattern
                    OR p.Metadata->>'DataSetName' ILIKE @pattern
                    OR p.FileName ILIKE @pattern)
-                {metaWhereStr}
+                {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                {(namesFilter ? "AND " + NamesAndClause("p") : "")}
             ),
             matching_docs AS (
                 SELECT DISTINCT ParentId FROM (
-                    SELECT ParentId FROM chunk_matches
+                    SELECT ParentId FROM text_matches
                     UNION
                     SELECT ParentId FROM metadata_matches
                 ) combined
@@ -1488,7 +1463,7 @@ public partial class DbService
                    p.FilePath,
                    d.pdffolder as PdfFolder,
                    COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                   (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as FullText,
                    1.0 as score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
@@ -1528,7 +1503,7 @@ public partial class DbService
         catch { return 1; }
     }
 
-    public (long Docs, long Images, long Chunks) GetCounts()
+    public (long Docs, long Images, long Sentences) GetCounts()
     {
         try
         {
@@ -1539,10 +1514,12 @@ public partial class DbService
             using var cmdImages = new NpgsqlCommand("SELECT count(*) FROM DocumentImages", conn);
             long images = (long)(cmdImages.ExecuteScalar() ?? 0L);
 
-            using var cmdChunks = new NpgsqlCommand("SELECT count(*) FROM DocumentChunks", conn);
-            long chunks = (long)(cmdChunks.ExecuteScalar() ?? 0L);
+            // Option B: Count total sentences across all documents
+            using var cmdSentences = new NpgsqlCommand("SELECT COALESCE(SUM(jsonb_array_length(Sentences)), 0) FROM ParentDocuments WHERE Sentences IS NOT NULL", conn);
+            cmdSentences.CommandTimeout = 120;
+            long sentences = (long)(cmdSentences.ExecuteScalar() ?? 0L);
 
-            return (docs, images, chunks);
+            return (docs, images, sentences);
         }
         catch (Exception ex)
         {
@@ -1587,6 +1564,7 @@ public partial class DbService
         try
         {
             using var conn = _dataSource.OpenConnection();
+            // Option B: No more DocumentChunks join — sentence count from JSONB
             string sql = @"
                 SELECT
                     COALESCE(s.Name, 'Unknown') as SourceName,
@@ -1594,20 +1572,19 @@ public partial class DbService
                     COUNT(DISTINCT p.Id) as DocumentCount,
                     COALESCE(SUM((p.Metadata->>'PageCount')::int), 0) as TotalPages,
                     COUNT(DISTINCT i.Id) as ImageCount,
-                    COUNT(DISTINCT c.Id) as ChunkCount,
+                    COALESCE(SUM(jsonb_array_length(p.Sentences)), 0) as SentenceCount,
                     MIN(p.ProcessedAt) as FirstProcessed,
                     MAX(p.ProcessedAt) as LastProcessed
                 FROM ParentDocuments p
                 LEFT JOIN DataSets d ON p.DataSetId = d.Id
                 LEFT JOIN Sources s ON d.SourceId = s.Id
                 LEFT JOIN DocumentImages i ON i.ParentId = p.Id
-                LEFT JOIN DocumentChunks c ON c.ParentId = p.Id
                 GROUP BY s.Name, d.Name
                 ORDER BY s.Name, d.Name;
             ";
 
             using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.CommandTimeout = 120; // Complex aggregation query
+            cmd.CommandTimeout = 120;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
@@ -1618,7 +1595,7 @@ public partial class DbService
                     DocumentCount = Convert.ToInt64(reader.GetValue(2)),
                     TotalPages = Convert.ToInt64(reader.GetValue(3)),
                     ImageCount = Convert.ToInt64(reader.GetValue(4)),
-                    ChunkCount = Convert.ToInt64(reader.GetValue(5)),
+                    SentenceCount = Convert.ToInt64(reader.GetValue(5)),
                     FirstProcessed = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
                     LastProcessed = reader.IsDBNull(7) ? null : reader.GetDateTime(7)
                 });
@@ -1642,10 +1619,10 @@ public partial class DbService
             using var conn = _dataSource.OpenConnection();
 
             // Basic counts
-            var (docs, images, chunks) = GetCounts();
+            var (docs, images, sentences) = GetCounts();
             stats.TotalDocuments = docs;
             stats.TotalImages = images;
-            stats.TotalChunks = chunks;
+            stats.TotalSentences = sentences;
 
             // Total pages
             using (var cmd = new NpgsqlCommand("SELECT COALESCE(SUM((Metadata->>'PageCount')::int), 0) FROM ParentDocuments;", conn))
@@ -1665,8 +1642,8 @@ public partial class DbService
                 stats.DataSetCount = (long)(cmd.ExecuteScalar() ?? 0L);
             }
 
-            // Documents with embeddings
-            using (var cmd = new NpgsqlCommand("SELECT COUNT(DISTINCT ParentId) FROM DocumentChunks WHERE Embedding IS NOT NULL;", conn))
+            // Documents with embeddings (Option B: on ParentDocuments directly)
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM ParentDocuments WHERE Embedding IS NOT NULL;", conn))
             {
                 stats.DocumentsWithEmbeddings = (long)(cmd.ExecuteScalar() ?? 0L);
             }
@@ -1725,7 +1702,7 @@ public class DataSetStats
     public long DocumentCount { get; set; }
     public long TotalPages { get; set; }
     public long ImageCount { get; set; }
-    public long ChunkCount { get; set; }
+    public long SentenceCount { get; set; }
     public DateTime? FirstProcessed { get; set; }
     public DateTime? LastProcessed { get; set; }
 }
@@ -1773,7 +1750,7 @@ public class SystemStats
     public long TotalDocuments { get; set; }
     public long TotalPages { get; set; }
     public long TotalImages { get; set; }
-    public long TotalChunks { get; set; }
+    public long TotalSentences { get; set; }
     public long SourceCount { get; set; }
     public long DataSetCount { get; set; }
     public long DocumentsWithEmbeddings { get; set; }
@@ -1823,7 +1800,7 @@ public partial class DbService
     }
 
     /// <summary>
-    /// Get the full text of a document by concatenating all its chunk texts (ordered by ChunkIndex).
+    /// Get the full text of a document by joining its Sentences JSONB array.
     /// </summary>
     public string GetDocumentFullText(int parentId)
     {
@@ -1831,21 +1808,15 @@ public partial class DbService
         {
             using var conn = _dataSource.OpenConnection();
             using var cmd = new NpgsqlCommand(@"
-                SELECT TextContent 
-                FROM DocumentChunks 
-                WHERE ParentId = @pid 
-                ORDER BY ChunkIndex;", conn);
+                SELECT string_agg(elem, E'\n') 
+                FROM jsonb_array_elements_text(
+                    (SELECT Sentences FROM ParentDocuments WHERE Id = @pid)
+                ) AS elem;", conn);
             cmd.Parameters.AddWithValue("pid", parentId);
             cmd.CommandTimeout = 30;
 
-            var parts = new List<string>();
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-            {
-                if (!reader.IsDBNull(0))
-                    parts.Add(reader.GetString(0));
-            }
-            return string.Join("\n", parts);
+            var result = cmd.ExecuteScalar();
+            return result as string ?? "";
         }
         catch (Exception ex)
         {
@@ -1877,21 +1848,23 @@ public partial class DbService
     }
 
     /// <summary>
-    /// Get chunks that have no embedding vector, with optional limit.
-    /// Returns (ChunkId, ParentId, TextContent, ParentFilePath).
+    /// Get documents that have no embedding vector, with optional limit.
+    /// Option B: Reads Sentences JSONB from ParentDocuments, concatenates for embedding text.
+    /// Returns (DocId, SentencesText, FilePath).
     /// </summary>
-    public List<(int ChunkId, int ParentId, string TextContent, string FilePath)> GetChunksWithoutEmbeddings(int limit = 1000)
+    public List<(int DocId, string SentencesText, string FilePath)> GetDocsWithoutEmbeddings(int limit = 1000)
     {
-        var results = new List<(int, int, string, string)>();
+        var results = new List<(int, string, string)>();
         try
         {
             using var conn = _dataSource.OpenConnection();
             string sql = @"
-                SELECT c.Id, c.ParentId, c.TextContent, COALESCE(p.FileName, p.FilePath, '')
-                FROM DocumentChunks c
-                JOIN ParentDocuments p ON c.ParentId = p.Id
-                WHERE c.Embedding IS NULL
-                ORDER BY c.Id
+                SELECT p.Id,
+                       (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as SentencesText,
+                       COALESCE(p.FileName, p.FilePath, '')
+                FROM ParentDocuments p
+                WHERE p.Embedding IS NULL AND p.Sentences IS NOT NULL AND jsonb_array_length(p.Sentences) > 0
+                ORDER BY p.Id
                 LIMIT @limit;
             ";
             using var cmd = new NpgsqlCommand(sql, conn);
@@ -1902,60 +1875,58 @@ public partial class DbService
             {
                 results.Add((
                     reader.GetInt32(0),
-                    reader.GetInt32(1),
-                    reader.GetString(2),
-                    reader.GetString(3)
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.GetString(2)
                 ));
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error getting chunks without embeddings: {ex.Message}");
+            Console.WriteLine($"Error getting docs without embeddings: {ex.Message}");
         }
         return results;
     }
 
     /// <summary>
-    /// Update the embedding vector for a specific chunk by Id.
+    /// Update the embedding vector for a document by Id.
     /// </summary>
-    public bool UpdateChunkEmbedding(int chunkId, int parentId, float[] embedding)
+    public bool UpdateDocumentEmbedding(int docId, float[] embedding)
     {
         try
         {
             using var conn = _dataSource.OpenConnection();
             string sql = @"
-                UPDATE DocumentChunks
+                UPDATE ParentDocuments
                 SET Embedding = @emb
-                WHERE Id = @id AND ParentId = @pid;
+                WHERE Id = @id;
             ";
             using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("id", chunkId);
-            cmd.Parameters.AddWithValue("pid", parentId);
+            cmd.Parameters.AddWithValue("id", docId);
             cmd.Parameters.AddWithValue("emb", new Vector(embedding));
             return cmd.ExecuteNonQuery() > 0;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error updating chunk embedding {chunkId}: {ex.Message}");
+            Console.WriteLine($"Error updating doc embedding {docId}: {ex.Message}");
             return false;
         }
     }
 
     /// <summary>
-    /// Count total chunks without embeddings.
+    /// Count total documents without embeddings.
     /// </summary>
-    public long CountChunksWithoutEmbeddings()
+    public long CountDocsWithoutEmbeddings()
     {
         try
         {
             using var conn = _dataSource.OpenConnection();
-            using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM DocumentChunks WHERE Embedding IS NULL;", conn);
+            using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM ParentDocuments WHERE Embedding IS NULL AND Sentences IS NOT NULL AND jsonb_array_length(Sentences) > 0;", conn);
             cmd.CommandTimeout = 120;
             return (long)(cmd.ExecuteScalar() ?? 0L);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error counting chunks: {ex.Message}");
+            Console.WriteLine($"Error counting docs without embeddings: {ex.Message}");
             return -1;
         }
     }
