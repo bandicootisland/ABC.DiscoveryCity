@@ -61,32 +61,38 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing
                 }
             }
 
-            // 2. Check Chunks for Text
-            string sqlChunks = "SELECT ChunkIndex, TextContent FROM DocumentChunks WHERE ParentId = @pid ORDER BY ChunkIndex";
-            using var cmdChunks = new NpgsqlCommand(sqlChunks, connection);
-            cmdChunks.Parameters.AddWithValue("pid", parentId);
+            // 2. Check Sentences JSONB for Text
+            string sqlSentences = "SELECT Sentences FROM ParentDocuments WHERE Id = @pid";
+            using var cmdSentences = new NpgsqlCommand(sqlSentences, connection);
+            cmdSentences.Parameters.AddWithValue("pid", parentId);
 
-            int chunkCount = 0;
+            int sentenceCount = 0;
             bool termFound = false;
 
-            using (var reader = await cmdChunks.ExecuteReaderAsync())
+            using (var reader = await cmdSentences.ExecuteReaderAsync())
             {
-                while (await reader.ReadAsync())
+                if (await reader.ReadAsync() && !reader.IsDBNull(0))
                 {
-                    chunkCount++;
-                    string text = reader.GetString(1);
-                    if (text.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                    string sentencesJson = reader.GetString(0);
+                    var sentences = System.Text.Json.JsonSerializer.Deserialize<List<string>>(sentencesJson) ?? new();
+                    sentenceCount = sentences.Count;
+                    for (int i = 0; i < sentences.Count; i++)
                     {
-                        Console.WriteLine($"[MATCH] Found '{searchTerm}' in Chunk {reader.GetInt32(0)}.");
-                        Console.WriteLine($"Text Preview: {text.Substring(0, Math.Min(text.Length, 100))}...");
-                        termFound = true;
+                        if (sentences[i].Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+                        {
+                            Console.WriteLine($"[MATCH] Found '{searchTerm}' in Sentence {i}.");
+                            Console.WriteLine($"Text Preview: {sentences[i].Substring(0, Math.Min(sentences[i].Length, 100))}...");
+                            termFound = true;
+                        }
                     }
                 }
             }
 
+            Console.WriteLine($"Total sentences: {sentenceCount}");
+
             if (!termFound)
             {
-                Console.WriteLine($"[FAILURE] '{searchTerm}' was NOT found in any text chunks for this document.");
+                Console.WriteLine($"[FAILURE] '{searchTerm}' was NOT found in any sentences for this document.");
             }
             else
             {

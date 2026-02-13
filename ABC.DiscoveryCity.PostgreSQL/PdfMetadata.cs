@@ -25,7 +25,7 @@ public class PdfMetadata
     public string ImageColorSpace { get; set; } = "";
 
     /// <summary>
-    /// Returns metadata for JSONB storage (excludes Text to avoid redundancy with DocumentChunks)
+    /// Returns metadata for JSONB storage (excludes Text — stored as Sentences JSONB on ParentDocuments)
     /// </summary>
     public PdfMetadataForStorage ToStorageDto() => new()
     {
@@ -51,7 +51,7 @@ public class PdfMetadata
 }
 
 /// <summary>
-/// Metadata stored in JSONB - excludes Text (stored in DocumentChunks instead)
+/// Metadata stored in JSONB - excludes Text (stored as Sentences JSONB array on ParentDocuments)
 /// </summary>
 public class PdfMetadataForStorage
 {

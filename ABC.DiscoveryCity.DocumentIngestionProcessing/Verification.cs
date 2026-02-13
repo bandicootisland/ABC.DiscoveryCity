@@ -17,10 +17,10 @@ public class Verification
         Console.WriteLine("\n--- DATABASE VERIFICATION ---");
 
         // 1. Check Counts
-        var (docs, images, chunks) = _dbService.GetCounts();
+        var (docs, images, sentences) = _dbService.GetCounts();
         Console.WriteLine($"ParentDocuments: {docs}");
         Console.WriteLine($"DocumentImages:  {images}");
-        Console.WriteLine($"DocumentChunks:  {chunks}");
+        Console.WriteLine($"Sentences:       {sentences}");
 
         if (docs == 0)
         {

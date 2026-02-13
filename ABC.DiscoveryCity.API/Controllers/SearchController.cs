@@ -89,8 +89,8 @@ public class SearchController : ControllerBase
     [HttpGet("counts")]
     public IActionResult GetCounts()
     {
-        var (docs, images, chunks) = _dbService.GetCounts();
-        return Ok(new { Documents = docs, Images = images, Chunks = chunks });
+        var (docs, images, sentences) = _dbService.GetCounts();
+        return Ok(new { Documents = docs, Images = images, Sentences = sentences });
     }
 
     [HttpGet("stats")]
