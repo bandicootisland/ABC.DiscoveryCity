@@ -1,6 +1,6 @@
 # Discovery City — Project State & Findings
 
-> Last updated: 2026-02-10 (Ubuntu NUC Mini2)
+> Last updated: 2026-02-13 (Ubuntu NUC Mini2)
 
 ## Architecture
 
@@ -60,13 +60,17 @@ dotnet run -- [DataSet] [flags]
 | `--reprocess` | Re-extract metadata (People etc.) from stored text — no PDF re-parsing |
 | `--embeddings-only` | Backfill NULL embeddings from DB chunks |
 | `--force` | Ignore .done flags, reprocess all PDFs from scratch |
-| `--no-images` | Skip Playwright thumbnail generation |
+| `--no-images` | Skip thumbnail generation entirely |
+| `--use-playwright` | Use Playwright browser for thumbnails (slower, ~5x) instead of Telerik direct |
+| `--headless` | Run Playwright in headless mode (only relevant with `--use-playwright`) |
 | `--limit N` | Process only N documents/chunks |
 | `--clean` | Delete generated files (.done, .json, .jpg, .html) |
 | `--stats` | Print DB counts and exit |
-| `--headless` | Run Playwright in headless mode |
-| `--render-direct` | Use Telerik direct rendering (no browser) |
 | `--extract-people-llm` | (stub) Future LLM-based people extraction |
+
+**Defaults**: Telerik direct rendering for thumbnails (no browser needed). Embeddings are generated
+automatically when Ollama is available. DataSet folders are processed in natural numeric order
+(DataSet 1, 2, ... 9, 10, 11).
 
 ## Key Findings & Decisions
 
@@ -110,24 +114,46 @@ dotnet run -- [DataSet] [flags]
 ## Running the Full Pipeline
 
 ```bash
-# 1. Reprocess all docs for People extraction (reads from DB, fast)
+# 1. Full ingestion (text + embeddings + thumbnails via Telerik direct, all defaults)
 cd ABC.DiscoveryCity.DocumentIngestionProcessing
+nohup dotnet run -- "DataSet 9" > dataset9.log 2>&1 &
+
+# 2. Reprocess all docs for People extraction (reads from DB, fast)
 nohup dotnet run -- --reprocess --no-images > reprocess.log 2>&1 &
 
-# 2. Backfill embeddings for chunks with NULL embeddings  
+# 3. Backfill embeddings for chunks with NULL embeddings  
 nohup dotnet run -- --embeddings-only > embeddings.log 2>&1 &
 
-# 3. Monitor progress
-tail -f reprocess.log
-tail -f embeddings.log
+# 4. Monitor progress
+tail -f dataset9.log
 
-# 4. Start API + Blazor
+# 5. Start API + Blazor
 cd ../ABC.DiscoveryCity.API && dotnet run &
 cd ../ABC.DiscoveryCity && dotnet run &
 ```
+
+## Performance & Memory
+
+- **Telerik direct rendering** (`--render-direct`, now the default) is **~5x faster** than Playwright
+  browser-based rendering for thumbnail generation. No browser instances required.
+- **Memory**: The process can run out of memory on large DataSets (e.g., DataSet 9 has 219K PDFs).
+  If OOM occurs, use `--limit N` to process in smaller batches, or restart — the process is
+  idempotent and will resume from where it left off (skips `.done` files).
+- Playwright mode (`--use-playwright --headless`) spawns 10 browser instances; this consumes
+  significantly more RAM and is slower. Only use when Telerik direct rendering produces
+  unsatisfactory thumbnails.
+
+## DataSet Status (2026-02-13)
+
+| DataSet | Source PDFs | .done (text) | .done.embeddings | .done.images | Status |
+|---------|------------|--------------|------------------|--------------|--------|
+| DataSet 8 | 7,526 | 7,526 | 7,526 | 7,526 | **Complete** |
+| DataSet 9 | 219,134 | 1,234 | — | — | **In Progress** |
+| DataSet 10 | — | — | — | — | **In Progress** |
 
 ## Notes
 
 - The application is idempotent. Re-running any mode is safe.
 - To re-process a specific file from scratch, delete its `.done` file.
+- DataSet folders are now processed in natural numeric order (1, 2, ... 9, 10, 11).
 - Git origin: `https://github.com/bandicootisland/ABC.DiscoveryCity.git` (branch: Develop)

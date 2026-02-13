@@ -16,7 +16,8 @@ using System.Globalization;
 bool resetDb = args.Any(a => a.Equals("--reset-db", StringComparison.OrdinalIgnoreCase));
 bool cleanFiles = args.Any(a => a.Equals("--clean", StringComparison.OrdinalIgnoreCase));
 bool headless = args.Any(a => a.Equals("--headless", StringComparison.OrdinalIgnoreCase));
-bool renderDirect = args.Any(a => a.Equals("--render-direct", StringComparison.OrdinalIgnoreCase));
+bool usePlaywright = args.Any(a => a.Equals("--use-playwright", StringComparison.OrdinalIgnoreCase));
+bool renderDirect = !usePlaywright && !args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase)); // render-direct is now the default
 bool noImages = args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase));
 bool embeddingsOnly = args.Any(a => a.Equals("--embeddings-only", StringComparison.OrdinalIgnoreCase));
 bool imagesOnly = args.Any(a => a.Equals("--images-only", StringComparison.OrdinalIgnoreCase));
@@ -145,16 +146,16 @@ if (noImages)
 {
     Console.WriteLine("Skipping image generation (--no-images flag)");
 }
-else if (renderDirect)
+else if (usePlaywright)
 {
-    Console.WriteLine("Using Telerik direct image extraction for thumbnails (no browser)");
-    pdfImageExtractor = new PdfImageExtractor();
+    Console.WriteLine("Using Playwright browser for thumbnails (--use-playwright)");
+    thumbnailService = new ThumbnailService();
+    await thumbnailService.InitializeAsync(headless: headless, instancecount: 10);
 }
 else
 {
-    Console.WriteLine("Using Playwright browser for thumbnails");
-    thumbnailService = new ThumbnailService();
-    await thumbnailService.InitializeAsync(headless: headless, instancecount: 10);
+    Console.WriteLine("Using Telerik direct image extraction for thumbnails (default, ~5x faster)");
+    pdfImageExtractor = new PdfImageExtractor();
 }
 var dbService = new DbService(embeddingService);
 
@@ -453,8 +454,9 @@ foreach (var priorityDataSet in priorityDataSets)
     }
 }
 
-// Add remaining folders not already queued
-foreach (var dir in subDirs)
+// Add remaining folders not already queued (natural numeric sort so DataSet 9 < DataSet 10)
+foreach (var dir in subDirs
+    .OrderBy(d => Regex.Replace(System.IO.Path.GetFileName(d) ?? "", @"\d+", m => m.Value.PadLeft(10, '0'))))
 {
     if (!addedFolders.Contains(dir)) targetFolders.Add(dir);
 }
