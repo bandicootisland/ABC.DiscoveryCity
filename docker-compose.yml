@@ -2,6 +2,7 @@ services:
   discovery-city-db:
     image: pgvector/pgvector:pg16
     container_name: discovery-city-postgres
+    shm_size: '256m'
     environment:
       POSTGRES_USER: discovery_user
       POSTGRES_PASSWORD: WL71dM5oM2s36FP6ZrBo
@@ -59,3 +60,4 @@ services:
 
 volumes:
   discovery_city_data:
+    external: true

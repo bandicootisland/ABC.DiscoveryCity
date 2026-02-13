@@ -4,8 +4,9 @@
 @using Telerik.Blazor
 @using Telerik.Blazor.Components
 @using Telerik.Blazor.Components.Common.Icon
+@inject SearchService SearchService
 
-<TelerikTabStrip>
+<TelerikTabStrip ActiveTabIndex="@_activeTabIndex" ActiveTabIndexChanged="@OnTabChanged">
     <TabStripTab Title="Overview">
         <div class="p-3">
              <div class="row">
@@ -56,9 +57,24 @@
         <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
             <SplitterPanes>
                 <SplitterPane Size="66%">
-                    @if (Document != null && !string.IsNullOrEmpty(Document.FilePath))
+                    @if (IsLoadingPdf)
                     {
-                        <iframe src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.FilePath)}")" style="width:100%; height:100%; border:none;"></iframe>
+                        <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
+                            <TelerikLoader Visible="true" />
+                            <span class="ms-2">Loading PDF...</span>
+                        </div>
+                    }
+                    else if (PdfData != null && PdfData.Length > 0)
+                    {
+                        <TelerikPdfViewer Data="@PdfData"
+                                          Width="100%"
+                                          Height="100%" />
+                    }
+                    else
+                    {
+                        <div class="d-flex align-items-center justify-content-center text-muted" style="height: 100%;">
+                            No PDF available
+                        </div>
                     }
                 </SplitterPane>
                 <SplitterPane>
@@ -122,30 +138,52 @@
     [Parameter]
     public SearchResultDto? Document { get; set; }
 
-    private string RemoteUrl => BuildRemoteUrl();
+    private byte[]? PdfData { get; set; }
+    private bool IsLoadingPdf { get; set; }
+    private string? LoadedPdfPath { get; set; }
+    private int _activeTabIndex;
+
+    private string RemoteUrl => Document?.SourceUrl ?? "";
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
 
-    private string BuildRemoteUrl()
+    protected override void OnParametersSet()
     {
-        if (Document == null) return "";
-
-        // Derive remote URL from Source + DataSet + FileName
-        // For DOJ Disclosures, the public archive pattern is known
-        var source = Document.SourceName ?? "";
-        var dataSet = Document.DataSetName ?? "";
-        var fileName = Document.FileName ?? "";
-
-        if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(fileName)) return "";
-
-        // DOJ Epstein disclosures are hosted on Journalist Studio / Archive.org
-        // Construct a search-friendly URL
-        if (source.Contains("DepartmentofJustice", StringComparison.OrdinalIgnoreCase))
+        // Reset PDF data and tab when document changes
+        if (Document?.FilePath != LoadedPdfPath)
         {
-            // Journalist Studio (Google Pinpoint) - the primary hosting
-            return $"https://journaliststudio.google.com/pinpoint/search?collection=epstein-documents&q={Uri.EscapeDataString(System.IO.Path.GetFileNameWithoutExtension(fileName))}";
+            PdfData = null;
+            LoadedPdfPath = null;
+            _activeTabIndex = 0;
         }
+    }
 
-        return "";
+    private async Task OnTabChanged(int index)
+    {
+        _activeTabIndex = index;
+        if (index == 1 && PdfData == null && !IsLoadingPdf)
+        {
+            await LoadPdfAsync();
+        }
+    }
+
+    private async Task LoadPdfAsync()
+    {
+        if (Document == null || string.IsNullOrEmpty(Document.FilePath)) return;
+        IsLoadingPdf = true;
+        StateHasChanged();
+        try
+        {
+            PdfData = await SearchService.GetPdfBytesAsync(Document.FilePath);
+            LoadedPdfPath = Document.FilePath;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PDF load error: {ex.Message}");
+        }
+        finally
+        {
+            IsLoadingPdf = false;
+        }
     }
 
     private List<KeyValuePair<string, string>> ParseMetadata()
@@ -167,6 +205,12 @@
                 };
                 if (!string.IsNullOrEmpty(value))
                 {
+                    // Strip drive/mount prefixes from path-like values
+                    if (prop.Name.Contains("Path", StringComparison.OrdinalIgnoreCase) 
+                        || prop.Name.Contains("Folder", StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = StripDrivePrefix(value);
+                    }
                     entries.Add(new KeyValuePair<string, string>(prop.Name, value));
                 }
             }
@@ -174,5 +218,34 @@
         catch { }
 
         return entries;
+    }
+
+    private static string StripDrivePrefix(string path)
+    {
+        // Find the source name folder (e.g. DepartmentofJustice) — typically after the drive/mount root
+        // Patterns: /media/stephen/18TB/EpsteinFiles/SOURCE/... or D:\EpsteinFiles\SOURCE\...
+        // Strip everything up to and including the "EpsteinFiles" (or similar collection root) folder
+        var segments = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        
+        // Find known collection root markers and return from the next segment onward
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (segments[i].Equals("EpsteinFiles", StringComparison.OrdinalIgnoreCase)
+                || segments[i].Equals("Downloads", StringComparison.OrdinalIgnoreCase)
+                || segments[i].Equals("Developer.DiscoveryCity", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 < segments.Length)
+                    return "[drive]/" + string.Join("/", segments[(i + 1)..]);
+                return "[drive]/" + segments[i];
+            }
+        }
+
+        // Fallback: strip Linux mount prefix /media/*/* or Windows drive letter
+        if (path.StartsWith("/media/", StringComparison.OrdinalIgnoreCase) && segments.Length > 3)
+            return "[drive]/" + string.Join("/", segments[3..]);
+        if (path.Length >= 3 && path[1] == ':' && (path[2] == '\\' || path[2] == '/'))
+            return "[drive]/" + string.Join("/", segments[1..]);
+
+        return path;
     }
 }

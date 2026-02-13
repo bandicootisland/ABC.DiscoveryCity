@@ -854,7 +854,7 @@ public partial class DbService
         }
     }
 
-    public async Task<List<DocumentSearchResult>> SearchSimilarAsync(string query, int limit = 20, List<string>? datasetNames = null)
+    public async Task<List<DocumentSearchResult>> SearchSimilarAsync(string query, int limit = 20, List<string>? datasetNames = null, List<string>? nameValues = null)
     {
         var results = new List<DocumentSearchResult>();
 
@@ -868,7 +868,7 @@ public partial class DbService
                 try
                 {
                     var queryEmbedding = await _embeddingService.GetEmbeddingAsync(query);
-                    results = await SearchByVectorAsync(conn, queryEmbedding, limit, datasetNames);
+                    results = await SearchByVectorAsync(conn, queryEmbedding, limit, datasetNames, nameValues);
                     if (results.Count > 0) return results;
                 }
                 catch (Exception embEx)
@@ -878,7 +878,7 @@ public partial class DbService
             }
 
             // Fallback to full-text search
-            results = await SearchByTextAsync(conn, query, limit, datasetNames);
+            results = await SearchByTextAsync(conn, query, limit, datasetNames, nameValues);
         }
         catch (Exception ex)
         {
@@ -887,12 +887,28 @@ public partial class DbService
         return results;
     }
 
-    private async Task<List<DocumentSearchResult>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit, List<string>? datasetNames = null)
+    /// <summary>
+    /// Generates a SQL clause requiring ALL name values to match (AND logic) with ILIKE partial matching.
+    /// Users can type partial names (e.g. "Maxwell" matches "Ghislaine Maxwell", "Miss Maxwell", etc.)
+    /// </summary>
+    private static string NamesAndClause(string tableAlias)
+    {
+        return $"(SELECT COUNT(*) FROM unnest(@nameValues::text[]) pn WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text({tableAlias}.Metadata->'Names') elem WHERE elem ILIKE '%' || pn || '%')) = array_length(@nameValues::text[], 1)";
+    }
+
+    private async Task<List<DocumentSearchResult>> SearchByVectorAsync(NpgsqlConnection conn, float[] queryEmbedding, int limit, List<string>? datasetNames = null, List<string>? nameValues = null)
     {
         var results = new List<DocumentSearchResult>();
         var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
 
-        // Vector similarity search — returns BOTH Windows and Linux paths
+        // Build WHERE clauses for the final SELECT
+        var whereClauses = new List<string>();
+        if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
+        if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+        var whereClause = whereClauses.Count > 0 ? "WHERE " + string.Join(" AND ", whereClauses) : "";
+
+        // Vector similarity search
         string sql = $@"
             WITH ranked_chunks AS (
                 SELECT
@@ -902,7 +918,7 @@ public partial class DbService
                 FROM DocumentChunks c
                 WHERE c.Embedding IS NOT NULL
                 ORDER BY c.Embedding <=> @queryVector
-                LIMIT @limit * 3
+                {(limit > 0 ? "LIMIT @limitX3" : "")}
             ),
             best_matches AS (
                 SELECT ParentId, distance
@@ -921,21 +937,23 @@ public partial class DbService
                    (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                    s.Name as SourceName,
                    d.Name as DataSetName,
-                   p.Metadata->>'People' as People,
-                   p.Metadata::text as MetadataJson
+                   p.Metadata->>'Names' as Names,
+                   p.Metadata::text as MetadataJson,
+                   s.Url as SourceUrl
             FROM best_matches bm
             JOIN ParentDocuments p ON bm.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
             LEFT JOIN Sources s ON d.SourceId = s.Id
-            {(datasetFilter ? "WHERE d.Name = ANY(@datasetNames)" : "")}
+            {whereClause}
             ORDER BY bm.distance
-            LIMIT @limit;
+            {(limit > 0 ? "LIMIT @limit" : "")};
         ";
 
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("queryVector", new Vector(queryEmbedding));
-        cmd.Parameters.AddWithValue("limit", limit);
+        if (limit > 0) { cmd.Parameters.AddWithValue("limit", limit); cmd.Parameters.AddWithValue("limitX3", limit * 3); }
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
 
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -946,33 +964,52 @@ public partial class DbService
         return results;
     }
 
-    private async Task<List<DocumentSearchResult>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit, List<string>? datasetNames = null)
+    private async Task<List<DocumentSearchResult>> SearchByTextAsync(NpgsqlConnection conn, string query, int limit, List<string>? datasetNames = null, List<string>? nameValues = null)
     {
         var results = new List<DocumentSearchResult>();
         var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
 
-        // Full-text search across chunk text AND JSONB metadata (Title, People, FileName, DataSetName)
+        // Build extra join/where for chunk_matches CTE
+        var chunkExtraJoin = "";
+        if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
+        var chunkExtraWhere = new List<string>();
+        if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
+
+        // If we have names filter but no dataset filter, we need the join to ParentDocuments in chunk_matches
+        if (namesFilter && !datasetFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id";
+
+        var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
+        var metaExtraWhere = new List<string>();
+        if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
+        if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
+
+        var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
+        var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
+
+        // Full-text search across chunk text AND JSONB metadata
         string sql = $@"
             WITH chunk_matches AS (
                 SELECT DISTINCT c.ParentId,
                        MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
                 FROM DocumentChunks c
-                {(datasetFilter ? "JOIN ParentDocuments pd ON c.ParentId = pd.Id JOIN DataSets dd ON pd.DataSetId = dd.Id" : "")}
+                {chunkExtraJoin}
                 WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                    OR c.TextContent ILIKE @pattern)
-                {(datasetFilter ? "AND dd.Name = ANY(@datasetNames)" : "")}
+                {chunkWhereStr}
                 GROUP BY c.ParentId
             ),
             metadata_matches AS (
                 SELECT p.Id as ParentId, 0.5 as score
                 FROM ParentDocuments p
-                {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
+                {metaExtraJoin}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
-                   OR p.Metadata->>'People' ILIKE @pattern
+                   OR p.Metadata->>'Names' ILIKE @pattern
                    OR p.Metadata->>'FileName' ILIKE @pattern
                    OR p.Metadata->>'DataSetName' ILIKE @pattern
                    OR p.FileName ILIKE @pattern)
-                {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                {metaWhereStr}
             ),
             matching_docs AS (
                 SELECT ParentId, MAX(score) as score
@@ -983,7 +1020,7 @@ public partial class DbService
                 ) combined
                 GROUP BY ParentId
                 ORDER BY score DESC
-                LIMIT @limit
+                {(limit > 0 ? "LIMIT @limit" : "")}
             )
             SELECT p.FileName,
                    p.FilePath,
@@ -997,8 +1034,9 @@ public partial class DbService
                    (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                    s.Name as SourceName,
                    d.Name as DataSetName,
-                   p.Metadata->>'People' as People,
-                   p.Metadata::text as MetadataJson
+                   p.Metadata->>'Names' as Names,
+                   p.Metadata::text as MetadataJson,
+                   s.Url as SourceUrl
             FROM matching_docs md
             JOIN ParentDocuments p ON md.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -1009,8 +1047,9 @@ public partial class DbService
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("query", query);
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
-        cmd.Parameters.AddWithValue("limit", limit);
+        if (limit > 0) cmd.Parameters.AddWithValue("limit", limit);
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
 
         using var reader = await cmd.ExecuteReaderAsync();
         while (await reader.ReadAsync())
@@ -1024,7 +1063,7 @@ public partial class DbService
     /// <summary>
     /// Exact text match search - only returns documents containing the exact query string
     /// </summary>
-    public List<DocumentSearchResult> SearchExactMatch(string query, int limit = 20, List<string>? datasetNames = null)
+    public List<DocumentSearchResult> SearchExactMatch(string query, int limit = 20, List<string>? datasetNames = null, List<string>? nameValues = null)
     {
         var results = new List<DocumentSearchResult>();
 
@@ -1032,26 +1071,40 @@ public partial class DbService
         {
             using var conn = _dataSource.OpenConnection();
             var datasetFilter = datasetNames is { Count: > 0 };
+            var namesFilter = nameValues is { Count: > 0 };
 
-            // Exact match across chunk text AND JSONB metadata (Title, People, FileName, DataSetName)
+            var chunkExtraJoin = "";
+            if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
+            var chunkExtraWhere = new List<string>();
+            if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
+            if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
+
+            var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
+            var metaExtraWhere = new List<string>();
+            if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
+            if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
+
+            var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
+            var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
+
             string sql = $@"
                 WITH chunk_matches AS (
                     SELECT DISTINCT c.ParentId
                     FROM DocumentChunks c
-                    {(datasetFilter ? "JOIN ParentDocuments pd ON c.ParentId = pd.Id JOIN DataSets dd ON pd.DataSetId = dd.Id" : "")}
+                    {chunkExtraJoin}
                     WHERE c.TextContent ILIKE @pattern
-                    {(datasetFilter ? "AND dd.Name = ANY(@datasetNames)" : "")}
+                    {chunkWhereStr}
                 ),
                 metadata_matches AS (
                     SELECT p.Id as ParentId
                     FROM ParentDocuments p
-                    {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
+                    {metaExtraJoin}
                     WHERE (p.Metadata->>'Title' ILIKE @pattern
-                       OR p.Metadata->>'People' ILIKE @pattern
+                       OR p.Metadata->>'Names' ILIKE @pattern
                        OR p.Metadata->>'FileName' ILIKE @pattern
                        OR p.Metadata->>'DataSetName' ILIKE @pattern
                        OR p.FileName ILIKE @pattern)
-                    {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                    {metaWhereStr}
                 ),
                 matching_docs AS (
                     SELECT DISTINCT ParentId FROM (
@@ -1059,7 +1112,7 @@ public partial class DbService
                         UNION
                         SELECT ParentId FROM metadata_matches
                     ) combined
-                    LIMIT @limit
+                    {(limit > 0 ? "LIMIT @limit" : "")}
                 )
                 SELECT p.FileName,
                        p.FilePath,
@@ -1073,8 +1126,9 @@ public partial class DbService
                        (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                        s.Name as SourceName,
                        d.Name as DataSetName,
-                       p.Metadata->>'People' as People,
-                       p.Metadata::text as MetadataJson
+                       p.Metadata->>'Names' as Names,
+                       p.Metadata::text as MetadataJson,
+                       s.Url as SourceUrl
                 FROM matching_docs md
                 JOIN ParentDocuments p ON md.ParentId = p.Id
                 LEFT JOIN DataSets d ON p.DataSetId = d.Id
@@ -1083,8 +1137,9 @@ public partial class DbService
 
             using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("pattern", $"%{query}%");
-            cmd.Parameters.AddWithValue("limit", limit);
+            if (limit > 0) cmd.Parameters.AddWithValue("limit", limit);
             if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+            if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -1100,18 +1155,23 @@ public partial class DbService
         return results;
     }
 
-    public List<DocumentSearchResult> GetRecentDocuments(int limit = 10, List<string>? datasetNames = null)
+    public List<DocumentSearchResult> GetRecentDocuments(int limit = 10, List<string>? datasetNames = null, List<string>? nameValues = null)
     {
         var results = new List<DocumentSearchResult>();
         try
         {
             using var conn = _dataSource.OpenConnection();
             var datasetFilter = datasetNames is { Count: > 0 };
+            var namesFilter = nameValues is { Count: > 0 };
 
-            // Sample recent docs from EACH dataset so all datasets are represented,
-            // not just the one with the most recent ProcessedAt timestamps.
+            // Sample recent docs — when limit=0 (unlimited), show all per dataset
             int dataSetCount = datasetFilter ? datasetNames!.Count : GetDataSetCount(conn);
-            int perDataSet = Math.Max(3, limit / Math.Max(1, dataSetCount));
+            int perDataSet = limit > 0 ? Math.Max(3, limit / Math.Max(1, dataSetCount)) : int.MaxValue;
+
+            var whereClauses = new List<string>();
+            if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
+            if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+            var innerWhere = whereClauses.Count > 0 ? "WHERE " + string.Join(" AND ", whereClauses) : "";
 
             string sql = $@"
                 WITH ranked AS (
@@ -1120,11 +1180,12 @@ public partial class DbService
                            COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
                            d.Name as DataSetName,
                            s.Name as SourceName,
+                           s.Url as SourceUrl,
                            ROW_NUMBER() OVER (PARTITION BY p.DataSetId ORDER BY p.ProcessedAt DESC) as rn
                     FROM ParentDocuments p
                     LEFT JOIN DataSets d ON p.DataSetId = d.Id
                     LEFT JOIN Sources s ON d.SourceId = s.Id
-                    {(datasetFilter ? "WHERE d.Name = ANY(@datasetNames)" : "")}
+                    {innerWhere}
                 )
                 SELECT r.FileName,
                        r.FilePath,
@@ -1138,18 +1199,20 @@ public partial class DbService
                        (SELECT filename FROM DocumentImages WHERE ParentId = r.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
                        r.SourceName,
                        r.DataSetName,
-                       r.Metadata->>'People' as People,
-                       r.Metadata::text as MetadataJson
+                       r.Metadata->>'Names' as Names,
+                       r.Metadata::text as MetadataJson,
+                       r.SourceUrl
                 FROM ranked r
                 WHERE r.rn <= @perDataSet
                 ORDER BY r.ProcessedAt DESC
-                LIMIT @limit;
+                {(limit > 0 ? "LIMIT @limit" : "")};
             ";
 
             using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("perDataSet", perDataSet);
-            cmd.Parameters.AddWithValue("limit", limit);
+            if (limit > 0) cmd.Parameters.AddWithValue("limit", limit);
             if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+            if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -1159,14 +1222,302 @@ public partial class DbService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error getting recent docs: {ex.Message}");
+            Console.WriteLine($"Error getting recent docs: {ex.Message}\n{ex.StackTrace}");
+            if (ex.InnerException != null) Console.WriteLine($"  Inner: {ex.InnerException.Message}");
         }
         return results;
     }
 
     /// <summary>
-    /// Quick count of datasets for per-dataset sampling.
+    /// Server-side paged search: returns a page of results + total count for virtual scrolling.
+    /// Supports text search (vector+fulltext), exact match, or recent (no query).
     /// </summary>
+    public async Task<(List<DocumentSearchResult> Items, int TotalCount)> SearchPagedAsync(
+        string? query, int skip, int take, bool exactMatch = false,
+        List<string>? datasetNames = null, List<string>? nameValues = null)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            var datasetFilter = datasetNames is { Count: > 0 };
+            var namesFilter = nameValues is { Count: > 0 };
+
+            // Build shared WHERE clause for filtering
+            var whereClauses = new List<string>();
+            if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
+            if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+            var whereClause = whereClauses.Count > 0 ? "WHERE " + string.Join(" AND ", whereClauses) : "";
+
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                // No search query — return recent documents, paged
+                return GetRecentDocumentsPaged(conn, skip, take, whereClause, datasetFilter, namesFilter, datasetNames, nameValues);
+            }
+
+            if (exactMatch)
+            {
+                return SearchExactMatchPaged(conn, query, skip, take, datasetNames, nameValues);
+            }
+
+            // Text search (fulltext) — paged
+            return await SearchByTextPagedAsync(conn, query, skip, take, datasetNames, nameValues);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Paged search failed: {ex.Message}\n{ex.StackTrace}");
+            if (ex.InnerException != null) Console.WriteLine($"  Inner: {ex.InnerException.Message}");
+            return (new List<DocumentSearchResult>(), 0);
+        }
+    }
+
+    private (List<DocumentSearchResult> Items, int TotalCount) GetRecentDocumentsPaged(
+        NpgsqlConnection conn, int skip, int take, string whereClause,
+        bool datasetFilter, bool namesFilter,
+        List<string>? datasetNames, List<string>? nameValues)
+    {
+        // Count total matching documents
+        var countSql = $@"SELECT COUNT(*) FROM ParentDocuments p
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id {whereClause}";
+        using var countCmd = new NpgsqlCommand(countSql, conn);
+        countCmd.CommandTimeout = 120;
+        if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
+
+        // Fetch the page
+        var sql = $@"
+            SELECT p.FileName,
+                   p.FilePath,
+                   d.pdffolder as PdfFolder,
+                   COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
+                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as Text,
+                   0.0 as Distance,
+                   (p.Metadata->>'DeducedDate')::timestamp as DocDate,
+                   (p.Metadata->>'PageCount')::int as PageCount,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
+                   s.Name as SourceName,
+                   d.Name as DataSetName,
+                   p.Metadata->>'Names' as Names,
+                   p.Metadata::text as MetadataJson,
+                   s.Url as SourceUrl
+            FROM ParentDocuments p
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            LEFT JOIN Sources s ON d.SourceId = s.Id
+            {whereClause}
+            ORDER BY p.ProcessedAt DESC
+            OFFSET @skip LIMIT @take;";
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.CommandTimeout = 120;
+        cmd.Parameters.AddWithValue("skip", skip);
+        cmd.Parameters.AddWithValue("take", take);
+        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+
+        var results = new List<DocumentSearchResult>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) results.Add(ReadSearchResult(reader));
+        return (results, totalCount);
+    }
+
+    private async Task<(List<DocumentSearchResult> Items, int TotalCount)> SearchByTextPagedAsync(
+        NpgsqlConnection conn, string query, int skip, int take,
+        List<string>? datasetNames = null, List<string>? nameValues = null)
+    {
+        var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
+
+        var chunkExtraJoin = "";
+        if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
+        var chunkExtraWhere = new List<string>();
+        if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
+        if (namesFilter && !datasetFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id";
+
+        var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
+        var metaExtraWhere = new List<string>();
+        if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
+        if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
+
+        var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
+        var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
+
+        // CTE that finds all matching doc IDs with scores
+        var matchesCte = $@"
+            WITH chunk_matches AS (
+                SELECT DISTINCT c.ParentId,
+                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
+                FROM DocumentChunks c
+                {chunkExtraJoin}
+                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                   OR c.TextContent ILIKE @pattern)
+                {chunkWhereStr}
+                GROUP BY c.ParentId
+            ),
+            metadata_matches AS (
+                SELECT p.Id as ParentId, 0.5 as score
+                FROM ParentDocuments p
+                {metaExtraJoin}
+                WHERE (p.Metadata->>'Title' ILIKE @pattern
+                   OR p.Metadata->>'Names' ILIKE @pattern
+                   OR p.Metadata->>'FileName' ILIKE @pattern
+                   OR p.Metadata->>'DataSetName' ILIKE @pattern
+                   OR p.FileName ILIKE @pattern)
+                {metaWhereStr}
+            ),
+            matching_docs AS (
+                SELECT ParentId, MAX(score) as score
+                FROM (
+                    SELECT ParentId, score FROM chunk_matches
+                    UNION ALL
+                    SELECT ParentId, score FROM metadata_matches
+                ) combined
+                GROUP BY ParentId
+            )";
+
+        // Count query
+        var countSql = matchesCte + " SELECT COUNT(*) FROM matching_docs;";
+        using var countCmd = new NpgsqlCommand(countSql, conn);
+        countCmd.CommandTimeout = 120;
+        countCmd.Parameters.AddWithValue("query", query);
+        countCmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        var totalCount = Convert.ToInt32(await countCmd.ExecuteScalarAsync() ?? 0);
+
+        // Data query with paging
+        var dataSql = matchesCte + $@"
+            SELECT p.FileName,
+                   p.FilePath,
+                   d.pdffolder as PdfFolder,
+                   COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
+                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                   md.score,
+                   (p.Metadata->>'DeducedDate')::timestamp as DocDate,
+                   (p.Metadata->>'PageCount')::int as PageCount,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
+                   s.Name as SourceName,
+                   d.Name as DataSetName,
+                   p.Metadata->>'Names' as Names,
+                   p.Metadata::text as MetadataJson,
+                   s.Url as SourceUrl
+            FROM matching_docs md
+            JOIN ParentDocuments p ON md.ParentId = p.Id
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            LEFT JOIN Sources s ON d.SourceId = s.Id
+            ORDER BY md.score DESC
+            OFFSET @skip LIMIT @take;";
+
+        using var dataCmd = new NpgsqlCommand(dataSql, conn);
+        dataCmd.CommandTimeout = 120;
+        dataCmd.Parameters.AddWithValue("query", query);
+        dataCmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        dataCmd.Parameters.AddWithValue("skip", skip);
+        dataCmd.Parameters.AddWithValue("take", take);
+        if (datasetFilter) dataCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) dataCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+
+        var results = new List<DocumentSearchResult>();
+        using var reader = await dataCmd.ExecuteReaderAsync();
+        while (await reader.ReadAsync()) results.Add(ReadSearchResult(reader));
+        return (results, totalCount);
+    }
+
+    private (List<DocumentSearchResult> Items, int TotalCount) SearchExactMatchPaged(
+        NpgsqlConnection conn, string query, int skip, int take,
+        List<string>? datasetNames = null, List<string>? nameValues = null)
+    {
+        var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
+
+        var chunkExtraJoin = "";
+        if (datasetFilter || namesFilter) chunkExtraJoin = "JOIN ParentDocuments pd ON c.ParentId = pd.Id" + (datasetFilter ? " JOIN DataSets dd ON pd.DataSetId = dd.Id" : "");
+        var chunkExtraWhere = new List<string>();
+        if (datasetFilter) chunkExtraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) chunkExtraWhere.Add(NamesAndClause("pd"));
+
+        var metaExtraJoin = datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "";
+        var metaExtraWhere = new List<string>();
+        if (datasetFilter) metaExtraWhere.Add("dd2.Name = ANY(@datasetNames)");
+        if (namesFilter) metaExtraWhere.Add(NamesAndClause("p"));
+
+        var chunkWhereStr = chunkExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", chunkExtraWhere) : "";
+        var metaWhereStr = metaExtraWhere.Count > 0 ? "AND " + string.Join(" AND ", metaExtraWhere) : "";
+
+        var matchesCte = $@"
+            WITH chunk_matches AS (
+                SELECT DISTINCT c.ParentId
+                FROM DocumentChunks c
+                {chunkExtraJoin}
+                WHERE c.TextContent ILIKE @pattern
+                {chunkWhereStr}
+            ),
+            metadata_matches AS (
+                SELECT p.Id as ParentId
+                FROM ParentDocuments p
+                {metaExtraJoin}
+                WHERE (p.Metadata->>'Title' ILIKE @pattern
+                   OR p.Metadata->>'Names' ILIKE @pattern
+                   OR p.Metadata->>'FileName' ILIKE @pattern
+                   OR p.Metadata->>'DataSetName' ILIKE @pattern
+                   OR p.FileName ILIKE @pattern)
+                {metaWhereStr}
+            ),
+            matching_docs AS (
+                SELECT DISTINCT ParentId FROM (
+                    SELECT ParentId FROM chunk_matches
+                    UNION
+                    SELECT ParentId FROM metadata_matches
+                ) combined
+            )";
+
+        // Count
+        var countSql = matchesCte + " SELECT COUNT(*) FROM matching_docs;";
+        using var countCmd = new NpgsqlCommand(countSql, conn);
+        countCmd.CommandTimeout = 120;
+        countCmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
+
+        // Data
+        var dataSql = matchesCte + $@"
+            SELECT p.FileName,
+                   p.FilePath,
+                   d.pdffolder as PdfFolder,
+                   COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
+                   (SELECT STRING_AGG(c.TextContent, ' ' ORDER BY c.ChunkIndex) FROM DocumentChunks c WHERE c.ParentId = p.Id) as FullText,
+                   1.0 as score,
+                   (p.Metadata->>'DeducedDate')::timestamp as DocDate,
+                   (p.Metadata->>'PageCount')::int as PageCount,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
+                   s.Name as SourceName,
+                   d.Name as DataSetName,
+                   p.Metadata->>'Names' as Names,
+                   p.Metadata::text as MetadataJson,
+                   s.Url as SourceUrl
+            FROM matching_docs md
+            JOIN ParentDocuments p ON md.ParentId = p.Id
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            LEFT JOIN Sources s ON d.SourceId = s.Id
+            OFFSET @skip LIMIT @take;";
+
+        using var dataCmd = new NpgsqlCommand(dataSql, conn);
+        dataCmd.CommandTimeout = 120;
+        dataCmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        dataCmd.Parameters.AddWithValue("skip", skip);
+        dataCmd.Parameters.AddWithValue("take", take);
+        if (datasetFilter) dataCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) dataCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+
+        var results = new List<DocumentSearchResult>();
+        using var reader = dataCmd.ExecuteReader();
+        while (reader.Read()) results.Add(ReadSearchResult(reader));
+        return (results, totalCount);
+    }
     private static int GetDataSetCount(NpgsqlConnection conn)
     {
         try
@@ -1201,9 +1552,9 @@ public partial class DbService
     }
 
     /// <summary>
-    /// Shared reader for the standardized 13-column search result layout.
+    /// Shared reader for the standardized 15-column search result layout.
     /// Column order: FileName, FilePath, PdfFolder, ImageFolder, Text, Distance/Score,
-    /// DocDate, PageCount, ThumbFileName, FullImgFileName, SourceName, DataSetName, People
+    /// DocDate, PageCount, ThumbFileName, FullImgFileName, SourceName, DataSetName, People, MetadataJson, SourceUrl
     /// </summary>
     private static DocumentSearchResult ReadSearchResult(NpgsqlDataReader reader)
     {
@@ -1221,8 +1572,9 @@ public partial class DbService
             FullImageFileName  = reader.IsDBNull(9) ? null : reader.GetString(9),
             SourceName         = reader.IsDBNull(10) ? null : reader.GetString(10),
             DataSetName        = reader.IsDBNull(11) ? null : reader.GetString(11),
-            People             = reader.IsDBNull(12) ? null : reader.GetString(12),
-            MetadataJson       = reader.IsDBNull(13) ? "{}" : reader.GetString(13)
+            Names              = reader.IsDBNull(12) ? null : reader.GetString(12),
+            MetadataJson       = reader.IsDBNull(13) ? "{}" : reader.GetString(13),
+            SourceUrl          = reader.IsDBNull(14) ? null : reader.GetString(14)
         };
     }
 
@@ -1398,8 +1750,9 @@ public class DocumentSearchResult
     public int PageCount { get; set; }
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
-    public string? People { get; set; }
+    public string? Names { get; set; }
     public string MetadataJson { get; set; } = "{}";
+    public string? SourceUrl { get; set; }
 
     /// <summary>Resolve the document file path for the current OS.</summary>
     public string? ResolvedFilePath => 

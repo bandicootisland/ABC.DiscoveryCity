@@ -22,7 +22,7 @@ bool embeddingsOnly = args.Any(a => a.Equals("--embeddings-only", StringComparis
 bool imagesOnly = args.Any(a => a.Equals("--images-only", StringComparison.OrdinalIgnoreCase));
 bool forceReprocess = args.Any(a => a.Equals("--force", StringComparison.OrdinalIgnoreCase));
 bool reprocessMode = args.Any(a => a.Equals("--reprocess", StringComparison.OrdinalIgnoreCase));
-bool extractPeopleLlm = args.Any(a => a.Equals("--extract-people-llm", StringComparison.OrdinalIgnoreCase));
+bool extractNamesLlm = args.Any(a => a.Equals("--extract-names-llm", StringComparison.OrdinalIgnoreCase));
 int limitFiles = 0;
 string? folderArg = null;
 for (int i = 0; i < args.Length; i++)
@@ -101,7 +101,7 @@ if (embeddingsOnly) Console.WriteLine("MODE: Embeddings-only (backfill NULL embe
 if (imagesOnly) Console.WriteLine("MODE: Images-only (generate thumbnails for files without .done.images)");
 if (reprocessMode) Console.WriteLine("MODE: Reprocess (re-extract metadata from stored text, no PDF re-parsing)");;
 if (forceReprocess) Console.WriteLine("MODE: Force reprocess (ignore .done flags)");
-if (extractPeopleLlm) Console.WriteLine("MODE: LLM People extraction (using Ollama) — NOT YET IMPLEMENTED");
+if (extractNamesLlm) Console.WriteLine("MODE: LLM Names extraction (using Ollama) — NOT YET IMPLEMENTED");
 
 // Initialize Embedding Service (Ollama)
 Console.WriteLine("Initializing Embedding Service...");
@@ -199,7 +199,7 @@ if (reprocessMode)
         {
             try
             {
-                // Reconstruct text from chunks for people extraction
+                // Reconstruct text from chunks for names extraction
                 string fullText = dbService.GetDocumentFullText(docId);
                 if (string.IsNullOrWhiteSpace(fullText))
                 {
@@ -208,7 +208,7 @@ if (reprocessMode)
                 }
 
                 // --- Reprocess steps (add future extractions here) ---
-                var extractedPeople = ExtractPeopleFromText(fullText);
+                var extractedNames = ExtractNamesFromText(fullText);
 
                 // Merge into existing metadata
                 var metadata = string.IsNullOrWhiteSpace(metadataJson)
@@ -216,11 +216,11 @@ if (reprocessMode)
                     : JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(metadataJson)
                       ?? new Dictionary<string, JsonElement>();
 
-                // Update People field
-                if (extractedPeople.Count > 0)
-                    metadata["People"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedPeople));
+                // Update Names field
+                if (extractedNames.Count > 0)
+                    metadata["Names"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedNames));
                 else
-                    metadata.Remove("People");
+                    metadata.Remove("Names");
 
                 // Write back updated metadata
                 string updatedJson = JsonSerializer.Serialize(metadata);
@@ -598,13 +598,13 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
     // 2. Extract Metadata & Deduce Date
     var deducedDate = DeduceDateFromText(fullText);
     var deducedTitle = DeduceTitleFromText(fullText, System.IO.Path.GetFileNameWithoutExtension(pdfPath));
-    var extractedPeople = ExtractPeopleFromText(fullText);
+    var extractedNames = ExtractNamesFromText(fullText);
     
     if (inspectMode)
     {
         Console.WriteLine($"\n[INSPECT] Deduced Date: {deducedDate:yyyy-MM-dd}");
         Console.WriteLine($"[INSPECT] Deduced Title: {deducedTitle}");
-        Console.WriteLine($"[INSPECT] People: {string.Join(", ", extractedPeople)}");
+        Console.WriteLine($"[INSPECT] Names: {string.Join(", ", extractedNames)}");
         return; 
     }
 
@@ -633,7 +633,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
         PageCount = telerikDoc.Pages.Count,
         DeducedDate = deducedDate ?? DateTime.MinValue,
         Text = RunCleanUp(digitalBook.Sentences.Select(s => s.text).ToList()),
-        People = extractedPeople,
+        Names = extractedNames,
         // Enriched metadata
         DataSetName = dataSetName ?? "",
         SourceName = sourceFolderName ?? "",
@@ -926,13 +926,13 @@ string CleanMimeArtifacts(string text)
 }
 
 /// <summary>
-/// Extract person names from document text using regex/heuristic patterns.
+/// Extract names from document text using regex/heuristic patterns.
 /// Targets email headers (From:, To:, Cc:, Sent by:) and common name patterns.
 /// </summary>
-List<string> ExtractPeopleFromText(string text)
+List<string> ExtractNamesFromText(string text)
 {
-    var people = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    if (string.IsNullOrWhiteSpace(text)) return people.ToList();
+    var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    if (string.IsNullOrWhiteSpace(text)) return names.ToList();
 
     // Use first 8000 chars - most names appear in headers at the top
     string snippet = text.Length > 8000 ? text.Substring(0, 8000) : text;
@@ -956,7 +956,7 @@ List<string> ExtractPeopleFromText(string text)
         foreach (Match m in Regex.Matches(snippet, pattern))
         {
             var name = CleanExtractedName(m.Groups[1].Value);
-            if (IsValidPersonName(name)) people.Add(name);
+            if (IsValidPersonName(name)) names.Add(name);
         }
     }
 
@@ -964,7 +964,7 @@ List<string> ExtractPeopleFromText(string text)
     foreach (Match m in Regex.Matches(snippet, @"\b(?:Dear|Hi|Hello|Attn)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20})?)", RegexOptions.None))
     {
         var name = CleanExtractedName(m.Groups[1].Value);
-        if (IsValidPersonName(name)) people.Add(name);
+        if (IsValidPersonName(name)) names.Add(name);
     }
 
     // --- 3. Known-name-context patterns ---
@@ -972,7 +972,7 @@ List<string> ExtractPeopleFromText(string text)
     foreach (Match m in Regex.Matches(snippet, @"\b(?:w/|with|meeting\s+with|Appt\s+w/|LUNCH\s+w/)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20}))", RegexOptions.None))
     {
         var name = CleanExtractedName(m.Groups[1].Value);
-        if (IsValidPersonName(name)) people.Add(name);
+        if (IsValidPersonName(name)) names.Add(name);
     }
 
     // --- 4. Capitalized "Firstname Lastname" sequences that look like person names ---
@@ -982,11 +982,11 @@ List<string> ExtractPeopleFromText(string text)
         var candidate = m.Groups[1].Value;
         if (IsValidPersonName(candidate) && !IsCommonPhrase(candidate))
         {
-            people.Add(candidate);
+            names.Add(candidate);
         }
     }
 
-    return people.OrderBy(p => p).ToList();
+    return names.OrderBy(p => p).ToList();
 }
 
 string CleanExtractedName(string name)
@@ -998,7 +998,7 @@ string CleanExtractedName(string name)
     name = Regex.Replace(name, @"[\d<>\[\]@.,;:!?\-_/\\()]+$", "").Trim();
     name = Regex.Replace(name, @"^[\d<>\[\]@.,;:!?\-_/\\()]+", "").Trim();
     // Strip MIME '=' artifacts from the name (evidence is preserved in raw text;
-    // this only cleans the derived People metadata field)
+    // this only cleans the derived Names metadata field)
     name = name.Replace("=", "");
     // Collapse multiple spaces
     name = Regex.Replace(name, @"\s{2,}", " ").Trim();
