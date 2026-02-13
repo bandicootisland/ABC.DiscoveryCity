@@ -94,6 +94,19 @@ public partial class DbService
     }
 
     /// <summary>
+    /// Constructor that accepts a pre-built NpgsqlDataSource (shared singleton pool).
+    /// Use this in DI to avoid creating a new connection pool per scoped request.
+    /// </summary>
+    public DbService(NpgsqlDataSource dataSource, IEmbeddingService? embeddingService = null)
+    {
+        _embeddingService = embeddingService;
+        _dataSource = dataSource;
+        _connectionString = dataSource.ConnectionString;
+        EnsurePgvectorMapping();
+        LoadBasePaths();
+    }
+
+    /// <summary>
     /// Load the Windows and Linux basepaths from the filesources table (2 rows).
     /// </summary>
     private void LoadBasePaths()
@@ -666,7 +679,7 @@ public partial class DbService
                             DataSetId = COALESCE(@dataSetId, DataSetId),
                             FilePath = @fp,
                             Sentences = @sentences::jsonb,
-                            Embedding = @emb,
+                            Embedding = COALESCE(@emb, Embedding),
                             ProcessedAt = NOW()
                         WHERE Id = @id;";
 

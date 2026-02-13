@@ -46,16 +46,15 @@ builder.Services.AddSingleton<ABC.PdfProcessing.Syncfusion.PdfMetaDataSyncFusion
 
 // Postgres & Embeddings
 builder.Services.AddScoped<ABC.DiscoveryCity.Embeddings.IEmbeddingService, ABC.DiscoveryCity.Embeddings.OllamaEmbeddingService>();
-// Use scoped for DbService as it creates connections
+
+// DbService as singleton — one shared NpgsqlDataSource (connection pool) for the API lifetime
 var configConnStartup = builder.Configuration.GetConnectionString("DiscoveryCityDB");
 Console.WriteLine($"[API STARTUP] Connection string from config: {configConnStartup ?? "NULL - using default"}");
 
-builder.Services.AddScoped<ABC.DiscoveryCity.PostgreSQL.DbService>(sp =>
+builder.Services.AddSingleton<ABC.DiscoveryCity.PostgreSQL.DbService>(sp =>
 {
     var embeddingService = sp.GetRequiredService<ABC.DiscoveryCity.Embeddings.IEmbeddingService>();
-    // Use default connection string or from config
-    var configConn = builder.Configuration.GetConnectionString("DiscoveryCityDB");
-    return new ABC.DiscoveryCity.PostgreSQL.DbService(embeddingService, configConn);
+    return new ABC.DiscoveryCity.PostgreSQL.DbService(embeddingService, configConnStartup);
 });
 
 builder.Services.AddCors(options =>

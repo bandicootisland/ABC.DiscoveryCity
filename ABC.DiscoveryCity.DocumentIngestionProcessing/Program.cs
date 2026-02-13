@@ -1,6 +1,7 @@
 ﻿using ABC.DiscoveryCity.DocumentIngestionProcessing.Tests;
 using ABC.DiscoveryCity.Words.Common;
 using ABC.DiscoveryCity.Words.Common.Domain;
+using ABC.DiscoveryCity.Words.Common.Processing;
 using ABC.DiscoveryCity.DocumentIngestionProcessing;
 using ABC.DiscoveryCity.Embeddings;
 using ABC.DiscoveryCity.TelerikProcessing;
@@ -24,6 +25,7 @@ bool imagesOnly = args.Any(a => a.Equals("--images-only", StringComparison.Ordin
 bool forceReprocess = args.Any(a => a.Equals("--force", StringComparison.OrdinalIgnoreCase));
 bool reprocessMode = args.Any(a => a.Equals("--reprocess", StringComparison.OrdinalIgnoreCase));
 bool extractNamesLlm = args.Any(a => a.Equals("--extract-names-llm", StringComparison.OrdinalIgnoreCase));
+bool noEmbeddings = args.Any(a => a.Equals("--no-embeddings", StringComparison.OrdinalIgnoreCase));
 int limitFiles = 0;
 string? folderArg = null;
 for (int i = 0; i < args.Length; i++)
@@ -103,20 +105,28 @@ if (imagesOnly) Console.WriteLine("MODE: Images-only (generate thumbnails for fi
 if (reprocessMode) Console.WriteLine("MODE: Reprocess (re-extract metadata from stored text, no PDF re-parsing)");;
 if (forceReprocess) Console.WriteLine("MODE: Force reprocess (ignore .done flags)");
 if (extractNamesLlm) Console.WriteLine("MODE: LLM Names extraction (using Ollama) — NOT YET IMPLEMENTED");
+if (noEmbeddings) Console.WriteLine("MODE: No embeddings (skip embedding generation, preserve existing)");
 
 // Initialize Embedding Service (Ollama)
-Console.WriteLine("Initializing Embedding Service...");
 IEmbeddingService? embeddingService = null;
-try
+if (noEmbeddings)
 {
-    embeddingService = new OllamaEmbeddingService();
-    // Quick test to verify Ollama is running
-    Console.WriteLine($"Embedding Service ready (dimension: {embeddingService.Dimension})");
+    Console.WriteLine("Skipping Embedding Service (--no-embeddings flag).");
 }
-catch (Exception ex)
+else
 {
-    Console.WriteLine($"WARNING: Embedding service unavailable: {ex.Message}");
-    Console.WriteLine("Proceeding without embeddings.");
+    Console.WriteLine("Initializing Embedding Service...");
+    try
+    {
+        embeddingService = new OllamaEmbeddingService();
+        // Quick test to verify Ollama is running
+        Console.WriteLine($"Embedding Service ready (dimension: {embeddingService.Dimension})");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"WARNING: Embedding service unavailable: {ex.Message}");
+        Console.WriteLine("Proceeding without embeddings.");
+    }
 }
 
 // Initialize DB - MUST succeed before processing
@@ -566,8 +576,8 @@ if (pendingImageTasks.Count > 0)
 
 async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfImageExtractor? pdfImageExtractor, int? dataSetId = null, bool inspectMode = false, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
 {
-    // Skip if already processed (for distributed processing)
-    if (dbService.DocumentExists(pdfPath))
+    // Skip if already processed (for distributed processing) — unless --force re-ingestion
+    if (!forceReprocess && dbService.DocumentExists(pdfPath))
     {
         Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(pdfPath)}");
         return;
@@ -648,8 +658,8 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
 
     List<string> RunCleanUp(List<string> input)
     {
+        // Phase 1: Clean text (unicode fixes, EFTA splits)
         var cleaned = new List<string>();
-        int i = 1;
         foreach (var line in input)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
@@ -662,8 +672,16 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
             // 2. Add newline before EFTA file IDs (e.g., EFTA00039885)
             s = Regex.Replace(s, @"(EFTA\d{8,})", "\n$1");
 
-            // Add newline before sentence number for better readability
-            cleaned.Add($"\n[{i++}] {s.Trim()}");
+            cleaned.Add(s.Trim());
+        }
+
+        // Phase 2: Filter junk BEFORE numbering (no gaps in sequence)
+        cleaned = SentencePostProcessor.FilterJunkStrings(cleaned);
+
+        // Phase 3: Number sequentially — [1], [2], [3]... with no gaps
+        for (int i = 0; i < cleaned.Count; i++)
+        {
+            cleaned[i] = $"\n[{i + 1}] {cleaned[i]}";
         }
         return cleaned;
     }

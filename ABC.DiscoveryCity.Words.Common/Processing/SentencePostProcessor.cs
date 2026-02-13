@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 
 namespace ABC.DiscoveryCity.Words.Common.Processing
 {
@@ -16,9 +17,267 @@ namespace ABC.DiscoveryCity.Words.Common.Processing
         /// </summary>
         public static void Process(List<Sentence> sentences)
         {
+            RemoveJunkSentences(sentences);
             MergeUrlFragments(sentences);
             // Future: MergeEmailFragments(sentences);
             // Future: MergeShortQuoteContinuations(sentences);
+        }
+
+        // =====================================================================
+        //  Pass 0: Remove junk sentences (base64, binary blobs, repeated chars)
+        // =====================================================================
+
+        /// <summary>
+        /// Remove sentences that are OCR/extraction artifacts rather than real text.
+        /// Catches: base64 blobs, hex dumps, repeated character runs, and binary noise.
+        /// Runs BEFORE merge passes so junk doesn't get merged into real sentences.
+        /// </summary>
+        private static void RemoveJunkSentences(List<Sentence> sentences)
+        {
+            for (int i = sentences.Count - 1; i >= 0; i--)
+            {
+                string text = GetSentenceText(sentences[i]);
+                if (IsJunkText(text))
+                {
+                    sentences.RemoveAt(i);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Determines if a sentence text is junk that should be filtered out.
+        /// Returns true for: base64 blobs, hex dumps, repeated-char runs,
+        /// binary gibberish, and very long strings with no spaces (data, not prose).
+        /// 
+        /// PRESERVES: [redact.char(N)] patterns (legitimate redaction markers),
+        /// short sentences (≤10 chars), and normal OCR text even if slightly garbled.
+        /// </summary>
+        internal static bool IsJunkText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return true;
+
+            // Short text is never junk — could be a page number, date, etc.
+            if (text.Length <= 10) return false;
+
+            // --- 1. Repeated character runs ---
+            // e.g. "lllllllllllllllll" or "********************" or "___________"
+            if (HasExcessiveRepeats(text)) return true;
+
+            // --- 2. Base64 blobs ---
+            // Long runs of alphanumeric + /+= with no spaces
+            if (LooksLikeBase64(text)) return true;
+
+            // --- 3. Hex dump artifacts ---
+            // e.g. "0x7fffdcc88130 sqlite3_step 0x7fffdcc88308"
+            if (LooksLikeHexDump(text)) return true;
+
+            // --- 4. Binary/encoding noise ---
+            // Very high ratio of non-letter, non-space chars
+            if (IsBinaryNoise(text)) return true;
+
+            // --- 5. No-space data blobs ---
+            // Very long strings (>200 chars) with almost no whitespace = data, not prose
+            if (IsDataBlob(text)) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Detects strings dominated by repeated characters.
+        /// e.g. "lllllllllllllll", "***************", "───────────────"
+        /// Threshold: any single char repeated 8+ times consecutively,
+        /// OR >60% of the string is the same character.
+        /// </summary>
+        private static bool HasExcessiveRepeats(string text)
+        {
+            if (text.Length < 12) return false;
+
+            // Check for consecutive runs of 8+
+            int runLen = 1;
+            char prev = text[0];
+            for (int i = 1; i < text.Length; i++)
+            {
+                if (text[i] == prev && !char.IsWhiteSpace(prev))
+                {
+                    runLen++;
+                    if (runLen >= 8) return true;
+                }
+                else
+                {
+                    prev = text[i];
+                    runLen = 1;
+                }
+            }
+
+            // Check for dominant character (>60% of non-whitespace)
+            if (text.Length >= 20)
+            {
+                Span<int> freq = stackalloc int[128]; // ASCII range
+                int nonSpace = 0;
+                for (int i = 0; i < text.Length; i++)
+                {
+                    char c = text[i];
+                    if (!char.IsWhiteSpace(c))
+                    {
+                        nonSpace++;
+                        if (c < 128) freq[c]++;
+                    }
+                }
+                if (nonSpace > 0)
+                {
+                    int maxFreq = 0;
+                    for (int i = 0; i < 128; i++)
+                        if (freq[i] > maxFreq) maxFreq = freq[i];
+                    if ((double)maxFreq / nonSpace > 0.60) return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Detects base64-encoded content.
+        /// Base64 characteristics: long alphanumeric+/+= runs, no spaces,
+        /// very even character distribution. Minimum 40 chars.
+        /// </summary>
+        private static bool LooksLikeBase64(string text)
+        {
+            if (text.Length < 40) return false;
+
+            // Count characters that are valid base64 (A-Z, a-z, 0-9, +, /, =)
+            int b64Chars = 0;
+            int spaces = 0;
+            int totalNonSpace = 0;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+                if (char.IsWhiteSpace(c)) { spaces++; continue; }
+                totalNonSpace++;
+                if (char.IsLetterOrDigit(c) || c == '+' || c == '/' || c == '=')
+                    b64Chars++;
+            }
+
+            if (totalNonSpace == 0) return false;
+
+            double b64Ratio = (double)b64Chars / totalNonSpace;
+            double spaceRatio = (double)spaces / text.Length;
+
+            // High base64 char ratio + very few spaces + reasonably long = base64 blob
+            // Threshold: >90% base64 chars, <5% spaces, >60 non-space chars
+            if (b64Ratio > 0.90 && spaceRatio < 0.05 && totalNonSpace > 60)
+            {
+                // Extra check: must have mixed case (base64 always has both)
+                bool hasUpper = false, hasLower = false, hasDigit = false;
+                for (int i = 0; i < Math.Min(text.Length, 100); i++)
+                {
+                    if (char.IsUpper(text[i])) hasUpper = true;
+                    else if (char.IsLower(text[i])) hasLower = true;
+                    else if (char.IsDigit(text[i])) hasDigit = true;
+                }
+                if (hasUpper && hasLower && hasDigit) return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Detects hex dump or memory address artifacts from device extractions.
+        /// Pattern: multiple "0x" prefixed hex values, or strings dominated by hex digits.
+        /// </summary>
+        private static bool LooksLikeHexDump(string text)
+        {
+            if (text.Length < 20) return false;
+
+            // Count "0x" occurrences — 3+ in one sentence = hex dump
+            int hexPrefixes = 0;
+            for (int i = 0; i < text.Length - 1; i++)
+            {
+                if (text[i] == '0' && text[i + 1] == 'x')
+                    hexPrefixes++;
+            }
+            if (hexPrefixes >= 3) return true;
+
+            // Dominated by hex chars (0-9, a-f, A-F) + whitespace — e.g. "4F 2A 7B 89 CC DD"
+            if (text.Length >= 30)
+            {
+                int hexChars = 0, nonSpace = 0;
+                for (int i = 0; i < text.Length; i++)
+                {
+                    char c = text[i];
+                    if (char.IsWhiteSpace(c)) continue;
+                    nonSpace++;
+                    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+                        hexChars++;
+                }
+                if (nonSpace > 0 && (double)hexChars / nonSpace > 0.85)
+                    return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Detects binary/encoding noise — text with very high ratio of
+        /// non-letter, non-digit, non-common-punctuation characters.
+        /// Normal OCR garble has letters; binary extraction has control chars and symbols.
+        /// </summary>
+        private static bool IsBinaryNoise(string text)
+        {
+            if (text.Length < 30) return false;
+
+            int garbage = 0;
+            int total = 0;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+                if (char.IsWhiteSpace(c)) continue;
+                total++;
+
+                // Normal text characters: letters, digits, common punctuation
+                if (char.IsLetterOrDigit(c)) continue;
+                if (c == '.' || c == ',' || c == ';' || c == ':' || c == '!' || c == '?') continue;
+                if (c == '\'' || c == '"' || c == '-' || c == '(' || c == ')') continue;
+                if (c == '[' || c == ']' || c == '/' || c == '@' || c == '#') continue;
+                if (c == '$' || c == '&' || c == '*' || c == '_') continue;
+
+                garbage++;
+            }
+
+            if (total == 0) return false;
+
+            // >50% non-standard characters in a 30+ char string = binary noise
+            return (double)garbage / total > 0.50;
+        }
+
+        /// <summary>
+        /// Detects long data blobs — strings over 200 chars with almost no whitespace.
+        /// Real prose always has spaces between words. Data blobs (URLs, encoded content,
+        /// concatenated identifiers) don't.
+        /// 
+        /// Exception: preserves [redact.char(N)] patterns which can be long but legitimate.
+        /// </summary>
+        private static bool IsDataBlob(string text)
+        {
+            if (text.Length < 200) return false;
+
+            // Don't flag redaction patterns — strip them before measuring
+            string stripped = text;
+            if (text.Contains("[redact.", StringComparison.Ordinal))
+            {
+                stripped = Regex.Replace(text, @"\[redact\.\w+\(\d+\)\]", "");
+                if (stripped.Length < 200) return false; // Was mostly redaction markers — that's fine
+            }
+
+            int spaces = 0;
+            for (int i = 0; i < stripped.Length; i++)
+                if (stripped[i] == ' ') spaces++;
+
+            double spaceRatio = (double)spaces / stripped.Length;
+
+            // Normal English prose: ~15-20% spaces. Data blob: <3%
+            return spaceRatio < 0.03;
         }
 
         /// <summary>
@@ -233,6 +492,39 @@ namespace ABC.DiscoveryCity.Words.Common.Processing
             // Replace start with merged sentence, remove the rest
             sentences[start] = new Sentence(mergedData);
             sentences.RemoveRange(start + 1, end - start);
+        }
+
+        // =====================================================================
+        //  Public string-level filter (for use in RunCleanUp / ingestion pipeline)
+        // =====================================================================
+
+        /// <summary>
+        /// Filters a list of sentence strings, removing junk entries.
+        /// Use this as a safety net in the ingestion pipeline AFTER sentence building,
+        /// in case junk text slips through (e.g. from non-PDF sources or pre-built text).
+        /// 
+        /// Strips the [N] prefix before testing, so it works on both raw and formatted sentences.
+        /// </summary>
+        public static List<string> FilterJunkStrings(List<string> sentences)
+        {
+            var result = new List<string>(sentences.Count);
+            foreach (var s in sentences)
+            {
+                if (string.IsNullOrWhiteSpace(s)) continue;
+
+                // Strip leading \n[123] prefix that RunCleanUp adds, to test the actual content
+                string testText = s.TrimStart('\n');
+                if (testText.Length > 0 && testText[0] == '[')
+                {
+                    int closeBracket = testText.IndexOf(']');
+                    if (closeBracket > 0 && closeBracket < 12)
+                        testText = testText.Substring(closeBracket + 1).TrimStart();
+                }
+
+                if (!IsJunkText(testText))
+                    result.Add(s);
+            }
+            return result;
         }
     }
 }
