@@ -24,14 +24,26 @@
             <TelerikCheckBox @bind-Value="@ExactMatchOnly" Id="exactMatch" />
             <label for="exactMatch" class="ms-1" title="Only return documents containing the exact search text">Exact Match</label>
         </div>
-        <div class="col-md-4">
+        <div class="col-md-3">
             <TelerikMultiSelect Data="@AvailableDataSets"
                                 @bind-Value="@SelectedDataSets"
                                 Placeholder="All DataSets"
                                 Width="100%"
                                 AutoClose="false"
-                                ClearButton="true"
                                 OnChange="@OnDataSetFilterChanged" />
+        </div>
+        <div class="col-md-3">
+            <div class="d-flex align-items-center gap-1">
+                <TelerikMultiSelect Data="@AvailableNames"
+                                    @bind-Value="@SelectedNames"
+                                    Placeholder="Name filter..."
+                                    Width="100%"
+                                    AutoClose="false"
+                                    Filterable="true"
+                                    AllowCustom="true" />
+                <TelerikButton OnClick="@OnNamesSearchClicked" Icon="@SvgIcon.Search" Title="Search with selected name filter"
+                               Enabled="@(SelectedNames.Count > 0)" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary" />
+            </div>
         </div>
     </div>
 
@@ -39,17 +51,26 @@
     {
         <div class="alert alert-info">Searching...</div>
     }
-    else if (SearchResults == null)
-    {
-        <div class="alert alert-secondary">Enter a query to start searching.</div>
-    }
-    else if (SearchResults.Count == 0)
+    else if (GridData != null && GridData.Count == 0 && TotalCount == 0 && HasSearched)
     {
         <div class="alert alert-warning">No results found.</div>
     }
-    else
+
+    @if (TotalCount > 0)
     {
-        <TelerikGrid Data="@FilteredResults" Pageable="true" PageSize="10" Sortable="true" Resizable="true" FilterMode="@GridFilterMode.FilterRow" Height="calc(100vh - 200px)">
+        <div class="mb-2 text-muted"><strong>@TotalCount.ToString("N0")</strong> documents found</div>
+    }
+    <TelerikGrid @ref="GridRef"
+                 TItem="SearchResultDto"
+                 OnRead="@OnGridRead"
+                 Sortable="true"
+                 Resizable="true"
+                 FilterMode="@GridFilterMode.FilterRow"
+                 ScrollMode="@GridScrollMode.Virtual"
+                 PageSize="50"
+                 RowHeight="60"
+                 Height="calc(100vh - 200px)"
+                 OnRowClick="@OnRowClick">
             <GridColumns>
                 <GridColumn Title="Thumb" Width="80px">
                      <Template>
@@ -75,16 +96,20 @@
                 <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date (Estimated)" Width="120px" DisplayFormat="{0:yyyy-MM-dd}" />
                 <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
                 <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
-                <GridColumn Title="People" Width="150px">
+                <GridColumn Title="Names" Width="150px">
                     <Template>
                         @{
-                            var person = context as SearchResultDto;
-                            if (person?.People != null && person.People.Count > 0)
+                            var item = context as SearchResultDto;
+                            if (item?.Names != null && item.Names.Count > 0)
                             {
                                 <div style="font-size: 0.85em; line-height: 1.4;">
-                                    @foreach (var name in person.People)
+                                    @foreach (var name in item.Names)
                                     {
-                                        <span class="badge bg-info text-dark me-1 mb-1" style="font-weight: normal;">@name</span>
+                                        <span class="badge me-1 mb-1 @(GetBadgeClass(name))"
+                                              style="font-weight: normal; cursor: pointer;"
+                                              title="Click to add to Name filter"
+                                              @onclick="() => AddNameToFilter(name)"
+                                              @onclick:stopPropagation="true">@name</span>
                                     }
                                 </div>
                             }
@@ -107,62 +132,105 @@
                     </Template>
                 </GridColumn>
             </GridColumns>
-            <DetailTemplate>
-                @{
-                    var result = context as SearchResultDto;
-                    <DocumentDetails Document="@result" />
-                }
-            </DetailTemplate>
         </TelerikGrid>
-    }
-</div>
 
-<TelerikWindow @bind-Visible="@ShowPdfWindow" Modal="true" Draggable="true" Resizable="true" Width="90%" Height="90%">
-    <WindowTitle>
-        Ref: @SelectedPdf?.FileName
-    </WindowTitle>
-    <WindowContent>
-        @if (SelectedPdf != null && !string.IsNullOrEmpty(SelectedPdf.FilePath))
+    <div class="mt-3 border rounded p-3 bg-light" style="min-height: 320px;">
+        @if (SelectedDetail != null)
         {
-            <iframe src="@GetPdfUrl(SelectedPdf.FilePath)" style="width:100%; height:100%; border:none;"></iframe>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h5 class="mb-0">@SelectedDetail.FileName</h5>
+                <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
+            </div>
+            <DocumentDetails Document="@SelectedDetail" />
         }
-    </WindowContent>
-    <WindowActions>
-        <WindowAction Name="Close" />
-    </WindowActions>
-</TelerikWindow>
+        else
+        {
+            <div style="padding: 1rem;">
+                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="50%" Height="24px" Visible="true" />
+                <div class="mt-3">
+                    <TelerikSkeleton ShapeType="@SkeletonShapeType.Rectangle" Width="100%" Height="200px" Visible="true" />
+                </div>
+                <div class="mt-2 d-flex gap-3">
+                    <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="30%" Height="16px" Visible="true" />
+                    <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="40%" Height="16px" Visible="true" />
+                </div>
+                <div class="mt-3 text-center text-muted">
+                    <em>Select a document row above to view details</em>
+                </div>
+            </div>
+        }
+    </div>
+</div>
 
 @code {
     private string SearchQuery { get; set; } = "";
-    private List<SearchResultDto>? SearchResults { get; set; }
     private bool IsSearching { get; set; } = false;
     private bool ExactMatchOnly { get; set; } = false;
+    private bool HasSearched { get; set; } = false;
+
+    // Server-side paged grid state
+    private List<SearchResultDto>? GridData { get; set; }
+    private int TotalCount { get; set; }
+
+    // Telerik grid reference for rebinding
+    private TelerikGrid<SearchResultDto>? GridRef { get; set; }
 
     // DataSet filter
     private List<string> AvailableDataSets { get; set; } = new();
     private List<string> SelectedDataSets { get; set; } = new();
     
-    // Filtered results based on dataset selection
-    private IEnumerable<SearchResultDto> FilteredResults => 
-        SelectedDataSets == null || SelectedDataSets.Count == 0 
-            ? SearchResults ?? new List<SearchResultDto>() 
-            : (SearchResults ?? new List<SearchResultDto>()).Where(r => SelectedDataSets.Contains(r.DataSetName ?? ""));
+    // Names filter
+    private List<string> AvailableNames { get; set; } = new();
+    private List<string> SelectedNames { get; set; } = new();
+    
+    // Active filters for API queries (empty = all)
+    private List<string>? ActiveDataSetFilter => 
+        SelectedDataSets is { Count: > 0 } ? SelectedDataSets : null;
+    private List<string>? ActiveNamesFilter => 
+        SelectedNames is { Count: > 0 } ? SelectedNames : null;
 
-    private bool ShowPdfWindow { get; set; } = false;
-    private SearchResultDto? SelectedPdf { get; set; }
+    private SearchResultDto? SelectedDetail { get; set; }
 
     protected override async Task OnInitializedAsync()
     {
         AvailableDataSets = await SearchService.GetDataSetNamesAsync();
-        await LoadRecentDocuments();
+        // Grid will fire OnRead automatically on first render
     }
 
-    private async Task LoadRecentDocuments()
+    /// <summary>
+    /// Telerik Grid OnRead handler — fetches one page of data from the server.
+    /// Called automatically on first render and when scrolling to new virtual pages.
+    /// </summary>
+    private async Task OnGridRead(GridReadEventArgs args)
     {
-        IsSearching = true;
+        var skip = args.Request.Skip;
+        var take = args.Request.PageSize;
+
         try
         {
-            SearchResults = await SearchService.GetRecentDocumentsAsync(50);
+            IsSearching = true;
+            StateHasChanged();
+
+            var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
+            var result = await SearchService.SearchPagedAsync(
+                query, skip, take, ExactMatchOnly,
+                ActiveDataSetFilter, ActiveNamesFilter);
+
+            args.Data = result.Items;
+            args.Total = result.TotalCount;
+
+            GridData = result.Items;
+            TotalCount = result.TotalCount;
+            HasSearched = true;
+
+            // Update names dropdown from this page's results
+            UpdateAvailableNames(result.Items);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"OnRead error: {ex.Message}");
+            args.Data = new List<SearchResultDto>();
+            args.Total = 0;
         }
         finally
         {
@@ -170,42 +238,74 @@
         }
     }
 
-    private void OnDataSetFilterChanged()
+    /// <summary>
+    /// Force the grid to re-read from the server (resets to page 0).
+    /// </summary>
+    private void RebindGrid()
     {
-        StateHasChanged();
+        GridRef?.Rebind();
+    }
+
+    private async Task OnDataSetFilterChanged()
+    {
+        RebindGrid();
+        await Task.CompletedTask;
+    }
+
+    private void AddNameToFilter(string name)
+    {
+        if (!SelectedNames.Contains(name))
+        {
+            SelectedNames = new List<string>(SelectedNames) { name };
+            if (!AvailableNames.Contains(name))
+            {
+                AvailableNames = new List<string>(AvailableNames) { name }.OrderBy(n => n).ToList();
+            }
+            StateHasChanged();
+        }
+    }
+
+    private async Task OnNamesSearchClicked()
+    {
+        if (SelectedNames.Count == 0) return;
+        RebindGrid();
+        await Task.CompletedTask;
+    }
+
+    private void UpdateAvailableNames(List<SearchResultDto> pageItems)
+    {
+        var fromResults = pageItems
+            .Where(r => r.Names != null)
+            .SelectMany(r => r.Names!)
+            .Distinct();
+        var combined = new HashSet<string>(AvailableNames); // Keep existing
+        foreach (var sp in SelectedNames) combined.Add(sp);
+        foreach (var p in fromResults) combined.Add(p);
+        AvailableNames = combined.OrderBy(n => n).ToList();
+    }
+
+    /// <summary>
+    /// Returns badge CSS class: green for exact match in filter, yellow for partial match, blue otherwise.
+    /// </summary>
+    private string GetBadgeClass(string name)
+    {
+        if (SelectedNames.Count == 0) return "bg-info text-dark";
+        if (SelectedNames.Any(sp => string.Equals(sp, name, StringComparison.OrdinalIgnoreCase)))
+            return "bg-success";
+        if (SelectedNames.Any(sp => name.Contains(sp, StringComparison.OrdinalIgnoreCase) || sp.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            return "bg-warning text-dark";
+        return "bg-info text-dark";
     }
 
     private async Task PerformSearch()
     {
-        if (string.IsNullOrWhiteSpace(SearchQuery)) return;
-
-        IsSearching = true;
-        SearchResults = null;
-        StateHasChanged();
-
-        try
-        {
-            SearchResults = await SearchService.SearchAsync(SearchQuery, 20, ExactMatchOnly);
-        }
-        catch (Exception ex)
-        {
-             Console.WriteLine($"Search UI Error: {ex.Message}");
-        }
-        finally
-        {
-            IsSearching = false;
-        }
+        RebindGrid();
+        await Task.CompletedTask;
     }
 
-    private void ViewPdf(SearchResultDto item)
+    private void OnRowClick(GridRowClickEventArgs args)
     {
-        SelectedPdf = item;
-        ShowPdfWindow = true;
-    }
-
-    private string GetPdfUrl(string filePath)
-    {
-        // Use the generic file viewer endpoint with PDF mime type handling
-        return $"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(filePath)}";
+        var item = args.Item as SearchResultDto;
+        SelectedDetail = (SelectedDetail == item) ? null : item;
     }
 }
