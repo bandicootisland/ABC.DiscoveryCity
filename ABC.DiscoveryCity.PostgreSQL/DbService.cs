@@ -81,29 +81,42 @@ public partial class DbService
     // Default connection string for convenience, but allows override
     private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
 
+    // Static shared pool — built once, reused by all DbService instances (prevents connection leak)
+    private static NpgsqlDataSource? _sharedDataSource;
+    private static string? _sharedConnectionString;
+    private static readonly object _dataSourceLock = new();
+
     public DbService(IEmbeddingService? embeddingService = null, string? connectionString = null)
     {
         _embeddingService = embeddingService;
         _connectionString = connectionString ?? DefaultConnectionString;
         
         EnsurePgvectorMapping();
-        var builder = new NpgsqlDataSourceBuilder(_connectionString);
-        builder.UseVector();
-        _dataSource = builder.Build();
+        _dataSource = GetOrCreateSharedDataSource(_connectionString);
         LoadBasePaths();
     }
 
     /// <summary>
-    /// Constructor that accepts a pre-built NpgsqlDataSource (shared singleton pool).
-    /// Use this in DI to avoid creating a new connection pool per scoped request.
+    /// Returns a shared NpgsqlDataSource for the given connection string.
+    /// The pool is built once and reused across all DbService instances,
+    /// preventing connection pool leaks when DbService is registered as Scoped in DI.
     /// </summary>
-    public DbService(NpgsqlDataSource dataSource, IEmbeddingService? embeddingService = null)
+    private static NpgsqlDataSource GetOrCreateSharedDataSource(string connectionString)
     {
-        _embeddingService = embeddingService;
-        _dataSource = dataSource;
-        _connectionString = dataSource.ConnectionString;
-        EnsurePgvectorMapping();
-        LoadBasePaths();
+        if (_sharedDataSource != null && _sharedConnectionString == connectionString)
+            return _sharedDataSource;
+
+        lock (_dataSourceLock)
+        {
+            if (_sharedDataSource != null && _sharedConnectionString == connectionString)
+                return _sharedDataSource;
+
+            var builder = new NpgsqlDataSourceBuilder(connectionString);
+            builder.UseVector();
+            _sharedDataSource = builder.Build();
+            _sharedConnectionString = connectionString;
+            return _sharedDataSource;
+        }
     }
 
     /// <summary>
