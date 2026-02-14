@@ -60,6 +60,10 @@ public class ImagesController : ControllerBase
                 ".jpeg" => "image/jpeg",
                 ".png" => "image/png",
                 ".json" => "application/json",
+                ".mp4" => "video/mp4",
+                ".m4a" => "audio/mp4",
+                ".avi" => "video/x-msvideo",
+                ".vob" => "video/mpeg",
                 _ => "application/octet-stream"
             };
             

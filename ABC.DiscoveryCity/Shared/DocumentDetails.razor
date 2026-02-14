@@ -53,11 +53,28 @@
             </div>
         </div>
     </TabStripTab>
-    <TabStripTab Title="PDF Viewer">
+    <TabStripTab Title="@(IsMediaFile ? "Media Player" : "PDF Viewer")">
         <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
             <SplitterPanes>
-                <SplitterPane Size="66%">
-                    @if (IsLoadingPdf)
+                <SplitterPane Size="55%">
+                    @if (IsMediaFile)
+                    {
+                        @if (IsVideoFile)
+                        {
+                            <video controls style="width: 100%; max-height: 780px;"
+                                   src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(MediaFilePath)}")">
+                                Your browser does not support video playback.
+                            </video>
+                        }
+                        else
+                        {
+                            <audio controls style="width: 100%; margin-top: 40px;"
+                                   src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(MediaFilePath)}")">
+                                Your browser does not support audio playback.
+                            </audio>
+                        }
+                    }
+                    else if (IsLoadingPdf)
                     {
                         <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
                             <TelerikLoader Visible="true" />
@@ -67,6 +84,7 @@
                     else if (PdfData != null && PdfData.Length > 0)
                     {
                         <TelerikPdfViewer Data="@PdfData"
+                                          Zoom="1.0m"
                                           Width="100%"
                                           Height="100%" />
                     }
@@ -145,6 +163,28 @@
 
     private string RemoteUrl => Document?.SourceUrl ?? "";
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
+
+    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".avi", ".mp4", ".vob" };
+    private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".m4a" };
+
+    private bool IsMediaFile => Document?.FileName != null &&
+        (VideoExtensions.Contains(Path.GetExtension(Document.FileName)) ||
+         AudioExtensions.Contains(Path.GetExtension(Document.FileName)));
+
+    private bool IsVideoFile => Document?.FileName != null &&
+        VideoExtensions.Contains(Path.GetExtension(Document.FileName));
+
+    private string MediaFilePath
+    {
+        get
+        {
+            var path = Document?.FilePath ?? "";
+            var dir = Path.GetDirectoryName(path) ?? "";
+            return Path.Combine(dir, Path.ChangeExtension(Path.GetFileName(path), ".mp4"));
+        }
+    }
 
     protected override void OnParametersSet()
     {
