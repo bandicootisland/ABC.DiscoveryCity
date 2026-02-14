@@ -440,7 +440,8 @@ int totalFiles = 0;
 int startedFiles = 0;   // Atomically claimed BEFORE work begins (for accurate limit enforcement)
 int processedFiles = 0;  // Incremented AFTER work completes
 int skippedFiles = 0;
-var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>(); 
+var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>();
+var imageThrottle = new SemaphoreSlim(10); // Cap concurrent image tasks to control memory
 
 Console.WriteLine($"Root Folder: {rootFolder}");
 
@@ -672,8 +673,14 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
             // 2. Add newline before EFTA file IDs (e.g., EFTA00039885)
             s = Regex.Replace(s, @"(EFTA\d{8,})", "\n$1");
 
+            // 3. Fix OCR text artifacts: bracket spaces "( M"→"(M", URL spaces
+            s = SentencePostProcessor.CleanTextArtifacts(s);
+
             cleaned.Add(s.Trim());
         }
+
+        // Phase 1.5: Merge ellipsis fragments — consecutive "." strings combine with previous
+        cleaned = SentencePostProcessor.MergeEllipsisSentences(cleaned);
 
         // Phase 2: Filter junk BEFORE numbering (no gaps in sequence)
         cleaned = SentencePostProcessor.FilterJunkStrings(cleaned);
@@ -729,6 +736,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
     {
         var imageTask = Task.Run(async () =>
         {
+            await imageThrottle.WaitAsync(); // Throttle: max 10 concurrent image tasks
             try
             {
                 string thumbPath = ""; int thumbW = 0, thumbH = 0;
@@ -785,6 +793,10 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
             catch (Exception ex)
             {
                 Console.WriteLine($"  [WARN] Page image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
+            }
+            finally
+            {
+                imageThrottle.Release();
             }
         });
         pendingImageTasks.Add(imageTask);
