@@ -1,4 +1,5 @@
 @page "/search"
+@using System.Text.RegularExpressions
 @using ABC.DiscoveryCity.Services
 @using Telerik.Blazor
 @using Telerik.Blazor.Components
@@ -193,7 +194,9 @@
 
     protected override async Task OnInitializedAsync()
     {
-        AvailableDataSets = await SearchService.GetDataSetNamesAsync();
+        AvailableDataSets = (await SearchService.GetDataSetNamesAsync())
+            .OrderBy(n => Regex.Replace(n, @"\d+", m => m.Value.PadLeft(10, '0')))
+            .ToList();
         // Grid will fire OnRead automatically on first render
     }
 

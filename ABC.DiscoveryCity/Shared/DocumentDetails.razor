@@ -56,7 +56,7 @@
     <TabStripTab Title="PDF Viewer">
         <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
             <SplitterPanes>
-                <SplitterPane Size="66%">
+                <SplitterPane Size="55%">
                     @if (IsLoadingPdf)
                     {
                         <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
@@ -67,6 +67,7 @@
                     else if (PdfData != null && PdfData.Length > 0)
                     {
                         <TelerikPdfViewer Data="@PdfData"
+                                          Zoom="1.0m"
                                           Width="100%"
                                           Height="100%" />
                     }
