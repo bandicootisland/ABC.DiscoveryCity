@@ -78,7 +78,8 @@ public class ThumbnailService : IDisposable, IAsyncDisposable
         var browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
             {
                 Headless = headless,
-                Args = new[] { "--no-sandbox", "--disable-setuid-sandbox", "--allow-file-access-from-files" }
+                Args = new[] { "--no-sandbox", "--disable-setuid-sandbox", "--allow-file-access-from-files" },
+                
             });
 
         for (int i = 0; i < instancecount; i++)
