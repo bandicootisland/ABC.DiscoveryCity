@@ -13,6 +13,7 @@ public class PdfMetadata
     public DateTime DeducedDate { get; set; }
     public List<string> Text { get; set; } = new();
     public List<string> Names { get; set; } = new();
+    public List<string> Terms { get; set; } = new();
 
     // --- Enriched metadata (added for JSONB searchability) ---
     public string DataSetName { get; set; } = "";
@@ -39,6 +40,7 @@ public class PdfMetadata
         CreationDate = CreationDate,
         DeducedDate = DeducedDate,
         Names = Names,
+        Terms = Terms,
         DataSetName = DataSetName,
         SourceName = SourceName,
         OriginalFilePath = OriginalFilePath,
@@ -65,6 +67,7 @@ public class PdfMetadataForStorage
     public DateTime CreationDate { get; set; }
     public DateTime DeducedDate { get; set; }
     public List<string> Names { get; set; } = new();
+    public List<string> Terms { get; set; } = new();
 
     // --- Enriched metadata ---
     public string DataSetName { get; set; } = "";

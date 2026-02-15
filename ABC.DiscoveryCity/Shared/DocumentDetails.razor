@@ -6,7 +6,7 @@
 @using Telerik.Blazor.Components.Common.Icon
 @inject SearchService SearchService
 
-<TelerikTabStrip ActiveTabIndex="@_activeTabIndex" ActiveTabIndexChanged="@OnTabChanged">
+<TelerikTabStrip ActiveTabIndex="@ActiveTabIndex" ActiveTabIndexChanged="@OnTabChanged">
     <TabStripTab Title="Overview">
         <div class="p-3">
              <div class="row">
@@ -41,7 +41,7 @@
                             <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
                             @if (!string.IsNullOrEmpty(Document?.Text))
                             {
-                                @((MarkupString)Document.Text.FormatWithSentenceBreaks())
+                                @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
                             }
                             else
                             {
@@ -85,7 +85,7 @@
                             <div style="color: #666; margin-bottom: 1em;">[Sentence]<br/><br/></div>
                             @if (!string.IsNullOrEmpty(Document?.Text))
                             {
-                                @((MarkupString)Document.Text.FormatWithSentenceBreaks())
+                                @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
                             }
                             else
                             {
@@ -130,7 +130,7 @@
                 <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
                 @if (!string.IsNullOrEmpty(Document?.Text))
                 {
-                    @((MarkupString)Document.Text.FormatWithSentenceBreaks())
+                    @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
                 }
                 else
                 {
@@ -164,7 +164,7 @@
                                 {
                                     <tr>
                                         <td><strong>@entry.Key</strong></td>
-                                        <td class="text-break" style="font-family: 'Consolas', monospace; font-size: 0.9em;">@entry.Value</td>
+                                        <td class="text-break" style="font-family: 'Consolas', monospace; font-size: 0.9em;">@((MarkupString)System.Net.WebUtility.HtmlEncode(entry.Value).HighlightSearchTerms(SearchQuery))</td>
                                     </tr>
                                 }
                             </tbody>
@@ -184,10 +184,18 @@
     [Parameter]
     public SearchResultDto? Document { get; set; }
 
+    [Parameter]
+    public int ActiveTabIndex { get; set; }
+
+    [Parameter]
+    public EventCallback<int> ActiveTabIndexChanged { get; set; }
+
+    [Parameter]
+    public string SearchQuery { get; set; } = "";
+
     private byte[]? ViewerData { get; set; }
     private bool IsLoadingViewer { get; set; }
     private string? LoadedViewerPath { get; set; }
-    private int _activeTabIndex;
 
     private string RemoteUrl => Document?.SourceUrl ?? "";
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
@@ -263,19 +271,25 @@
         _ => "Sentence"
     };
 
-    protected override void OnParametersSet()
+    protected override async Task OnParametersSetAsync()
     {
         if (Document?.FilePath != LoadedViewerPath)
         {
             ViewerData = null;
             LoadedViewerPath = null;
-            _activeTabIndex = 0;
+            // Keep current tab — parent controls ActiveTabIndex
+            // If already on Viewer tab, auto-load the new document
+            if (ActiveTabIndex == 1 && HasNativeViewer)
+            {
+                await LoadViewerDataAsync();
+            }
         }
     }
 
     private async Task OnTabChanged(int index)
     {
-        _activeTabIndex = index;
+        ActiveTabIndex = index;
+        await ActiveTabIndexChanged.InvokeAsync(index);
         if (index == 1 && HasNativeViewer && ViewerData == null && !IsLoadingViewer)
         {
             await LoadViewerDataAsync();

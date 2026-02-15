@@ -70,13 +70,45 @@ public class SearchController : ControllerBase
         var datasetNames = datasets?.Where(s => !string.IsNullOrEmpty(s)).ToList();
         var nameValues = names?.Where(s => !string.IsNullOrEmpty(s)).ToList();
 
-        // No search query — use direct OFFSET/LIMIT (no caching benefit for browsing all docs)
+        // No search query — use cached two-phase browse (mirrors the search cache pattern)
         if (string.IsNullOrWhiteSpace(query))
         {
-            var (items, totalCount) = await _dbService.SearchPagedAsync(
-                null, skip, take, exactMatch, datasetNames, nameValues);
-            var recentDtos = items.Select(MapToDto).ToList();
-            return Ok(new PagedSearchResult { Items = recentDtos, TotalCount = totalCount });
+            var browseCacheKey = BuildBrowseCacheKey(datasetNames, nameValues);
+
+            var browseEntry = _cache.GetOrCreate(browseCacheKey, cacheEntry =>
+            {
+                cacheEntry.SlidingExpiration = TimeSpan.FromMinutes(5);
+                Console.WriteLine("[BrowseCache] MISS — loading browse IDs");
+                var (ids, realTotal) = _dbService.GetBrowseDocumentIds(datasetNames, nameValues);
+                return new BrowseCacheEntry { Ids = ids, TotalCount = realTotal };
+            })!;
+
+            var browsePageIds = browseEntry.Ids.Skip(skip).Take(take).ToArray();
+            var browseReadAheadIds = browseEntry.Ids.Skip(skip + take).Take(ReadAhead).ToArray();
+            var browseAllNeeded = browsePageIds.Concat(browseReadAheadIds).ToArray();
+            var browseMissing = browseAllNeeded.Where(id => !browseEntry.Records.ContainsKey(id)).ToArray();
+
+            if (browseMissing.Length > 0)
+            {
+                var cacheHits = browseAllNeeded.Length - browseMissing.Length;
+                Console.WriteLine($"[BrowseCache] Hydrating {browseMissing.Length} records ({cacheHits} cache hits, {browseReadAheadIds.Length} read-ahead)");
+                var hydrated = _dbService.HydrateByIds(browseMissing);
+                foreach (var record in hydrated)
+                    browseEntry.Records[record.Id] = MapToDto(record);
+            }
+            else
+            {
+                Console.WriteLine($"[BrowseCache] Full cache hit — {browsePageIds.Length} records from memory");
+            }
+
+            var browseDtos = new List<SearchResultDto>(browsePageIds.Length);
+            foreach (var id in browsePageIds)
+            {
+                if (browseEntry.Records.TryGetValue(id, out var dto))
+                    browseDtos.Add(dto);
+            }
+
+            return Ok(new PagedSearchResult { Items = browseDtos, TotalCount = browseEntry.TotalCount });
         }
 
         // Search query present — use cached two-phase approach
@@ -137,6 +169,17 @@ public class SearchController : ControllerBase
         public Dictionary<int, SearchResultDto> Records { get; } = new();
     }
 
+    /// <summary>
+    /// Holds cached browse state for no-query browsing: sorted ID list + hydrated DTOs.
+    /// Same pattern as SearchCacheEntry but for the "all documents by date" path.
+    /// </summary>
+    private class BrowseCacheEntry
+    {
+        public int[] Ids { get; set; } = Array.Empty<int>();
+        public int TotalCount { get; set; }
+        public Dictionary<int, SearchResultDto> Records { get; } = new();
+    }
+
     private static string BuildCacheKey(string query, bool exactMatch,
         List<string>? datasets, List<string>? names)
     {
@@ -148,6 +191,23 @@ public class SearchController : ControllerBase
         if (datasets is { Count: > 0 })
         {
             sb.Append(":ds=");
+            sb.Append(string.Join(",", datasets.OrderBy(d => d)));
+        }
+        if (names is { Count: > 0 })
+        {
+            sb.Append(":nm=");
+            sb.Append(string.Join(",", names.OrderBy(n => n)));
+        }
+        return sb.ToString();
+    }
+
+    private static string BuildBrowseCacheKey(List<string>? datasets, List<string>? names)
+    {
+        var sb = new StringBuilder();
+        sb.Append("browse:");
+        if (datasets is { Count: > 0 })
+        {
+            sb.Append("ds=");
             sb.Append(string.Join(",", datasets.OrderBy(d => d)));
         }
         if (names is { Count: > 0 })
@@ -171,7 +231,8 @@ public class SearchController : ControllerBase
         SourceName = r.SourceName,
         DataSetName = r.DataSetName,
         SourceUrl = r.SourceUrl,
-        Names = ParseNamesJson(r.Names),
+        Names = ParseJsonStringArray(r.Names),
+        Terms = ParseJsonStringArray(r.Terms),
         MetadataJson = r.MetadataJson
     };
 
@@ -204,15 +265,15 @@ public class SearchController : ControllerBase
     }
 
     /// <summary>
-    /// Parse Names JSON array string from JSONB metadata into a List.
-    /// The DB returns it as a raw JSON string like ["Name1","Name2"].
+    /// Parse a JSON string array from JSONB metadata into a List.
+    /// The DB returns it as a raw JSON string like ["Item1","Item2"].
     /// </summary>
-    private static List<string>? ParseNamesJson(string? namesJson)
+    private static List<string>? ParseJsonStringArray(string? json)
     {
-        if (string.IsNullOrWhiteSpace(namesJson)) return null;
+        if (string.IsNullOrWhiteSpace(json)) return null;
         try
         {
-            return JsonSerializer.Deserialize<List<string>>(namesJson);
+            return JsonSerializer.Deserialize<List<string>>(json);
         }
         catch
         {
@@ -237,6 +298,7 @@ public class SearchResultDto
     public string? DataSetName { get; set; }
     public string? SourceUrl { get; set; }
     public List<string>? Names { get; set; }
+    public List<string>? Terms { get; set; }
     public string MetadataJson { get; set; } = "{}";
 }
 

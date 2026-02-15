@@ -219,7 +219,7 @@ if (reprocessMode)
                 }
 
                 // --- Reprocess steps (add future extractions here) ---
-                var extractedNames = ExtractNamesFromText(fullText);
+                var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
 
                 // Merge into existing metadata
                 var metadata = string.IsNullOrWhiteSpace(metadataJson)
@@ -232,6 +232,12 @@ if (reprocessMode)
                     metadata["Names"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedNames));
                 else
                     metadata.Remove("Names");
+
+                // Update Terms field
+                if (extractedTerms.Count > 0)
+                    metadata["Terms"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedTerms));
+                else
+                    metadata.Remove("Terms");
 
                 // Write back updated metadata
                 string updatedJson = JsonSerializer.Serialize(metadata);
@@ -627,14 +633,15 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
     // 2. Extract Metadata & Deduce Date
     var deducedDate = DeduceDateFromText(fullText);
     var deducedTitle = DeduceTitleFromText(fullText, System.IO.Path.GetFileNameWithoutExtension(pdfPath));
-    var extractedNames = ExtractNamesFromText(fullText);
-    
+    var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
+
     if (inspectMode)
     {
         Console.WriteLine($"\n[INSPECT] Deduced Date: {deducedDate:yyyy-MM-dd}");
         Console.WriteLine($"[INSPECT] Deduced Title: {deducedTitle}");
         Console.WriteLine($"[INSPECT] Names: {string.Join(", ", extractedNames)}");
-        return; 
+        Console.WriteLine($"[INSPECT] Terms: {string.Join(", ", extractedTerms)}");
+        return;
     }
 
     // Gather file-level info for enriched metadata
@@ -663,6 +670,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
         DeducedDate = deducedDate ?? DateTime.MinValue,
         Text = RunCleanUp(digitalBook.Sentences.Select(s => s.text).ToList()),
         Names = extractedNames,
+        Terms = extractedTerms,
         // Enriched metadata
         DataSetName = dataSetName ?? "",
         SourceName = sourceFolderName ?? "",
@@ -845,9 +853,9 @@ async Task ProcessSpreadsheet(string filePath, int? dataSetId = null, string? pu
     var result = SpreadsheetLoader.Load(filePath);
     var sentences = SpreadsheetLoader.ToSentences(result);
 
-    // 2. Build combined text for name extraction
+    // 2. Build combined text for name/term extraction
     string fullText = string.Join(" ", result.Rows.Select(r => r.Text));
-    var extractedNames = ExtractNamesFromText(fullText);
+    var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
 
     // Ensure Published output directory exists
     if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
@@ -864,6 +872,7 @@ async Task ProcessSpreadsheet(string filePath, int? dataSetId = null, string? pu
         PageCount = result.SheetCount,
         Text = sentences,
         Names = extractedNames,
+        Terms = extractedTerms,
         DataSetName = dataSetName ?? "",
         SourceName = sourceFolderName ?? "",
         OriginalFilePath = filePath,
@@ -1187,28 +1196,25 @@ string CleanMimeArtifacts(string text)
 }
 
 /// <summary>
-/// Extract names from document text using regex/heuristic patterns.
-/// Targets email headers (From:, To:, Cc:, Sent by:) and common name patterns.
+/// Extract names and terms from document text using regex/heuristic patterns.
+/// Names: high-confidence person names from email headers, salutations, and contextual patterns.
+/// Terms: broader capitalized-word pairs that may be names, places, or notable phrases.
 /// </summary>
-List<string> ExtractNamesFromText(string text)
+(List<string> Names, List<string> Terms) ExtractNamesAndTerms(string text)
 {
     var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    if (string.IsNullOrWhiteSpace(text)) return names.ToList();
+    var terms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    if (string.IsNullOrWhiteSpace(text)) return (new List<string>(), new List<string>());
 
     // Use first 8000 chars - most names appear in headers at the top
     string snippet = text.Length > 8000 ? text.Substring(0, 8000) : text;
 
-    // --- 1. Email header patterns (From:, To:, Cc:, Sent by:) ---
-    // Matches "From: FirstName LastName" or "To: FirstName LastName"
-    // Stops at common non-name tokens (email, angle brackets, dates, etc.)
+    // --- 1. Email header patterns (From:, To:, Cc:, Sent by:) → Names ---
     // NOTE: [a-z=] and [A-Z=] allow '=' as a wildcard for MIME-damaged characters
-    //       e.g. "Ep=tein" matches as a name, then '=' is stripped in CleanExtractedName
     var headerPatterns = new[]
     {
         @"(?:From|To|Cc|Bcc|Sent\s*(?:by)?)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
-        // "From: Jeffrey Epstein <email>"
         @"(?:From|To|Cc|Bcc)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*<",
-        // Multi-recipient: "To: FirstName LastName; FirstName2 LastName2"
         @"(?:To|Cc|Bcc)\s*:\s*(?:(?:[A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*;\s*)*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
     };
 
@@ -1221,33 +1227,32 @@ List<string> ExtractNamesFromText(string text)
         }
     }
 
-    // --- 2. "Dear X" / "Hi X" / "Hello X" patterns ---
+    // --- 2. "Dear X" / "Hi X" / "Hello X" patterns → Names ---
     foreach (Match m in Regex.Matches(snippet, @"\b(?:Dear|Hi|Hello|Attn)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20})?)", RegexOptions.None))
     {
         var name = CleanExtractedName(m.Groups[1].Value);
         if (IsValidPersonName(name)) names.Add(name);
     }
 
-    // --- 3. Known-name-context patterns ---
-    // "Appt w/ PersonName" or "LUNCH w/ PersonName" or "meeting with PersonName"
+    // --- 3. Known-name-context patterns → Names ---
     foreach (Match m in Regex.Matches(snippet, @"\b(?:w/|with|meeting\s+with|Appt\s+w/|LUNCH\s+w/)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20}))", RegexOptions.None))
     {
         var name = CleanExtractedName(m.Groups[1].Value);
         if (IsValidPersonName(name)) names.Add(name);
     }
 
-    // --- 4. Capitalized "Firstname Lastname" sequences that look like person names ---
-    // This is the broadest pattern - two adjacent capitalized words not matching common non-name patterns
+    // --- 4. Capitalized "Firstname Lastname" sequences → Terms (unless already a Name) ---
     foreach (Match m in Regex.Matches(snippet, @"\b([A-Z=][a-z=]{2,15}\s+[A-Z=][a-z=]{2,20})\b"))
     {
-        var candidate = m.Groups[1].Value;
+        var candidate = CleanExtractedName(m.Groups[1].Value);
         if (IsValidPersonName(candidate) && !IsCommonPhrase(candidate))
         {
-            names.Add(candidate);
+            if (!names.Contains(candidate))
+                terms.Add(candidate);
         }
     }
 
-    return names.OrderBy(p => p).ToList();
+    return (names.OrderBy(p => p).ToList(), terms.OrderBy(t => t).ToList());
 }
 
 string CleanExtractedName(string name)

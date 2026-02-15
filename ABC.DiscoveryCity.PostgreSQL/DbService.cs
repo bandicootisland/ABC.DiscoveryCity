@@ -969,6 +969,7 @@ public partial class DbService
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'Names' as Names,
+                   p.Metadata->>'Terms' as Terms,
                    p.Metadata::text as MetadataJson,
                    s.Url as SourceUrl
             FROM ParentDocuments p
@@ -1056,6 +1057,7 @@ public partial class DbService
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'Names' as Names,
+                   p.Metadata->>'Terms' as Terms,
                    p.Metadata::text as MetadataJson,
                    s.Url as SourceUrl
             FROM matching_docs md
@@ -1142,6 +1144,7 @@ public partial class DbService
                        s.Name as SourceName,
                        d.Name as DataSetName,
                        p.Metadata->>'Names' as Names,
+                       p.Metadata->>'Terms' as Terms,
                        p.Metadata::text as MetadataJson,
                        s.Url as SourceUrl
                 FROM matching_docs md
@@ -1215,6 +1218,7 @@ public partial class DbService
                        r.SourceName,
                        r.DataSetName,
                        r.Metadata->>'Names' as Names,
+                       r.Metadata->>'Terms' as Terms,
                        r.Metadata::text as MetadataJson,
                        r.SourceUrl
                 FROM ranked r
@@ -1314,6 +1318,7 @@ public partial class DbService
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'Names' as Names,
+                   p.Metadata->>'Terms' as Terms,
                    p.Metadata::text as MetadataJson,
                    s.Url as SourceUrl
             FROM ParentDocuments p
@@ -1409,6 +1414,7 @@ public partial class DbService
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'Names' as Names,
+                   p.Metadata->>'Terms' as Terms,
                    p.Metadata::text as MetadataJson,
                    s.Url as SourceUrl
             FROM matching_docs md
@@ -1499,6 +1505,7 @@ public partial class DbService
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'Names' as Names,
+                   p.Metadata->>'Terms' as Terms,
                    p.Metadata::text as MetadataJson,
                    s.Url as SourceUrl
             FROM matching_docs md
@@ -1628,6 +1635,54 @@ public partial class DbService
     }
 
     /// <summary>
+    /// Lightweight query returning document IDs ordered by ProcessedAt DESC (no search predicates).
+    /// Returns both the IDs (capped at 50K for cache) and the real total count for UI display.
+    /// Used by the browse cache — run once, cache the IDs, hydrate pages via HydrateByIds.
+    /// </summary>
+    public (int[] Ids, int TotalCount) GetBrowseDocumentIds(
+        List<string>? datasetNames = null, List<string>? nameValues = null)
+    {
+        using var conn = _dataSource.OpenConnection();
+        var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
+
+        var whereClauses = new List<string>();
+        if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
+        if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+        var whereClause = whereClauses.Count > 0
+            ? "WHERE " + string.Join(" AND ", whereClauses)
+            : "";
+
+        // Real total count for UI display
+        var countSql = $@"SELECT COUNT(*) FROM ParentDocuments p
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id {whereClause}";
+        using var countCmd = new NpgsqlCommand(countSql, conn);
+        countCmd.CommandTimeout = 120;
+        if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
+
+        // IDs capped at 50K for cache-based paging
+        var sql = $@"
+            SELECT p.Id
+            FROM ParentDocuments p
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            {whereClause}
+            ORDER BY p.ProcessedAt DESC
+            LIMIT 50000;";
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.CommandTimeout = 120;
+        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+
+        var ids = new List<int>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) ids.Add(reader.GetInt32(0));
+        return (ids.ToArray(), totalCount);
+    }
+
+    /// <summary>
     /// Hydrate full DocumentSearchResult rows for a page of IDs.
     /// Uses WHERE p.Id = ANY(@ids) + array_position to preserve the search-ranked order.
     /// </summary>
@@ -1651,6 +1706,7 @@ public partial class DbService
                    s.Name as SourceName,
                    d.Name as DataSetName,
                    p.Metadata->>'Names' as Names,
+                   p.Metadata->>'Terms' as Terms,
                    p.Metadata::text as MetadataJson,
                    s.Url as SourceUrl
             FROM ParentDocuments p
@@ -1710,10 +1766,10 @@ public partial class DbService
     }
 
     /// <summary>
-    /// Shared reader for the standardized 15-column search result layout.
+    /// Shared reader for the standardized 16-column search result layout.
     /// Column order: FileName, FilePath, PdfFolder, ImageFolder, Text, Distance/Score,
-    /// DocDate, PageCount, ThumbFileName, FullImgFileName, SourceName, DataSetName, People, MetadataJson, SourceUrl
-    /// idOffset allows prepending extra columns (e.g. p.Id) before the standard 15.
+    /// DocDate, PageCount, ThumbFileName, FullImgFileName, SourceName, DataSetName, Names, Terms, MetadataJson, SourceUrl
+    /// idOffset allows prepending extra columns (e.g. p.Id) before the standard 16.
     /// </summary>
     private static DocumentSearchResult ReadSearchResult(NpgsqlDataReader reader, int idOffset = 0)
     {
@@ -1733,8 +1789,9 @@ public partial class DbService
             SourceName         = reader.IsDBNull(10+o) ? null : reader.GetString(10+o),
             DataSetName        = reader.IsDBNull(11+o) ? null : reader.GetString(11+o),
             Names              = reader.IsDBNull(12+o) ? null : reader.GetString(12+o),
-            MetadataJson       = reader.IsDBNull(13+o) ? "{}" : reader.GetString(13+o),
-            SourceUrl          = reader.IsDBNull(14+o) ? null : reader.GetString(14+o)
+            Terms              = reader.IsDBNull(13+o) ? null : reader.GetString(13+o),
+            MetadataJson       = reader.IsDBNull(14+o) ? "{}" : reader.GetString(14+o),
+            SourceUrl          = reader.IsDBNull(15+o) ? null : reader.GetString(15+o)
         };
     }
 
@@ -1912,6 +1969,7 @@ public class DocumentSearchResult
     public string? SourceName { get; set; }
     public string? DataSetName { get; set; }
     public string? Names { get; set; }
+    public string? Terms { get; set; }
     public string MetadataJson { get; set; } = "{}";
     public string? SourceUrl { get; set; }
 

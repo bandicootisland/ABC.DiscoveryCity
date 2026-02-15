@@ -21,11 +21,7 @@
                    OnDataSetChanged="@OnDataSetFilterChanged"
                    OnNamesSearch="@OnNamesSearchRequested" />
 
-    @if (IsSearching)
-    {
-        <div class="alert alert-info">Searching...</div>
-    }
-    else if (GridData != null && GridData.Count == 0 && TotalCount == 0 && HasSearched)
+    @if (GridData != null && GridData.Count == 0 && TotalCount == 0 && HasSearched)
     {
         <div class="alert alert-warning">No results found.</div>
     }
@@ -34,97 +30,106 @@
     {
         <div class="mb-2 text-muted"><strong>@TotalCount.ToString("N0")</strong> documents found</div>
     }
-    <TelerikGrid @ref="GridRef"
-                 TItem="SearchResultDto"
-                 OnRead="@OnGridRead"
-                 Sortable="true"
-                 Resizable="true"
-                 FilterMode="@GridFilterMode.FilterRow"
-                 ScrollMode="@GridScrollMode.Virtual"
-                 PageSize="50"
-                 RowHeight="60"
-                 Height="calc(100vh - 200px)"
-                 OnRowClick="@OnRowClick">
-            <GridColumns>
-                <GridColumn Title="Thumb" Width="80px">
-                     <Template>
-                        @{
-                            var item = context as SearchResultDto;
-                            var thumbPath = item?.ThumbnailPath;
-                            if (!string.IsNullOrEmpty(thumbPath))
-                            {
-                                <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(thumbPath)}")"
-                                     style="width: 50px; height: auto; border: 1px solid #ddd; border-radius: 4px;"
-                                     alt="Thumb" />
-                            }
-                            else
-                            {
-                                <div style="width: 50px; height: 70px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #aaa;">
-                                    <TelerikIcon Icon="@GetFileIcon(item?.FileName)" />
-                                </div>
-                            }
-                        }
-                     </Template>
-                </GridColumn>
-                <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
-                <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date (Estimated)" Width="120px" DisplayFormat="{0:yyyy-MM-dd}" />
-                <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
-                <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
-                <GridColumn Title="Names" Width="150px">
-                    <Template>
-                        @{
-                            var item = context as SearchResultDto;
-                            <NameBadges Names="@(item?.Names ?? new())"
-                                        SelectedNames="@SelectedNames"
-                                        OnNameClicked="@AddNameToFilter" />
-                        }
-                    </Template>
-                </GridColumn>
-                <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" DisplayFormat="{0:F4}" Width="100px" />
-                <GridColumn Field="@nameof(SearchResultDto.Text)" Title="Preview Text">
-                    <Template>
-                        @{
-                            var item = context as SearchResultDto;
-                            var preview = item?.Text?.Length > 300 ? item.Text.Substring(0, 300) + "..." : item?.Text;
-                            var formatted = preview.FormatWithSentenceBreaks();
-                            <span title="@item?.Text">@((MarkupString)formatted)</span>
-                        }
-                    </Template>
-                </GridColumn>
-            </GridColumns>
-        </TelerikGrid>
-
-    <div class="mt-3 border rounded p-3 bg-light" style="min-height: 320px;">
-        @if (SelectedDetail != null)
-        {
-            <div class="d-flex justify-content-between align-items-center mb-2">
-                <h5 class="mb-0">@SelectedDetail.FileName</h5>
-                <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
-            </div>
-            <DocumentDetails Document="@SelectedDetail" />
-        }
-        else
-        {
-            <div style="padding: 1rem;">
-                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="50%" Height="24px" Visible="true" />
-                <div class="mt-3">
-                    <TelerikSkeleton ShapeType="@SkeletonShapeType.Rectangle" Width="100%" Height="200px" Visible="true" />
+    <TelerikSplitter Orientation="@SplitterOrientation.Vertical" Height="calc(100vh - 160px)">
+        <SplitterPanes>
+            <SplitterPane Size="650px" Min="300px">
+                <TelerikGrid @ref="GridRef"
+                             TItem="SearchResultDto"
+                             OnRead="@OnGridRead"
+                             Sortable="true"
+                             Resizable="true"
+                             FilterMode="@GridFilterMode.FilterRow"
+                             ScrollMode="@GridScrollMode.Virtual"
+                             EnableLoaderContainer="false"
+                             PageSize="50"
+                             RowHeight="60"
+                             Height="100%"
+                             OnRowClick="@OnRowClick">
+                    <GridColumns>
+                        <GridColumn Title="Thumb" Width="80px">
+                             <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var thumbPath = item?.ThumbnailPath;
+                                    if (!string.IsNullOrEmpty(thumbPath))
+                                    {
+                                        <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(thumbPath)}")"
+                                             style="width: 50px; height: auto; border: 1px solid #ddd; border-radius: 4px;"
+                                             alt="Thumb" />
+                                    }
+                                    else
+                                    {
+                                        <div style="width: 50px; height: 70px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #aaa;">
+                                            <TelerikIcon Icon="@GetFileIcon(item?.FileName)" />
+                                        </div>
+                                    }
+                                }
+                             </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
+                        <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date (Estimated)" Width="120px" DisplayFormat="{0:yyyy-MM-dd}" />
+                        <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
+                        <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
+                        <GridColumn Title="Names" Width="150px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    <NameBadges Names="@(item?.Names ?? new())"
+                                                SelectedNames="@SelectedNames"
+                                                OnNameClicked="@AddNameToFilter" />
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" DisplayFormat="{0:F4}" Width="100px" />
+                        <GridColumn Field="@nameof(SearchResultDto.Text)" Title="Preview Text">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var preview = item?.Text?.Length > 300 ? item.Text.Substring(0, 300) + "..." : item?.Text;
+                                    var formatted = preview.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery);
+                                    <span title="@item?.Text">@((MarkupString)formatted)</span>
+                                }
+                            </Template>
+                        </GridColumn>
+                    </GridColumns>
+                </TelerikGrid>
+            </SplitterPane>
+            <SplitterPane Min="200px">
+                <div class="border rounded p-3 bg-light" style="height: 100%; overflow-y: auto;">
+                    @if (SelectedDetail != null)
+                    {
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h5 class="mb-0">@SelectedDetail.FileName</h5>
+                            <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
+                        </div>
+                        <DocumentDetails Document="@SelectedDetail"
+                                         @bind-ActiveTabIndex="_detailTabIndex"
+                                         SearchQuery="@SearchQuery" />
+                    }
+                    else
+                    {
+                        <div style="padding: 1rem;">
+                            <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="50%" Height="24px" Visible="true" />
+                            <div class="mt-3">
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Rectangle" Width="100%" Height="200px" Visible="true" />
+                            </div>
+                            <div class="mt-2 d-flex gap-3">
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="30%" Height="16px" Visible="true" />
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="40%" Height="16px" Visible="true" />
+                            </div>
+                            <div class="mt-3 text-center text-muted">
+                                <em>Select a document row above to view details</em>
+                            </div>
+                        </div>
+                    }
                 </div>
-                <div class="mt-2 d-flex gap-3">
-                    <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="30%" Height="16px" Visible="true" />
-                    <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="40%" Height="16px" Visible="true" />
-                </div>
-                <div class="mt-3 text-center text-muted">
-                    <em>Select a document row above to view details</em>
-                </div>
-            </div>
-        }
-    </div>
+            </SplitterPane>
+        </SplitterPanes>
+    </TelerikSplitter>
 </div>
 
 @code {
     private string SearchQuery { get; set; } = "";
-    private bool IsSearching { get; set; } = false;
     private bool HasSearched { get; set; } = false;
 
     // Server-side paged grid state
@@ -149,6 +154,7 @@
         SelectedNames is { Count: > 0 } ? SelectedNames : null;
 
     private SearchResultDto? SelectedDetail { get; set; }
+    private int _detailTabIndex;
 
     // Debounce: cancels in-flight scroll requests when new scrolls arrive
     private CancellationTokenSource _gridReadCts = new();
@@ -170,39 +176,54 @@
     /// <summary>
     /// Telerik Grid OnRead handler — fetches one page of data from the server.
     /// Debounced: rapid scroll events are collapsed — only the last one fires.
+    /// IMPORTANT: Never call StateHasChanged() here — it would re-render the grid
+    /// and reset the virtual scroll position.
     /// </summary>
     private async Task OnGridRead(GridReadEventArgs args)
     {
         var skip = args.Request.Skip;
         var take = args.Request.PageSize;
+        var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
 
-        // Cancel any in-flight request from a previous scroll
+        // Fast path: if page is already in client cache, return instantly — no debounce, no HTTP call
+        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter);
+        if (cached != null)
+        {
+            args.Data = cached.Items;
+            args.Total = cached.TotalCount;
+            GridData = cached.Items;
+            TotalCount = cached.TotalCount;
+            return;
+        }
+
+        // Slow path: debounce rapid scroll events, then fetch from API
         _gridReadCts.Cancel();
         _gridReadCts = new CancellationTokenSource();
         var token = _gridReadCts.Token;
 
         try
         {
-            // Debounce: wait 300ms — if another scroll arrives, this gets cancelled
-            await Task.Delay(300, token);
+            await Task.Delay(150, token);
         }
         catch (TaskCanceledException)
         {
-            // A newer scroll event superseded this one — bail out
+            args.Data = GridData ?? new List<SearchResultDto>();
+            args.Total = TotalCount;
             return;
         }
 
         try
         {
-            IsSearching = true;
-            StateHasChanged();
-
-            var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
             var result = await SearchService.SearchPagedAsync(
                 query, skip, take, exactMatch: true,
                 ActiveDataSetFilter, ActiveNamesFilter);
 
-            if (token.IsCancellationRequested) return;
+            if (token.IsCancellationRequested)
+            {
+                args.Data = GridData ?? new List<SearchResultDto>();
+                args.Total = TotalCount;
+                return;
+            }
 
             args.Data = result.Items;
             args.Total = result.TotalCount;
@@ -211,26 +232,23 @@
             TotalCount = result.TotalCount;
             HasSearched = true;
 
-            // Update names dropdown from this page's results
             UpdateAvailableNames(result.Items);
         }
         catch (Exception ex)
         {
             Console.WriteLine($"OnRead error: {ex.Message}");
-            args.Data = new List<SearchResultDto>();
-            args.Total = 0;
-        }
-        finally
-        {
-            IsSearching = false;
+            args.Data = GridData ?? new List<SearchResultDto>();
+            args.Total = TotalCount;
         }
     }
 
     /// <summary>
     /// Force the grid to re-read from the server (resets to page 0).
+    /// Clears the client-side page cache so stale data is not served.
     /// </summary>
     private void RebindGrid()
     {
+        SearchService.ClearPageCache();
         GridRef?.Rebind();
     }
 
@@ -304,9 +322,12 @@
             .SelectMany(r => r.Names!)
             .Distinct();
         var combined = new HashSet<string>(AvailableNames); // Keep existing
+        var countBefore = combined.Count;
         foreach (var sp in SelectedNames) combined.Add(sp);
         foreach (var p in fromResults) combined.Add(p);
-        AvailableNames = combined.OrderBy(n => n).ToList();
+        // Only reassign if new names were actually added — avoids triggering re-render on scroll
+        if (combined.Count > countBefore)
+            AvailableNames = combined.OrderBy(n => n).ToList();
     }
 
     private void OnRowClick(GridRowClickEventArgs args)

@@ -5,6 +5,8 @@ namespace ABC.DiscoveryCity.Services;
 public class SearchService
 {
     private readonly HttpClient _httpClient;
+    private readonly SlidingWindowPageCache _pageCache = new();
+    private string _activeCacheFingerprint = "";
 
     public SearchService(HttpClient httpClient)
     {
@@ -50,7 +52,8 @@ public class SearchService
     }
 
     /// <summary>
-    /// Server-side paged search for virtual scrolling grid.
+    /// Server-side paged search with client-side sliding window cache.
+    /// Cache HIT: returns instantly (no HTTP call). Cache MISS: fetches from API, stores, prefetches adjacent pages.
     /// </summary>
     public async Task<PagedSearchResult> SearchPagedAsync(
         string? query, int skip, int take, bool exactMatch = false,
@@ -58,20 +61,127 @@ public class SearchService
     {
         try
         {
-            var url = $"api/search/paged?skip={skip}&take={take}&exactMatch={exactMatch.ToString().ToLowerInvariant()}";
-            if (!string.IsNullOrWhiteSpace(query))
-                url += $"&query={Uri.EscapeDataString(query)}";
-            if (datasets is { Count: > 0 })
-                url += "&" + string.Join("&", datasets.Select(d => $"datasets={Uri.EscapeDataString(d)}"));
-            if (names is { Count: > 0 })
-                url += "&" + string.Join("&", names.Select(p => $"names={Uri.EscapeDataString(p)}"));
+            var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names);
+            if (fingerprint != _activeCacheFingerprint)
+            {
+                _pageCache.Clear();
+                _activeCacheFingerprint = fingerprint;
+            }
+
+            // Cache HIT — return immediately, no HTTP call
+            if (_pageCache.TryGetPage(skip, out var cachedItems, out var cachedTotal))
+            {
+                Console.WriteLine($"[ClientCache] HIT skip={skip}");
+                _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names);
+                return new PagedSearchResult { Items = cachedItems, TotalCount = cachedTotal };
+            }
+
+            // Cache MISS — fetch from API
+            var url = BuildPagedUrl(query, skip, take, exactMatch, datasets, names);
             var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url);
-            return response ?? new PagedSearchResult();
+            var result = response ?? new PagedSearchResult();
+
+            _pageCache.StorePage(skip, result.Items, result.TotalCount, skip);
+            Console.WriteLine($"[ClientCache] MISS skip={skip}, stored ({result.Items.Count} items, total={result.TotalCount})");
+
+            _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names);
+            return result;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Paged search error: {ex.Message}");
             return new PagedSearchResult();
+        }
+    }
+
+    /// <summary>
+    /// Checks the client cache without fetching. Used by OnGridRead to skip debounce for cache hits.
+    /// </summary>
+    public PagedSearchResult? TryGetCachedPage(
+        string? query, int skip, bool exactMatch,
+        List<string>? datasets, List<string>? names)
+    {
+        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names);
+        if (fingerprint != _activeCacheFingerprint) return null;
+        if (_pageCache.TryGetPage(skip, out var items, out var total))
+            return new PagedSearchResult { Items = items, TotalCount = total };
+        return null;
+    }
+
+    /// <summary>
+    /// Clears the client-side page cache. Called when query or filters change.
+    /// </summary>
+    public void ClearPageCache()
+    {
+        _pageCache.Clear();
+        _activeCacheFingerprint = "";
+    }
+
+    private static string BuildPagedUrl(string? query, int skip, int take,
+        bool exactMatch, List<string>? datasets, List<string>? names)
+    {
+        var url = $"api/search/paged?skip={skip}&take={take}&exactMatch={exactMatch.ToString().ToLowerInvariant()}";
+        if (!string.IsNullOrWhiteSpace(query))
+            url += $"&query={Uri.EscapeDataString(query)}";
+        if (datasets is { Count: > 0 })
+            url += "&" + string.Join("&", datasets.Select(d => $"datasets={Uri.EscapeDataString(d)}"));
+        if (names is { Count: > 0 })
+            url += "&" + string.Join("&", names.Select(p => $"names={Uri.EscapeDataString(p)}"));
+        return url;
+    }
+
+    private static string BuildCacheFingerprint(string? query, bool exactMatch,
+        List<string>? datasets, List<string>? names)
+    {
+        var parts = new List<string>();
+        parts.Add(query ?? "");
+        parts.Add(exactMatch ? "1" : "0");
+        if (datasets is { Count: > 0 })
+            parts.Add("ds=" + string.Join(",", datasets.OrderBy(d => d)));
+        if (names is { Count: > 0 })
+            parts.Add("nm=" + string.Join(",", names.OrderBy(n => n)));
+        return string.Join("|", parts);
+    }
+
+    /// <summary>
+    /// Background-prefetches pages N-1 and N+1 if not already cached.
+    /// Fire-and-forget — does not block the caller. Errors are swallowed.
+    /// </summary>
+    private async Task PrefetchAdjacentPagesAsync(int currentSkip, int take,
+        string? query, bool exactMatch, List<string>? datasets, List<string>? names)
+    {
+        var adjacentSkips = new List<int>();
+        var prevSkip = currentSkip - take;
+        var nextSkip = currentSkip + take;
+
+        if (prevSkip >= 0 && !_pageCache.HasPage(prevSkip))
+            adjacentSkips.Add(prevSkip);
+        if (!_pageCache.HasPage(nextSkip))
+            adjacentSkips.Add(nextSkip);
+
+        if (adjacentSkips.Count == 0) return;
+
+        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names);
+
+        foreach (var adjSkip in adjacentSkips)
+        {
+            try
+            {
+                // Guard: if filters changed while prefetching, discard
+                if (fingerprint != _activeCacheFingerprint) return;
+
+                var url = BuildPagedUrl(query, adjSkip, take, exactMatch, datasets, names);
+                var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url);
+                if (response is { Items.Count: > 0 } && fingerprint == _activeCacheFingerprint)
+                {
+                    _pageCache.StorePage(adjSkip, response.Items, response.TotalCount, currentSkip);
+                    Console.WriteLine($"[ClientCache] PREFETCH skip={adjSkip} stored");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ClientCache] Prefetch skip={adjSkip} failed: {ex.Message}");
+            }
         }
     }
 
@@ -163,6 +273,60 @@ public class SearchService
             return new List<string>();
         }
     }
+
+    /// <summary>
+    /// Bounded sliding-window page cache: keeps at most MaxPages pages in memory.
+    /// Evicts the page farthest from the current scroll position when full.
+    /// </summary>
+    private sealed class SlidingWindowPageCache
+    {
+        private const int MaxPages = 5; // 5 × 50 = 250 records max
+        private readonly Dictionary<int, CachedPage> _pages = new(); // keyed by skip value
+
+        public bool TryGetPage(int skip, out List<SearchResultDto> items, out int totalCount)
+        {
+            if (_pages.TryGetValue(skip, out var page))
+            {
+                items = page.Items;
+                totalCount = page.TotalCount;
+                return true;
+            }
+            items = new List<SearchResultDto>();
+            totalCount = 0;
+            return false;
+        }
+
+        public void StorePage(int skip, List<SearchResultDto> items, int totalCount, int currentSkip)
+        {
+            if (_pages.ContainsKey(skip))
+            {
+                _pages[skip] = new CachedPage { Skip = skip, Items = items, TotalCount = totalCount };
+                return;
+            }
+
+            // Evict farthest page if at capacity
+            if (_pages.Count >= MaxPages)
+            {
+                var farthestKey = _pages.Keys
+                    .OrderByDescending(k => Math.Abs(k - currentSkip))
+                    .First();
+                _pages.Remove(farthestKey);
+            }
+
+            _pages[skip] = new CachedPage { Skip = skip, Items = items, TotalCount = totalCount };
+        }
+
+        public bool HasPage(int skip) => _pages.ContainsKey(skip);
+
+        public void Clear() => _pages.Clear();
+
+        private sealed class CachedPage
+        {
+            public int Skip { get; init; }
+            public List<SearchResultDto> Items { get; init; } = new();
+            public int TotalCount { get; init; }
+        }
+    }
 }
 
 public class SearchResultDto
@@ -181,6 +345,7 @@ public class SearchResultDto
     public string? DataSetName { get; set; }
     public string? SourceUrl { get; set; }
     public List<string>? Names { get; set; }
+    public List<string>? Terms { get; set; }
     public string MetadataJson { get; set; } = "{}";
 }
 
