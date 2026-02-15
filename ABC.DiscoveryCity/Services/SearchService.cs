@@ -58,7 +58,7 @@ public class SearchService
     {
         try
         {
-            var url = $"api/search/paged?skip={skip}&take={take}&exactMatch={exactMatch}";
+            var url = $"api/search/paged?skip={skip}&take={take}&exactMatch={exactMatch.ToString().ToLowerInvariant()}";
             if (!string.IsNullOrWhiteSpace(query))
                 url += $"&query={Uri.EscapeDataString(query)}";
             if (datasets is { Count: > 0 })
@@ -88,6 +88,23 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"PDF fetch error: {ex.Message}");
+            return Array.Empty<byte>();
+        }
+    }
+
+    /// <summary>
+    /// Fetches spreadsheet as .xlsx bytes (API converts .xls/.csv on the fly).
+    /// </summary>
+    public async Task<byte[]> GetSpreadsheetBytesAsync(string filePath)
+    {
+        try
+        {
+            var url = $"api/images/spreadsheet?path={Uri.EscapeDataString(filePath)}";
+            return await _httpClient.GetByteArrayAsync(url);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Spreadsheet fetch error: {ex.Message}");
             return Array.Empty<byte>();
         }
     }

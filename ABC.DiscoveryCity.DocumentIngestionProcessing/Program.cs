@@ -501,9 +501,12 @@ foreach (var folder in targetFolders)
         CleanGeneratedFiles(folder);
     }
 
-    // Scan for source PDFs, excluding the Published output directory
-    var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories)
+    // Scan for all supported file types, excluding the Published output directory
+    var supportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".pdf", ".xlsx", ".xls", ".csv", ".avi", ".mp4", ".vob", ".mov", ".mkv", ".wmv", ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac" };
+    var pdfFiles = System.IO.Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories)
         .Where(f => !f.Contains(System.IO.Path.DirectorySeparatorChar + "Published" + System.IO.Path.DirectorySeparatorChar))
+        .Where(f => supportedExtensions.Contains(System.IO.Path.GetExtension(f)))
         .ToArray();
 
     // Use Parallel.ForEachAsync to process files concurrently
@@ -531,8 +534,21 @@ foreach (var folder in targetFolders)
             // Increment atomic counter
             int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
             Console.WriteLine($"[{currentCount}] Processing: {System.IO.Path.GetFileName(pdfPath)}");
-            
-            await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+
+            var fileExt = System.IO.Path.GetExtension(pdfPath).ToLowerInvariant();
+            switch (fileExt)
+            {
+                case ".xlsx" or ".xls" or ".csv":
+                    await ProcessSpreadsheet(pdfPath, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+                    break;
+                case ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv"
+                  or ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac":
+                    await ProcessMediaFile(pdfPath, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+                    break;
+                default:
+                    await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+                    break;
+            }
             
             // Mark text extraction as done
             System.IO.File.Create(doneFile).Dispose();
@@ -670,13 +686,26 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
 
             // NOTE: Do NOT clean MIME artifacts from sentences — raw text is evidence.
 
-            // 2. Add newline before EFTA file IDs (e.g., EFTA00039885)
-            s = Regex.Replace(s, @"(EFTA\d{8,})", "\n$1");
-
-            // 3. Fix OCR text artifacts: bracket spaces "( M"→"(M", URL spaces
+            // 2. Fix OCR text artifacts: bracket spaces "( M"→"(M", URL spaces
             s = SentencePostProcessor.CleanTextArtifacts(s);
 
-            cleaned.Add(s.Trim());
+            // 3. Split on EFTA file IDs — they appear at page headers/footers
+            //    and the OCR runs them into the next text: "EFTA0033210Original message"
+            //    becomes separate entries: "EFTA0033210", "Original message"
+            if (Regex.IsMatch(s, @"EFTA\d{8,}"))
+            {
+                var parts = Regex.Split(s, @"(EFTA\d{8,})");
+                foreach (var part in parts)
+                {
+                    var p = part.Trim();
+                    if (!string.IsNullOrWhiteSpace(p))
+                        cleaned.Add(p);
+                }
+            }
+            else
+            {
+                cleaned.Add(s.Trim());
+            }
         }
 
         // Phase 1.5: Merge ellipsis fragments — consecutive "." strings combine with previous
@@ -803,6 +832,206 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
     }
 }
 
+async Task ProcessSpreadsheet(string filePath, int? dataSetId = null, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
+{
+    // Skip if already processed
+    if (!forceReprocess && dbService.DocumentExists(filePath))
+    {
+        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(filePath)}");
+        return;
+    }
+
+    // 1. Load spreadsheet
+    var result = SpreadsheetLoader.Load(filePath);
+    var sentences = SpreadsheetLoader.ToSentences(result);
+
+    // 2. Build combined text for name extraction
+    string fullText = string.Join(" ", result.Rows.Select(r => r.Text));
+    var extractedNames = ExtractNamesFromText(fullText);
+
+    // Ensure Published output directory exists
+    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
+        System.IO.Directory.CreateDirectory(publishedDir);
+
+    // 3. Build metadata (reuse PdfMetadata for uniform DB storage)
+    var fileInfo = new System.IO.FileInfo(filePath);
+    int wordCount = string.IsNullOrWhiteSpace(fullText) ? 0 : fullText.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries).Length;
+
+    var metadata = new PdfMetadata
+    {
+        FileName = System.IO.Path.GetFileName(filePath),
+        Title = $"Spreadsheet: {result.FileName} ({result.SheetCount} sheet{(result.SheetCount != 1 ? "s" : "")}, {result.Rows.Count} rows)",
+        PageCount = result.SheetCount,
+        Text = sentences,
+        Names = extractedNames,
+        DataSetName = dataSetName ?? "",
+        SourceName = sourceFolderName ?? "",
+        OriginalFilePath = filePath,
+        IngestedAtUtc = DateTime.UtcNow,
+        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
+        WordCount = wordCount
+    };
+
+    // 4. Copy source file to Published folder
+    string publishedPath = filePath;
+    if (!string.IsNullOrEmpty(publishedDir))
+    {
+        publishedPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(filePath));
+        if (!System.IO.File.Exists(publishedPath))
+        {
+            System.IO.File.Copy(filePath, publishedPath);
+            Console.WriteLine($"  Copied → Published: {System.IO.Path.GetFileName(filePath)}");
+        }
+    }
+
+    // 5. Save JSON metadata
+    string dateStr = "UnknownDate";
+    string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}_{dateStr}";
+    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
+    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
+    string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
+    System.IO.File.WriteAllText(jsonPath, json);
+
+    // 6. Insert into Postgres
+    try
+    {
+        lock (dbService)
+        {
+            dbService.InsertDocument(publishedPath, metadata, dataSetId);
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"DB Error: {ex.Message}");
+    }
+
+    // 7. Generate spreadsheet thumbnail (real screenshot via Workbook→PDF→Skia, CSV falls back to heatmap)
+    if (!noImages && result.Rows.Count > 0)
+    {
+        try
+        {
+            string baseName = System.IO.Path.GetFileNameWithoutExtension(filePath);
+            var (fullPath, thumbPath, fullW, fullH, thumbW, thumbH, fullData, thumbData) =
+                result.Workbook != null
+                    ? SpreadsheetThumbnail.GenerateFromWorkbook(result.Workbook, outputDir, baseName)
+                    : SpreadsheetThumbnail.GenerateAndSave(result, outputDir, baseName);
+
+            if (!string.IsNullOrEmpty(fullPath))
+            {
+                lock (dbService)
+                {
+                    dbService.UpsertDocumentImages(publishedPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH,
+                        previewData: fullData, thumbData: thumbData);
+                }
+                Console.WriteLine($"  [THUMB] {baseName}: {fullW}x{fullH} preview, {thumbW}x{thumbH} thumb");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [WARN] Spreadsheet thumbnail error: {ex.Message}");
+        }
+    }
+
+    Console.WriteLine($"  [SPREADSHEET] {result.FileName}: {result.SheetCount} sheets, {result.Rows.Count} rows, {sentences.Count} sentences");
+    await Task.CompletedTask;
+}
+
+async Task ProcessMediaFile(string filePath, int? dataSetId = null, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
+{
+    // Skip if already processed
+    if (!forceReprocess && dbService.DocumentExists(filePath))
+    {
+        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(filePath)}");
+        return;
+    }
+
+    // 1. Extract metadata
+    var mediaMeta = MediaFileProcessor.GetMetadata(filePath);
+    var sentences = MediaFileProcessor.ToSentences(mediaMeta);
+
+    // Ensure Published output directory exists
+    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
+        System.IO.Directory.CreateDirectory(publishedDir);
+
+    // 2. Build metadata (reuse PdfMetadata for uniform DB storage)
+    var fileInfo = new System.IO.FileInfo(filePath);
+
+    var metadata = new PdfMetadata
+    {
+        FileName = System.IO.Path.GetFileName(filePath),
+        Title = $"{mediaMeta.MediaType.ToUpperInvariant()}: {mediaMeta.FileName}",
+        PageCount = 0,
+        Text = sentences,
+        Names = new List<string>(),
+        DataSetName = dataSetName ?? "",
+        SourceName = sourceFolderName ?? "",
+        OriginalFilePath = filePath,
+        IngestedAtUtc = DateTime.UtcNow,
+        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
+        WordCount = 0
+    };
+
+    // 3. Copy source file to Published folder
+    string publishedPath = filePath;
+    if (!string.IsNullOrEmpty(publishedDir))
+    {
+        publishedPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(filePath));
+        if (!System.IO.File.Exists(publishedPath))
+        {
+            System.IO.File.Copy(filePath, publishedPath);
+            Console.WriteLine($"  Copied → Published: {System.IO.Path.GetFileName(filePath)}");
+        }
+    }
+
+    // 4. Save JSON metadata
+    string dateStr = "UnknownDate";
+    string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}_{dateStr}";
+    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
+    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
+    string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
+    System.IO.File.WriteAllText(jsonPath, json);
+
+    // 5. Insert into Postgres
+    try
+    {
+        lock (dbService)
+        {
+            dbService.InsertDocument(publishedPath, metadata, dataSetId);
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"DB Error: {ex.Message}");
+    }
+
+    // 6. Capture thumbnail for video files (if ffmpeg is available)
+    if (MediaFileProcessor.IsVideoFile(filePath) && !noImages)
+    {
+        string thumbDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
+        string baseName = System.IO.Path.GetFileNameWithoutExtension(filePath);
+        string? thumbPath = MediaFileProcessor.CaptureThumbnail(filePath, thumbDir, baseName);
+        if (thumbPath != null)
+        {
+            try
+            {
+                var thumbInfo = new System.IO.FileInfo(thumbPath);
+                lock (dbService)
+                {
+                    dbService.UpsertDocumentImages(publishedPath, "", 0, 0, thumbPath, 100, 0);
+                }
+                Console.WriteLine($"  [MEDIA] Thumbnail saved: {System.IO.Path.GetFileName(thumbPath)}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [MEDIA] Thumbnail DB error: {ex.Message}");
+            }
+        }
+    }
+
+    string durationStr = mediaMeta.Duration.HasValue ? $", {mediaMeta.Duration.Value:hh\\:mm\\:ss}" : "";
+    Console.WriteLine($"  [{mediaMeta.MediaType.ToUpperInvariant()}] {mediaMeta.FileName}{durationStr}");
+    await Task.CompletedTask;
+}
 
 DateTime? DeduceDateFromText(string text)
 {

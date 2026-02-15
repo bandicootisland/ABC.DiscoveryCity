@@ -48,6 +48,7 @@ namespace ABC.DiscoveryCity.TelerikProcessing
             _layout = buffer.Layout ?? Array.Empty<LayoutToken>();
 
             ReadOnlyMemory<char> allText = new ReadOnlyMemory<char>(buffer.Content);
+            int lastTokenIndex = -1; // tracks previous non-skipped token for gap detection
 
             for (int i = 0; i < buffer.Layout.Length; i++)
             {
@@ -67,13 +68,28 @@ namespace ABC.DiscoveryCity.TelerikProcessing
                         var w = ResultWords[ResultWords.Count - 1];
                         _corpusLayers.AddImage(w.Ordinal, imgMeta);
                     }
-                    // Explicitly skip text processing for image tokens
+                    lastTokenIndex = i;
                     continue;
                 }
 
-                if (i > 0)
+                // Skip text fragments hidden under redaction bars.
+                // This prevents stray characters (e.g. HTML tags from email source)
+                // from leaking into output, and lets gap detection see the full
+                // redacted span so it can insert a proper [redact.char(N)] marker.
+                if (IsUnderRedaction(curr))
+                    continue;
+
+                if (lastTokenIndex >= 0)
                 {
-                    LayoutToken prev = buffer.Layout[i - 1];
+                    LayoutToken prev = buffer.Layout[lastTokenIndex];
+
+                    // Force sentence break at page boundaries - the last text on a page
+                    // ends the current sentence (no punctuation added, text stays as-is)
+                    if (prev.PageIndex != curr.PageIndex)
+                    {
+                        CloseSentence();
+                    }
+
                     // Get previous token text for email context detection
                     string prevTokenText = new string(allText.Slice(prev.TextOffset, prev.TextLength).Span);
                     DetectFormattingAndSpace(prev, curr, i, prevTokenText);
@@ -81,9 +97,10 @@ namespace ABC.DiscoveryCity.TelerikProcessing
 
                 ReadOnlyMemory<char> tokenText = allText.Slice(curr.TextOffset, curr.TextLength);
                 ProcessTextFragment(tokenText);
+                lastTokenIndex = i;
             }
 
-            CloseSentence(null);
+            CloseSentence();
         }
 
         private void DetectFormattingAndSpace(LayoutToken prev, LayoutToken curr, int tokenIndex, string? previousTokenText)
@@ -283,11 +300,38 @@ namespace ABC.DiscoveryCity.TelerikProcessing
             ResultWords.Add(w);
         }
 
+        /// <summary>
+        /// Returns true if the token's center falls within a detected redaction rectangle.
+        /// Text under redaction bars is hidden visually but Telerik still extracts it
+        /// (e.g. HTML tags from email source, partial email addresses).
+        /// Suppressing these prevents stray text leaking and lets gap detection
+        /// see the full redacted span for proper [redact.char(N)] markers.
+        /// </summary>
+        private bool IsUnderRedaction(LayoutToken token)
+        {
+            if (_artifacts.Length == 0) return false;
+
+            double tokenCenterX = token.X + (token.Width / 2.0);
+
+            foreach (var art in _artifacts)
+            {
+                if (art.Type != ArtifactType.Redaction) continue;
+                if (art.PageIndex != token.PageIndex) continue;
+
+                // Token center must be within the redaction bar's horizontal span
+                if (tokenCenterX >= art.X && tokenCenterX <= art.Right && art.ContainsY(token.Y))
+                    return true;
+            }
+            return false;
+        }
+
+        private void CloseSentence() => CloseSentence("");
+
         private void CloseSentence(string endChar)
         {
             if (_currentSentenceBuffer.Count == 0) return;
 
-            _currentSentenceData.EndChar = endChar ?? "";
+            _currentSentenceData.EndChar = endChar;
             _currentSentenceData.Words = _currentSentenceBuffer.ToArray();
             _currentSentenceData.Layers = _corpusLayers;
 

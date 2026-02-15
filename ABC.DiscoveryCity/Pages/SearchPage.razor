@@ -11,42 +11,15 @@
 
 <div class="container-fluid">
     <h3>Discovery Search</h3>
-    
-    <div class="row mb-3">
-        <div class="col-md-4">
-            <form @onsubmit="PerformSearch">
-                <div class="input-group">
-                    <TelerikTextBox @bind-Value="@SearchQuery" PlaceHolder="Enter search term..." Width="100%" />
-                    <TelerikButton ButtonType="@ButtonType.Submit" Icon="@SvgIcon.Search">Search</TelerikButton>
-                </div>
-            </form>
-        </div>
-        <div class="col-md-2">
-            <TelerikCheckBox @bind-Value="@ExactMatchOnly" Id="exactMatch" />
-            <label for="exactMatch" class="ms-1" title="Only return documents containing the exact search text">Exact Match</label>
-        </div>
-        <div class="col-md-3">
-            <TelerikMultiSelect Data="@AvailableDataSets"
-                                @bind-Value="@SelectedDataSets"
-                                Placeholder="All DataSets"
-                                Width="100%"
-                                AutoClose="false"
-                                OnChange="@OnDataSetFilterChanged" />
-        </div>
-        <div class="col-md-3">
-            <div class="d-flex align-items-center gap-1">
-                <TelerikMultiSelect Data="@AvailableNames"
-                                    @bind-Value="@SelectedNames"
-                                    Placeholder="Name filter..."
-                                    Width="100%"
-                                    AutoClose="false"
-                                    Filterable="true"
-                                    AllowCustom="true" />
-                <TelerikButton OnClick="@OnNamesSearchClicked" Icon="@SvgIcon.Search" Title="Search with selected name filter"
-                               Enabled="@(SelectedNames.Count > 0)" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary" />
-            </div>
-        </div>
-    </div>
+
+    <SearchToolbar @bind-SearchQuery="SearchQuery"
+                   AvailableDataSets="@AvailableDataSets"
+                   @bind-SelectedDataSets="SelectedDataSets"
+                   AvailableNames="@AvailableNames"
+                   @bind-SelectedNames="SelectedNames"
+                   OnSearch="@OnSearchRequested"
+                   OnDataSetChanged="@OnDataSetFilterChanged"
+                   OnNamesSearch="@OnNamesSearchRequested" />
 
     @if (IsSearching)
     {
@@ -80,14 +53,14 @@
                             var thumbPath = item?.ThumbnailPath;
                             if (!string.IsNullOrEmpty(thumbPath))
                             {
-                                <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(thumbPath)}")" 
-                                     style="width: 50px; height: auto; border: 1px solid #ddd; border-radius: 4px;" 
+                                <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(thumbPath)}")"
+                                     style="width: 50px; height: auto; border: 1px solid #ddd; border-radius: 4px;"
                                      alt="Thumb" />
                             }
                             else
                             {
                                 <div style="width: 50px; height: 70px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #aaa;">
-                                    <TelerikIcon Icon="@SvgIcon.FilePdf" />
+                                    <TelerikIcon Icon="@GetFileIcon(item?.FileName)" />
                                 </div>
                             }
                         }
@@ -101,23 +74,9 @@
                     <Template>
                         @{
                             var item = context as SearchResultDto;
-                            if (item?.Names != null && item.Names.Count > 0)
-                            {
-                                <div style="font-size: 0.85em; line-height: 1.4;">
-                                    @foreach (var name in item.Names)
-                                    {
-                                        <span class="badge me-1 mb-1 @(GetBadgeClass(name))"
-                                              style="font-weight: normal; cursor: pointer;"
-                                              title="Click to add to Name filter"
-                                              @onclick="() => AddNameToFilter(name)"
-                                              @onclick:stopPropagation="true">@name</span>
-                                    }
-                                </div>
-                            }
-                            else
-                            {
-                                <span style="color: #ccc;">—</span>
-                            }
+                            <NameBadges Names="@(item?.Names ?? new())"
+                                        SelectedNames="@SelectedNames"
+                                        OnNameClicked="@AddNameToFilter" />
                         }
                     </Template>
                 </GridColumn>
@@ -166,7 +125,6 @@
 @code {
     private string SearchQuery { get; set; } = "";
     private bool IsSearching { get; set; } = false;
-    private bool ExactMatchOnly { get; set; } = false;
     private bool HasSearched { get; set; } = false;
 
     // Server-side paged grid state
@@ -179,18 +137,27 @@
     // DataSet filter
     private List<string> AvailableDataSets { get; set; } = new();
     private List<string> SelectedDataSets { get; set; } = new();
-    
+
     // Names filter
     private List<string> AvailableNames { get; set; } = new();
     private List<string> SelectedNames { get; set; } = new();
-    
+
     // Active filters for API queries (empty = all)
-    private List<string>? ActiveDataSetFilter => 
+    private List<string>? ActiveDataSetFilter =>
         SelectedDataSets is { Count: > 0 } ? SelectedDataSets : null;
-    private List<string>? ActiveNamesFilter => 
+    private List<string>? ActiveNamesFilter =>
         SelectedNames is { Count: > 0 } ? SelectedNames : null;
 
     private SearchResultDto? SelectedDetail { get; set; }
+
+    // Debounce: cancels in-flight scroll requests when new scrolls arrive
+    private CancellationTokenSource _gridReadCts = new();
+
+    // Debounce for DataSet selector — waits 3s after last change before searching
+    private CancellationTokenSource _dataSetDebounceCts = new();
+
+    // Debounce for search text — waits 500ms after typing stops
+    private CancellationTokenSource _searchTextCts = new();
 
     protected override async Task OnInitializedAsync()
     {
@@ -202,12 +169,28 @@
 
     /// <summary>
     /// Telerik Grid OnRead handler — fetches one page of data from the server.
-    /// Called automatically on first render and when scrolling to new virtual pages.
+    /// Debounced: rapid scroll events are collapsed — only the last one fires.
     /// </summary>
     private async Task OnGridRead(GridReadEventArgs args)
     {
         var skip = args.Request.Skip;
         var take = args.Request.PageSize;
+
+        // Cancel any in-flight request from a previous scroll
+        _gridReadCts.Cancel();
+        _gridReadCts = new CancellationTokenSource();
+        var token = _gridReadCts.Token;
+
+        try
+        {
+            // Debounce: wait 300ms — if another scroll arrives, this gets cancelled
+            await Task.Delay(300, token);
+        }
+        catch (TaskCanceledException)
+        {
+            // A newer scroll event superseded this one — bail out
+            return;
+        }
 
         try
         {
@@ -216,8 +199,10 @@
 
             var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
             var result = await SearchService.SearchPagedAsync(
-                query, skip, take, ExactMatchOnly,
+                query, skip, take, exactMatch: true,
                 ActiveDataSetFilter, ActiveNamesFilter);
+
+            if (token.IsCancellationRequested) return;
 
             args.Data = result.Items;
             args.Total = result.TotalCount;
@@ -249,10 +234,54 @@
         GridRef?.Rebind();
     }
 
+    /// <summary>
+    /// Called from SearchToolbar when search text changes or search button clicked.
+    /// Debounced 500ms for text changes, immediate for button clicks.
+    /// </summary>
+    private async Task OnSearchRequested()
+    {
+        _searchTextCts.Cancel();
+        _searchTextCts = new CancellationTokenSource();
+        var token = _searchTextCts.Token;
+
+        try
+        {
+            await Task.Delay(500, token);
+            if (!token.IsCancellationRequested)
+            {
+                RebindGrid();
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            // Another keystroke came in — debounce restarted
+        }
+    }
+
     private async Task OnDataSetFilterChanged()
     {
+        // Cancel any pending debounce
+        _dataSetDebounceCts.Cancel();
+        _dataSetDebounceCts = new CancellationTokenSource();
+        var token = _dataSetDebounceCts.Token;
+
+        try
+        {
+            await Task.Delay(3000, token);
+            if (!token.IsCancellationRequested)
+            {
+                RebindGrid();
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            // Another selection came in — debounce restarted
+        }
+    }
+
+    private void OnNamesSearchRequested()
+    {
         RebindGrid();
-        await Task.CompletedTask;
     }
 
     private void AddNameToFilter(string name)
@@ -268,13 +297,6 @@
         }
     }
 
-    private async Task OnNamesSearchClicked()
-    {
-        if (SelectedNames.Count == 0) return;
-        RebindGrid();
-        await Task.CompletedTask;
-    }
-
     private void UpdateAvailableNames(List<SearchResultDto> pageItems)
     {
         var fromResults = pageItems
@@ -287,28 +309,22 @@
         AvailableNames = combined.OrderBy(n => n).ToList();
     }
 
-    /// <summary>
-    /// Returns badge CSS class: green for exact match in filter, yellow for partial match, blue otherwise.
-    /// </summary>
-    private string GetBadgeClass(string name)
-    {
-        if (SelectedNames.Count == 0) return "bg-info text-dark";
-        if (SelectedNames.Any(sp => string.Equals(sp, name, StringComparison.OrdinalIgnoreCase)))
-            return "bg-success";
-        if (SelectedNames.Any(sp => name.Contains(sp, StringComparison.OrdinalIgnoreCase) || sp.Contains(name, StringComparison.OrdinalIgnoreCase)))
-            return "bg-warning text-dark";
-        return "bg-info text-dark";
-    }
-
-    private async Task PerformSearch()
-    {
-        RebindGrid();
-        await Task.CompletedTask;
-    }
-
     private void OnRowClick(GridRowClickEventArgs args)
     {
         var item = args.Item as SearchResultDto;
         SelectedDetail = (SelectedDetail == item) ? null : item;
+    }
+
+    private static ISvgIcon GetFileIcon(string? fileName)
+    {
+        var ext = System.IO.Path.GetExtension(fileName ?? "").ToLowerInvariant();
+        return ext switch
+        {
+            ".pdf" => SvgIcon.FilePdf,
+            ".xlsx" or ".xls" or ".csv" => SvgIcon.FileExcel,
+            ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv" => SvgIcon.FileVideo,
+            ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => SvgIcon.FileAudio,
+            _ => SvgIcon.File
+        };
     }
 }

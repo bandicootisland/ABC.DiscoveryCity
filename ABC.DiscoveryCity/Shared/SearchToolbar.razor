@@ -1,0 +1,93 @@
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+@using Telerik.Blazor.Components.Common.Icon
+
+<div class="row mb-3">
+    <div class="col-md-4">
+        <div class="input-group">
+            <TelerikTextBox @bind-Value="@SearchQuery"
+                            OnChange="@OnSearchTextChanged"
+                            PlaceHolder="Enter search term..." Width="100%" />
+            <TelerikButton OnClick="@OnSearchClicked" Icon="@SvgIcon.Search">Search</TelerikButton>
+        </div>
+    </div>
+    <div class="col-md-5">
+        <TelerikMultiSelect Data="@AvailableDataSets"
+                            @bind-Value="@SelectedDataSets"
+                            Placeholder="All DataSets"
+                            Width="100%"
+                            AutoClose="false"
+                            OnChange="@OnDataSetSelectionChanged" />
+    </div>
+    <div class="col-md-3">
+        <div class="d-flex align-items-center gap-1">
+            <TelerikMultiSelect Data="@AvailableNames"
+                                @bind-Value="@SelectedNames"
+                                Placeholder="Name filter..."
+                                Width="100%"
+                                AutoClose="false"
+                                Filterable="true"
+                                AllowCustom="true"
+                                OnChange="@OnNamesSelectionChanged" />
+            <TelerikButton OnClick="@OnNamesSearchClicked" Icon="@SvgIcon.Search" Title="Search with selected name filter"
+                           Enabled="@(SelectedNames.Count > 0)" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary" />
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string SearchQuery { get; set; } = "";
+    [Parameter] public EventCallback<string> SearchQueryChanged { get; set; }
+    [Parameter] public List<string> AvailableDataSets { get; set; } = new();
+    [Parameter] public List<string> SelectedDataSets { get; set; } = new();
+    [Parameter] public EventCallback<List<string>> SelectedDataSetsChanged { get; set; }
+    [Parameter] public List<string> AvailableNames { get; set; } = new();
+    [Parameter] public List<string> SelectedNames { get; set; } = new();
+    [Parameter] public EventCallback<List<string>> SelectedNamesChanged { get; set; }
+    [Parameter] public EventCallback OnSearch { get; set; }
+    [Parameter] public EventCallback OnDataSetChanged { get; set; }
+    [Parameter] public EventCallback OnNamesSearch { get; set; }
+
+    private async Task OnSearchTextChanged(object newValue)
+    {
+        SearchQuery = newValue?.ToString() ?? "";
+        await SearchQueryChanged.InvokeAsync(SearchQuery);
+        await OnSearch.InvokeAsync();
+    }
+
+    private async Task OnSearchClicked()
+    {
+        await OnSearch.InvokeAsync();
+    }
+
+    private async Task OnDataSetSelectionChanged()
+    {
+        await SelectedDataSetsChanged.InvokeAsync(SelectedDataSets);
+        await OnDataSetChanged.InvokeAsync();
+    }
+
+    private int _previousNamesCount;
+
+    private async Task OnNamesSelectionChanged()
+    {
+        await SelectedNamesChanged.InvokeAsync(SelectedNames);
+
+        // Auto-search when names are cleared (user removed all selections)
+        if (SelectedNames.Count == 0 && _previousNamesCount > 0)
+        {
+            _previousNamesCount = 0;
+            await OnNamesSearch.InvokeAsync();
+        }
+        else
+        {
+            _previousNamesCount = SelectedNames.Count;
+        }
+    }
+
+    private async Task OnNamesSearchClicked()
+    {
+        if (SelectedNames.Count == 0) return;
+        _previousNamesCount = SelectedNames.Count;
+        await OnNamesSearch.InvokeAsync();
+    }
+}

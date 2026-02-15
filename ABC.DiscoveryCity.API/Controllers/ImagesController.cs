@@ -1,5 +1,8 @@
 using ABC.DiscoveryCity.PostgreSQL;
 using Microsoft.AspNetCore.Mvc;
+using Telerik.Windows.Documents.Spreadsheet.FormatProviders;
+using Telerik.Windows.Documents.Spreadsheet.FormatProviders.OpenXml.Xlsx;
+using Telerik.Windows.Documents.Spreadsheet.FormatProviders.Xls;
 
 namespace ABC.DiscoveryCity.API.Controllers;
 
@@ -75,6 +78,71 @@ public class ImagesController : ControllerBase
         }
 
         return NotFound($"File not found: {resolvedPath}");
+    }
+
+    /// <summary>
+    /// Serves spreadsheet files as .xlsx bytes for the TelerikSpreadsheet viewer.
+    /// Converts .xls and .csv on the fly; .xlsx is served directly.
+    /// </summary>
+    [HttpGet("spreadsheet")]
+    public IActionResult ViewSpreadsheet([FromQuery] string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return NotFound("File not found.");
+
+        var resolvedPath = DbService.ResolveFilePathForCurrentOs(path);
+        if (!System.IO.File.Exists(resolvedPath))
+            return NotFound($"File not found: {resolvedPath}");
+
+        var ext = Path.GetExtension(resolvedPath).ToLowerInvariant();
+
+        // .xlsx can be served directly
+        if (ext == ".xlsx")
+        {
+            var stream = System.IO.File.OpenRead(resolvedPath);
+            return File(stream, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        }
+
+        // .xls → convert to .xlsx via Telerik SpreadProcessing
+        if (ext == ".xls")
+        {
+            var importProvider = new XlsFormatProvider();
+            Telerik.Windows.Documents.Spreadsheet.Model.Workbook workbook;
+            using (var input = System.IO.File.OpenRead(resolvedPath))
+            {
+                workbook = importProvider.Import(input);
+            }
+
+            var xlsxProvider = new XlsxFormatProvider();
+            var output = new MemoryStream();
+            xlsxProvider.Export(workbook, output);
+            output.Position = 0;
+            return File(output, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        }
+
+        // .csv → read text and build a simple workbook
+        if (ext == ".csv")
+        {
+            var workbook = new Telerik.Windows.Documents.Spreadsheet.Model.Workbook();
+            var worksheet = workbook.Worksheets.Add();
+            var lines = System.IO.File.ReadAllLines(resolvedPath);
+            for (int row = 0; row < lines.Length; row++)
+            {
+                var cells = lines[row].Split(',');
+                for (int col = 0; col < cells.Length; col++)
+                {
+                    worksheet.Cells[row, col].SetValue(cells[col].Trim().Trim('"'));
+                }
+            }
+
+            var xlsxProvider = new XlsxFormatProvider();
+            var output = new MemoryStream();
+            xlsxProvider.Export(workbook, output);
+            output.Position = 0;
+            return File(output, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        }
+
+        return BadRequest($"Unsupported spreadsheet format: {ext}");
     }
 }
 

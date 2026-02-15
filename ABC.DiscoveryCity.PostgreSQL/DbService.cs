@@ -387,6 +387,7 @@ public partial class DbService
                 using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_parentid ON DocumentChunks(ParentId);", conn)) cmd.ExecuteNonQuery();
                 using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_chunks_textcontent ON DocumentChunks USING GIN (to_tsvector('english', TextContent));", conn)) cmd.ExecuteNonQuery();
                 using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_docimages_parentid ON DocumentImages(ParentId);", conn)) cmd.ExecuteNonQuery();
+                using (var cmd = new NpgsqlCommand("CREATE INDEX IF NOT EXISTS idx_parentdocs_processedat ON ParentDocuments (ProcessedAt DESC);", conn)) cmd.ExecuteNonQuery();
             }
 
             // Option B: Sentences full-text search index (on ParentDocuments.Sentences JSONB)
@@ -1504,6 +1505,7 @@ public partial class DbService
             JOIN ParentDocuments p ON md.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
             LEFT JOIN Sources s ON d.SourceId = s.Id
+            ORDER BY p.ProcessedAt DESC
             OFFSET @skip LIMIT @take;";
 
         using var dataCmd = new NpgsqlCommand(dataSql, conn);
@@ -1519,6 +1521,159 @@ public partial class DbService
         while (reader.Read()) results.Add(ReadSearchResult(reader));
         return (results, totalCount);
     }
+
+    /// <summary>
+    /// Lightweight search that returns only matching document IDs (no joins, no Sentences aggregation).
+    /// Used by the caching layer — run once, cache the IDs, hydrate pages from cache.
+    /// </summary>
+    public int[] SearchMatchingIds(string query, bool exactMatch,
+        List<string>? datasetNames = null, List<string>? nameValues = null)
+    {
+        using var conn = _dataSource.OpenConnection();
+        var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
+
+        var extraJoin = datasetFilter ? "JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
+        var extraWhere = new List<string>();
+        if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+        var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
+
+        string sql;
+        if (exactMatch)
+        {
+            sql = $@"
+                WITH text_matches AS (
+                    SELECT DISTINCT p.Id as ParentId
+                    FROM ParentDocuments p
+                    {extraJoin}
+                    WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.Sentences) elem WHERE elem ILIKE @pattern)
+                    {extraWhereStr}
+                ),
+                metadata_matches AS (
+                    SELECT p.Id as ParentId
+                    FROM ParentDocuments p
+                    {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
+                    WHERE (p.Metadata->>'Title' ILIKE @pattern
+                       OR p.Metadata->>'Names' ILIKE @pattern
+                       OR p.Metadata->>'FileName' ILIKE @pattern
+                       OR p.Metadata->>'DataSetName' ILIKE @pattern
+                       OR p.FileName ILIKE @pattern)
+                    {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                    {(namesFilter ? "AND " + NamesAndClause("p") : "")}
+                ),
+                matching_docs AS (
+                    SELECT DISTINCT ParentId FROM (
+                        SELECT ParentId FROM text_matches
+                        UNION
+                        SELECT ParentId FROM metadata_matches
+                    ) combined
+                )
+                SELECT md.ParentId
+                FROM matching_docs md
+                JOIN ParentDocuments p ON md.ParentId = p.Id
+                ORDER BY p.ProcessedAt DESC
+                LIMIT 50000;";
+        }
+        else
+        {
+            sql = $@"
+                WITH text_matches AS (
+                    SELECT p.Id as ParentId,
+                           MAX(ts_rank(jsonb_to_tsvector('english', COALESCE(p.Sentences, '[]'::jsonb), '[""string""]'), plainto_tsquery('english', @query))) as score
+                    FROM ParentDocuments p
+                    {extraJoin}
+                    WHERE (jsonb_to_tsvector('english', COALESCE(p.Sentences, '[]'::jsonb), '[""string""]') @@ plainto_tsquery('english', @query)
+                       OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(p.Sentences) elem WHERE elem ILIKE @pattern))
+                    {extraWhereStr}
+                    GROUP BY p.Id
+                ),
+                metadata_matches AS (
+                    SELECT p.Id as ParentId, 0.5 as score
+                    FROM ParentDocuments p
+                    {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
+                    WHERE (p.Metadata->>'Title' ILIKE @pattern
+                       OR p.Metadata->>'Names' ILIKE @pattern
+                       OR p.Metadata->>'FileName' ILIKE @pattern
+                       OR p.Metadata->>'DataSetName' ILIKE @pattern
+                       OR p.FileName ILIKE @pattern)
+                    {(datasetFilter ? "AND dd2.Name = ANY(@datasetNames)" : "")}
+                    {(namesFilter ? "AND " + NamesAndClause("p") : "")}
+                ),
+                matching_docs AS (
+                    SELECT ParentId, MAX(score) as score
+                    FROM (
+                        SELECT ParentId, score FROM text_matches
+                        UNION ALL
+                        SELECT ParentId, score FROM metadata_matches
+                    ) combined
+                    GROUP BY ParentId
+                )
+                SELECT ParentId FROM matching_docs
+                ORDER BY score DESC
+                LIMIT 50000;";
+        }
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.CommandTimeout = 120;
+        cmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        if (!exactMatch) cmd.Parameters.AddWithValue("query", query);
+        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+
+        var ids = new List<int>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) ids.Add(reader.GetInt32(0));
+        return ids.ToArray();
+    }
+
+    /// <summary>
+    /// Hydrate full DocumentSearchResult rows for a page of IDs.
+    /// Uses WHERE p.Id = ANY(@ids) + array_position to preserve the search-ranked order.
+    /// </summary>
+    public List<DocumentSearchResult> HydrateByIds(int[] ids)
+    {
+        if (ids.Length == 0) return new List<DocumentSearchResult>();
+
+        using var conn = _dataSource.OpenConnection();
+        var sql = @"
+            SELECT p.Id,
+                   p.FileName,
+                   p.FilePath,
+                   d.pdffolder as PdfFolder,
+                   COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
+                   (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem) as FullText,
+                   0.0 as score,
+                   (p.Metadata->>'DeducedDate')::timestamp as DocDate,
+                   (p.Metadata->>'PageCount')::int as PageCount,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'thumb' LIMIT 1) as ThumbFileName,
+                   (SELECT filename FROM DocumentImages WHERE ParentId = p.Id AND ImageSize = 'full' LIMIT 1) as FullImgFileName,
+                   s.Name as SourceName,
+                   d.Name as DataSetName,
+                   p.Metadata->>'Names' as Names,
+                   p.Metadata::text as MetadataJson,
+                   s.Url as SourceUrl
+            FROM ParentDocuments p
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            LEFT JOIN Sources s ON d.SourceId = s.Id
+            WHERE p.Id = ANY(@ids)
+            ORDER BY array_position(@ids, p.Id);";
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.CommandTimeout = 30;
+        cmd.Parameters.AddWithValue("ids", ids);
+
+        var results = new List<DocumentSearchResult>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var result = ReadSearchResult(reader, idOffset: 1);
+            result.Id = reader.GetInt32(0);
+            results.Add(result);
+        }
+        return results;
+    }
+
     private static int GetDataSetCount(NpgsqlConnection conn)
     {
         try
@@ -1558,26 +1713,28 @@ public partial class DbService
     /// Shared reader for the standardized 15-column search result layout.
     /// Column order: FileName, FilePath, PdfFolder, ImageFolder, Text, Distance/Score,
     /// DocDate, PageCount, ThumbFileName, FullImgFileName, SourceName, DataSetName, People, MetadataJson, SourceUrl
+    /// idOffset allows prepending extra columns (e.g. p.Id) before the standard 15.
     /// </summary>
-    private static DocumentSearchResult ReadSearchResult(NpgsqlDataReader reader)
+    private static DocumentSearchResult ReadSearchResult(NpgsqlDataReader reader, int idOffset = 0)
     {
+        int o = idOffset;
         return new DocumentSearchResult
         {
-            FileName           = reader.IsDBNull(0) ? "" : reader.GetString(0),
-            FilePath           = reader.IsDBNull(1) ? null : reader.GetString(1),
-            PdfFolder          = reader.IsDBNull(2) ? null : reader.GetString(2),
-            ImageFolder        = reader.IsDBNull(3) ? null : reader.GetString(3),
-            Text               = reader.IsDBNull(4) ? "No text content" : reader.GetString(4),
-            Distance           = reader.IsDBNull(5) ? 0.0 : reader.GetDouble(5),
-            Date               = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-            PageCount          = reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
-            ThumbnailFileName  = reader.IsDBNull(8) ? null : reader.GetString(8),
-            FullImageFileName  = reader.IsDBNull(9) ? null : reader.GetString(9),
-            SourceName         = reader.IsDBNull(10) ? null : reader.GetString(10),
-            DataSetName        = reader.IsDBNull(11) ? null : reader.GetString(11),
-            Names              = reader.IsDBNull(12) ? null : reader.GetString(12),
-            MetadataJson       = reader.IsDBNull(13) ? "{}" : reader.GetString(13),
-            SourceUrl          = reader.IsDBNull(14) ? null : reader.GetString(14)
+            FileName           = reader.IsDBNull(0+o) ? "" : reader.GetString(0+o),
+            FilePath           = reader.IsDBNull(1+o) ? null : reader.GetString(1+o),
+            PdfFolder          = reader.IsDBNull(2+o) ? null : reader.GetString(2+o),
+            ImageFolder        = reader.IsDBNull(3+o) ? null : reader.GetString(3+o),
+            Text               = reader.IsDBNull(4+o) ? "No text content" : reader.GetString(4+o),
+            Distance           = reader.IsDBNull(5+o) ? 0.0 : reader.GetDouble(5+o),
+            Date               = reader.IsDBNull(6+o) ? null : reader.GetDateTime(6+o),
+            PageCount          = reader.IsDBNull(7+o) ? 0 : reader.GetInt32(7+o),
+            ThumbnailFileName  = reader.IsDBNull(8+o) ? null : reader.GetString(8+o),
+            FullImageFileName  = reader.IsDBNull(9+o) ? null : reader.GetString(9+o),
+            SourceName         = reader.IsDBNull(10+o) ? null : reader.GetString(10+o),
+            DataSetName        = reader.IsDBNull(11+o) ? null : reader.GetString(11+o),
+            Names              = reader.IsDBNull(12+o) ? null : reader.GetString(12+o),
+            MetadataJson       = reader.IsDBNull(13+o) ? "{}" : reader.GetString(13+o),
+            SourceUrl          = reader.IsDBNull(14+o) ? null : reader.GetString(14+o)
         };
     }
 
@@ -1739,6 +1896,7 @@ public class DataSetStats
 /// </summary>
 public class DocumentSearchResult
 {
+    public int Id { get; set; }
     public string FileName { get; set; } = "";
     public string? FilePath { get; set; }           // Legacy full path
     public string? PdfFolder { get; set; }          // Relative folder from datasets

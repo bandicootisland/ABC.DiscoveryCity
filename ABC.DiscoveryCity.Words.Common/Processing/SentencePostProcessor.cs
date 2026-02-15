@@ -603,10 +603,25 @@ namespace ABC.DiscoveryCity.Words.Common.Processing
             for (int i = sentences.Count - 1; i >= 1; i--)
             {
                 string trimmed = sentences[i].Trim();
+
+                // Case 1: entire sentence is just dots — merge whole thing with previous
                 if (trimmed.Length > 0 && trimmed.Length <= 3 && IsAllDots(trimmed))
                 {
                     sentences[i - 1] = sentences[i - 1] + trimmed;
                     sentences.RemoveAt(i);
+                }
+                // Case 2: sentence STARTS with dots then real content — ". New text"
+                // The leading dot(s) belong to the previous sentence (split ellipsis),
+                // move them back and keep the content as this sentence.
+                else if (trimmed.Length > 1 && trimmed[0] == '.')
+                {
+                    int dotCount = 0;
+                    while (dotCount < trimmed.Length && trimmed[dotCount] == '.') dotCount++;
+                    if (dotCount < trimmed.Length && dotCount <= 3)
+                    {
+                        sentences[i - 1] = sentences[i - 1] + trimmed.Substring(0, dotCount);
+                        sentences[i] = trimmed.Substring(dotCount).TrimStart();
+                    }
                 }
             }
             return sentences;
