@@ -1,0 +1,212 @@
+    @page "/workspace"
+@using ABC.DiscoveryCity.Models
+@using ABC.DiscoveryCity.Services
+@inject IJSRuntime JS
+@inject IWeftDataService DataService
+
+<div class="daemask-layout">
+    <aside class="facet-sidebar">
+        <h3>Dæmask Discovery</h3>
+        
+        <div class="facet-group">
+            <h4 style="color: #58a6ff; margin-bottom: 15px;">Document Type</h4>
+            @foreach (var type in AvailableTypes)
+            {
+                <label>
+                    <input type="checkbox" checked="@SelectedTypes.Contains(type)" 
+                           @onchange="@(e => ToggleFacet(type, (bool)(e.Value ?? false)))" />
+                    @type
+                </label>
+            }
+        </div>
+    </aside>
+
+    <main class="workspace-core">
+        <header class="workspace-toolbar">
+            <div class="search-bar">
+                <input type="text" @bind="SearchQuery" placeholder="Query Weft engine..." 
+                       style="padding: 6px; background: #0d1117; border: 1px solid #30363d; color: white; width: 250px;"/>
+                <button @onclick="ExecuteSearch" style="padding: 6px 12px; background: #238636; color: white; border: none; cursor: pointer;">Search</button>
+            </div>
+            <div class="view-toggles">
+                <button class="@(ActiveView == ViewMode.Grid ? "active" : "")" @onclick="() => SetView(ViewMode.Grid)">Grid</button>
+                <button class="@(ActiveView == ViewMode.Pivot ? "active" : "")" @onclick="() => SetView(ViewMode.Pivot)">Pivot</button>
+                <button class="@(ActiveView == ViewMode.Graph ? "active" : "")" @onclick="() => SetView(ViewMode.Graph)">Graph</button>
+            </div>
+        </header>
+
+        <section c  lass="visualization-viewport">
+            @if (IsLoading)
+            {
+                <div style="display: flex; justify-content: center; align-items: center; height: 100%; flex-direction: column; color: #58a6ff;">
+                    <div class="daemask-spinner"></div>
+                    <p style="margin-top: 15px;">Querying Weft Engine...</p>
+                </div>
+            }
+            else
+            {
+            @if (ActiveView == ViewMode.Grid)
+            {
+                <div style="overflow-y: auto; height: 100%;">
+                    <table style="width: 100%; text-align: left; border-collapse: collapse;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid #30363d;">
+                                <th>ID</th>
+                                <th>Title</th>
+                                <th>Type</th>
+                                <th>Score</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var doc in CurrentDocuments)
+                            {
+                                <tr style="border-bottom: 1px solid #21262d;">
+                                    <td>@doc.Id</td>
+                                    <td>@doc.Title</td>
+                                    <td>@doc.DocumentType</td>
+                                    <td>@doc.RelevanceScore</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+            else if (ActiveView == ViewMode.Pivot)
+            {
+                <div id="pivot-container" class="pivot-grid">
+                    @foreach (var doc in CurrentDocuments)
+                    {
+                        <div class="pivot-card @doc.DocumentType" data-category="@doc.DocumentType">
+    <span style="font-size: 24px; margin-bottom: 10px;">📄</span>
+    <span class="doc-title" style="font-size: 0.85rem;">@doc.Title</span>
+    <span style="font-size: 0.7rem; color: #8b949e; margin-top: 5px;">@doc.DocumentType</span>
+</div>
+                    }
+                </div>
+            }
+            else if (ActiveView == ViewMode.Graph)
+            {
+                <div id="graph-canvas-container" style="width: 100%; height: 100%; overflow: hidden;"></div>
+            }
+        }
+        </section>
+    </main>
+</div>
+
+@code {
+    private enum ViewMode { Grid, Pivot, Graph }
+    private ViewMode ActiveView = ViewMode.Grid; // Starting on Grid to verify data loads
+    
+    private string SearchQuery { get; set; } = string.Empty;
+    private List<DocumentNode> CurrentDocuments = new();
+    
+    private List<string> AvailableTypes = new() { "PDF", "Email", "Image", "Transcript" };
+    private HashSet<string> SelectedTypes = new() { "PDF", "Email", "Image", "Transcript" };
+
+    private bool IsLoading { get; set; } = false;
+    private DotNetObjectReference<DaemaskWorkspace> _dotNetHelper;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Initialize the helper
+        _dotNetHelper = DotNetObjectReference.Create(this);
+        await ExecuteSearch();
+    }
+
+    private async Task ExecuteSearch()
+    {
+        IsLoading = true;
+        StateHasChanged(); // Tell the UI to render the loading spinner immediately
+
+        try
+        {
+            var typesToQuery = ActiveView == ViewMode.Pivot ? AvailableTypes.ToHashSet() : SelectedTypes;
+            CurrentDocuments = await DataService.QueryDocumentsAsync(SearchQuery, typesToQuery);
+            
+            if (ActiveView == ViewMode.Graph) 
+            {
+                await RenderGraphAsync();
+            }
+            else if (ActiveView == ViewMode.Pivot) 
+            {
+                // We don't await the delay here, we let it happen naturally after the DOM updates
+                _ = ReinitializePivotAfterRender();
+            }
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task ReinitializePivotAfterRender()
+    {
+        await Task.Delay(50); // Yield to DOM
+        await ReinitializePivotGridAsync();
+        await JS.InvokeVoidAsync("daemaskViz.filterPivotGrid", SelectedTypes); 
+    }
+    
+    private void ToggleFacet(string facet, bool isChecked)
+    {
+        if (isChecked) SelectedTypes.Add(facet);
+        else SelectedTypes.Remove(facet);
+        
+        if (ActiveView == ViewMode.Pivot)
+        {
+            // Do NOT re-query the backend or re-render Blazor. 
+            // Just trigger the JS animation!
+            _ = JS.InvokeVoidAsync("daemaskViz.filterPivotGrid", SelectedTypes);
+        }
+        else
+        {
+            // For Grid/Graph, fetch new data normally
+            _ = ExecuteSearch();
+        }
+    }
+    private async Task SetView(ViewMode mode)
+    {
+        ActiveView = mode;
+        StateHasChanged(); 
+        
+        await Task.Delay(50); // Yield to DOM
+
+        if (mode == ViewMode.Graph) await RenderGraphAsync();
+        if (mode == ViewMode.Pivot) await ReinitializePivotGridAsync();
+    }
+
+   
+
+  private async Task RenderGraphAsync()
+    {
+        if (CurrentDocuments == null || !CurrentDocuments.Any()) return;
+
+        var links = await DataService.GetRelationshipsAsync(CurrentDocuments);
+        var payload = new GraphPayload { nodes = CurrentDocuments, links = links };
+
+        // Pass _dotNetHelper as the 3rd argument!
+        await JS.InvokeVoidAsync("daemaskViz.renderForceGraph", "graph-canvas-container", payload, _dotNetHelper);
+    }
+
+    private async Task ReinitializePivotGridAsync()
+    {
+        // Call the JS function we just wrote
+        await JS.InvokeVoidAsync("daemaskViz.initPivotGrid", "pivot-container");
+    }
+    [JSInvokable]
+    public void OnNodeSelectedFromGraph(string nodeId)
+    {
+        // For now, let's just log it to the UI or console so we know it works.
+        // Eventually, this will set an 'ActiveDocumentId' and slide open a reading pane.
+        Console.WriteLine($"[Dæmask Architect] JS invoked C#. Selected Node ID: {nodeId}");
+        
+        // Example of updating UI state based on the click:
+        SearchQuery = $"ID:{nodeId}";
+        StateHasChanged(); 
+    }
+
+    
+    public void Dispose()
+    {
+        _dotNetHelper?.Dispose();
+    }
+}

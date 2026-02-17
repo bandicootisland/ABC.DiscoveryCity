@@ -1,39 +1,20 @@
-﻿<div class="top-row ps-3 navbar navbar-dark">
+<div class="top-row ps-2 navbar navbar-dark">
     <div class="container-fluid">
         <a class="navbar-brand" href="">ABC.DiscoveryCity</a>
-        <button title="Navigation menu" class="navbar-toggler" @onclick="ToggleNavMenu">
-            <span class="navbar-toggler-icon"></span>
-        </button>
     </div>
 </div>
 
-<div class="@NavMenuCssClass nav-scrollable" @onclick="ToggleNavMenu">
+<div class="nav-scrollable">
     <nav class="nav flex-column">
-        <div class="nav-item px-3">
+        <div class="nav-item px-2">
             <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
-                <span class="bi bi-house-door-fill-nav-menu" aria-hidden="true"></span> Home
-            </NavLink>
-        </div>               
-        <div class="nav-item px-3">
-            <NavLink class="nav-link" href="search">
-                <span class="bi bi-search-nav-menu" aria-hidden="true"></span> 🔍 Discovery Search
+                <span class="bi bi-search-nav-menu" aria-hidden="true"></span><span class="nav-label">Search</span>
             </NavLink>
         </div>
-        <div class="nav-item px-3">
+        <div class="nav-item px-2">
             <NavLink class="nav-link" href="admin/stats">
-                <span class="bi bi-bar-chart-nav-menu" aria-hidden="true"></span> 📊 Admin Stats
+                <span class="bi bi-bar-chart-nav-menu" aria-hidden="true"></span><span class="nav-label">Admin Stats</span>
             </NavLink>
         </div>
     </nav>
 </div>
-
-@code {
-    private bool collapseNavMenu = true;
-
-    private string? NavMenuCssClass => collapseNavMenu ? "collapse" : null;
-
-    private void ToggleNavMenu()
-    {
-        collapseNavMenu = !collapseNavMenu;
-    }
-}

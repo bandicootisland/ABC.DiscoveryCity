@@ -20,6 +20,7 @@ namespace ABC.DiscoveryCity
             
             builder.Services.AddTelerikBlazor();
             
+            builder.Services.AddScoped<IWeftDataService, MockWeftDataService>();
             
             builder.Services.AddScoped<TorrentService>();
             builder.Services.AddScoped<SearchService>();

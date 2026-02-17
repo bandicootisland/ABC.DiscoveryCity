@@ -1,0 +1,101 @@
+/* Core Layout */
+.daemask-layout {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    height: 100vh;
+    background-color: #0d1117; /* Deep space dark for high data contrast */
+    color: #c9d1d9;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: -1rem; /* Adjust based on your MainLayout padding */
+}
+
+.facet-sidebar {
+    padding: 20px;
+    background-color: #161b22;
+    border-right: 1px solid #30363d;
+    overflow-y: auto;
+}
+
+.facet-group {
+    margin-top: 20px;
+}
+
+.facet-group label {
+    display: block;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+
+.workspace-core {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.workspace-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    background-color: #161b22;
+    border-bottom: 1px solid #30363d;
+}
+
+.view-toggles button {
+    background: transparent;
+    border: 1px solid #30363d;
+    color: #c9d1d9;
+    padding: 6px 16px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.view-toggles button.active {
+    background: #1f6feb;
+    border-color: #1f6feb;
+    color: white;
+}
+
+/* Visualization Viewport */
+.visualization-viewport {
+    flex-grow: 1;
+    position: relative;
+    overflow: hidden;
+    padding: 20px;
+}
+
+/* Pivot Card Base Styles */
+.pivot-grid {
+    width: 100%;
+    height: 100%;
+    padding: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    overflow-y: scroll; /* Changed from 'auto' to 'scroll' to prevent layout shift */
+    overflow-x: hidden;
+}
+
+.pivot-card {
+    width: 140px;
+    height: 180px;
+    margin: 5px;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    cursor: pointer;
+}
+
+.pivot-card:hover {
+    transform: translateY(-5px) scale(1.05);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+    border-color: #58a6ff;
+    z-index: 10;
+}

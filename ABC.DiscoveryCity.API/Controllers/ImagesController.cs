@@ -70,8 +70,7 @@ public class ImagesController : ControllerBase
                 _ => "application/octet-stream"
             };
             
-            var stream = System.IO.File.OpenRead(resolvedPath);
-            return File(stream, contentType);
+            return PhysicalFile(resolvedPath, contentType, enableRangeProcessing: true);
         }
 
         // File not on disk — try serving from DB binary data

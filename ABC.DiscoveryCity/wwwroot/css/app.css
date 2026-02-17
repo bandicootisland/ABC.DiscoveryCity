@@ -104,6 +104,17 @@ code {
     color: #c02d76;
 }
 
+/* Telerik Grid — selected row highlight (must override Telerik theme) */
+.k-grid tr.k-selected,
+.k-grid tr.k-selected > td,
+.k-grid tr.k-selected:hover,
+.k-grid tr.k-selected:hover > td,
+.k-grid td.k-selected,
+.k-grid .k-table-row.k-selected > td {
+    background-color: #d4edda !important;
+    color: inherit !important;
+}
+
 .form-floating > .form-control-plaintext::placeholder, .form-floating > .form-control::placeholder {
     color: var(--bs-secondary-color);
     text-align: end;
@@ -111,4 +122,13 @@ code {
 
 .form-floating > .form-control-plaintext:focus::placeholder, .form-floating > .form-control:focus::placeholder {
     text-align: start;
+}
+
+/* Kill the details-pane scrollbar — page scroll handles everything.
+   Targets the second splitter pane (details) so it never gets its own scrollbar. */
+.k-splitter > .k-pane:last-of-type {
+    overflow: visible !important;
+}
+.details-noscroll {
+    overflow: visible !important;
 }

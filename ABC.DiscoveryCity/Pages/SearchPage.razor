@@ -1,3 +1,4 @@
+@page "/"
 @page "/search"
 @using System.Text.RegularExpressions
 @using ABC.DiscoveryCity.Services
@@ -10,7 +11,7 @@
 <PageTitle>Discovery Search</PageTitle>
 
 <div class="container-fluid">
-    <h3>Discovery Search</h3>
+    <h5 class="mb-1">Discovery Search</h5>
 
     <SearchToolbar @bind-SearchQuery="SearchQuery"
                    AvailableDataSets="@AvailableDataSets"
@@ -30,9 +31,9 @@
     {
         <div class="mb-2 text-muted"><strong>@TotalCount.ToString("N0")</strong> documents found</div>
     }
-    <TelerikSplitter Orientation="@SplitterOrientation.Vertical" Height="calc(100vh - 160px)">
+    <TelerikSplitter Orientation="@SplitterOrientation.Vertical" Height="calc(500px + 300vh)">
         <SplitterPanes>
-            <SplitterPane Size="650px" Min="300px">
+            <SplitterPane Size="500px" Min="200px">
                 <TelerikGrid @ref="GridRef"
                              TItem="SearchResultDto"
                              OnRead="@OnGridRead"
@@ -40,12 +41,15 @@
                              Resizable="true"
                              FilterMode="@GridFilterMode.FilterRow"
                              ScrollMode="@GridScrollMode.Virtual"
+                             SelectionMode="@GridSelectionMode.Single"
+                             @bind-SelectedItems="@SelectedGridItems"
                              EnableLoaderContainer="false"
                              PageSize="50"
                              RowHeight="60"
                              Height="100%"
                              OnRowClick="@OnRowClick">
                     <GridColumns>
+                        <GridCheckboxColumn Width="42px" />
                         <GridColumn Title="Thumb" Width="80px">
                              <Template>
                                 @{
@@ -95,7 +99,7 @@
                 </TelerikGrid>
             </SplitterPane>
             <SplitterPane Min="200px">
-                <div class="border rounded p-3 bg-light" style="height: 100%; overflow-y: auto;">
+                <div class="border rounded p-3 bg-light details-noscroll">
                     @if (SelectedDetail != null)
                     {
                         <div class="d-flex justify-content-between align-items-center mb-2">
@@ -154,6 +158,7 @@
         SelectedNames is { Count: > 0 } ? SelectedNames : null;
 
     private SearchResultDto? SelectedDetail { get; set; }
+    private IEnumerable<SearchResultDto> SelectedGridItems { get; set; } = Enumerable.Empty<SearchResultDto>();
     private int _detailTabIndex;
 
     // Debounce: cancels in-flight scroll requests when new scrolls arrive
@@ -333,7 +338,16 @@
     private void OnRowClick(GridRowClickEventArgs args)
     {
         var item = args.Item as SearchResultDto;
-        SelectedDetail = (SelectedDetail == item) ? null : item;
+        if (SelectedDetail == item)
+        {
+            SelectedDetail = null;
+            SelectedGridItems = Enumerable.Empty<SearchResultDto>();
+        }
+        else
+        {
+            SelectedDetail = item;
+            SelectedGridItems = item != null ? new[] { item } : Enumerable.Empty<SearchResultDto>();
+        }
     }
 
     private static ISvgIcon GetFileIcon(string? fileName)

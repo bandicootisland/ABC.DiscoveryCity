@@ -137,7 +137,7 @@ public class SearchController : ControllerBase
         {
             var cacheHits = allNeededIds.Length - missingIds.Length;
             Console.WriteLine($"[SearchCache] Hydrating {missingIds.Length} records ({cacheHits} cache hits, {readAheadIds.Length} read-ahead)");
-            var hydrated = _dbService.HydrateByIds(missingIds);
+            var hydrated = _dbService.HydrateByIds(missingIds, query);
             foreach (var record in hydrated)
             {
                 var dto = MapToDto(record);

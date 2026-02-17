@@ -13,7 +13,7 @@
                 <div class="col-md-5">
                     @if (!string.IsNullOrEmpty(Document?.ThumbnailPath))
                     {
-                        <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(Document.FullImagePath ?? Document.ThumbnailPath)}")"
+                        <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(OverviewImagePath)}")"
                              style="width: 100%; height: auto; border: 1px solid #ddd; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;" />
                     }
                     else
@@ -37,7 +37,7 @@
                 <div class="col-md-7">
                     <h4 class="mb-3">@TextPreviewTitle</h4>
                     <div class="card h-100">
-                        <div class="card-body" style="max-height: 600px; overflow-y: auto; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
+                        <div class="card-body" style="background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
                             <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
                             @if (!string.IsNullOrEmpty(Document?.Text))
                             {
@@ -53,7 +53,7 @@
             </div>
         </div>
     </TabStripTab>
-    <TabStripTab Title="@(IsMediaFile ? "Media Player" : "PDF Viewer")">
+    <TabStripTab Title="@ViewerTabTitle">
         <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
             <SplitterPanes>
                 <SplitterPane Size="55%">
@@ -74,16 +74,16 @@
                             </audio>
                         }
                     }
-                    else if (IsLoadingPdf)
+                    else if (IsLoadingViewer)
                     {
                         <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
                             <TelerikLoader Visible="true" />
-                            <span class="ms-2">Loading PDF...</span>
+                            <span class="ms-2">Loading document...</span>
                         </div>
                     }
-                    else if (PdfData != null && PdfData.Length > 0)
+                    else if (ViewerData != null && ViewerData.Length > 0)
                     {
-                        <TelerikPdfViewer Data="@PdfData"
+                        <TelerikPdfViewer Data="@ViewerData"
                                           Zoom="1.0m"
                                           Width="100%"
                                           Height="100%" />
@@ -97,10 +97,10 @@
                 </SplitterPane>
                 <SplitterPane>
                     <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
-                        <div style="color: #666; margin-bottom: 1em;">[Sentence]<br/><br/></div>
+                        <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
                         @if (!string.IsNullOrEmpty(Document?.Text))
                         {
-                            @((MarkupString)Document.Text.FormatWithSentenceBreaks())
+                            @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
                         }
                         else
                         {
@@ -124,7 +124,7 @@
             }
             <div class="card">
                 <div class="card-header"><strong>Document Metadata (JSONB)</strong></div>
-                <div class="card-body" style="max-height: 600px; overflow-y: auto;">
+                <div class="card-body">
                     @if (MetadataEntries.Count > 0)
                     {
                         <table class="table table-sm table-striped mb-0">
@@ -177,9 +177,28 @@
     private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".m4a" };
 
+    // For media files, FullImagePath may point to the video/audio file itself — always use ThumbnailPath.
+    // For documents (PDF etc.), prefer the higher-res FullImagePath when available.
+    private string OverviewImagePath => IsMediaFile
+        ? (Document?.ThumbnailPath ?? "")
+        : (Document?.FullImagePath ?? Document?.ThumbnailPath ?? "");
+
     private bool IsMediaFile => Document?.FileName != null &&
         (VideoExtensions.Contains(Path.GetExtension(Document.FileName)) ||
          AudioExtensions.Contains(Path.GetExtension(Document.FileName)));
+
+    private enum FileCategory { Pdf, Spreadsheet, Video, Audio, Unknown }
+
+    private string FileExtension =>
+        System.IO.Path.GetExtension(Document?.FileName ?? "").ToLowerInvariant();
+
+    private FileCategory Category => GetFileCategory();
+
+    /// <summary>
+    /// True when the file type has a native Telerik viewer (PDF or any spreadsheet).
+    /// The API converts .xls/.csv to .xlsx on the fly for the TelerikSpreadsheet control.
+    /// </summary>
+    private bool HasNativeViewer => Category == FileCategory.Pdf || Category == FileCategory.Spreadsheet;
 
     private bool IsVideoFile => Document?.FileName != null &&
         VideoExtensions.Contains(Path.GetExtension(Document.FileName));
@@ -193,7 +212,19 @@
             return Path.Combine(dir, Path.ChangeExtension(Path.GetFileName(path), ".mp4"));
         }
     }
-  
+
+    private FileCategory GetFileCategory()
+    {
+        return FileExtension switch
+        {
+            ".pdf" => FileCategory.Pdf,
+            ".xlsx" or ".xls" or ".csv" => FileCategory.Spreadsheet,
+            ".avi" or ".mp4" or ".vob" => FileCategory.Video,
+            ".m4a" => FileCategory.Audio,
+            _ => FileCategory.Unknown
+        };
+    }
+
     private ISvgIcon FileIcon => Category switch
     {
         FileCategory.Pdf => SvgIcon.FilePdf,
@@ -202,7 +233,6 @@
         FileCategory.Audio => SvgIcon.FileAudio,
         _ => SvgIcon.File
     };
-    //
 
     private string FileCategoryLabel => Category switch
     {
