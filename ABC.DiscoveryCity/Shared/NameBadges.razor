@@ -1,0 +1,38 @@
+@using ABC.DiscoveryCity.Services
+
+@if (Names != null && Names.Count > 0)
+{
+    <div style="font-size: 0.85em; line-height: 1.4;">
+        @foreach (var name in Names)
+        {
+            <span class="badge me-1 mb-1 @(GetBadgeClass(name))"
+                  style="font-weight: normal; cursor: pointer;"
+                  title="Click to add to filter"
+                  @onclick="() => OnNameClicked.InvokeAsync(name)"
+                  @onclick:stopPropagation="true">@name</span>
+        }
+    </div>
+}
+else
+{
+    <span style="color: #ccc;">—</span>
+}
+
+@code {
+    [Parameter] public List<string> Names { get; set; } = new();
+    [Parameter] public List<string> SelectedNames { get; set; } = new();
+    [Parameter] public EventCallback<string> OnNameClicked { get; set; }
+
+    /// <summary>
+    /// Returns badge CSS class: green for exact match in filter, yellow for partial match, blue otherwise.
+    /// </summary>
+    private string GetBadgeClass(string name)
+    {
+        if (SelectedNames.Count == 0) return "bg-info text-dark";
+        if (SelectedNames.Any(sp => string.Equals(sp, name, StringComparison.OrdinalIgnoreCase)))
+            return "bg-success";
+        if (SelectedNames.Any(sp => name.Contains(sp, StringComparison.OrdinalIgnoreCase) || sp.Contains(name, StringComparison.OrdinalIgnoreCase)))
+            return "bg-warning text-dark";
+        return "bg-info text-dark";
+    }
+}

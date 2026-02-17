@@ -18,6 +18,7 @@ namespace ABC.DiscoveryCity.Words.Common.Processing
         public static void Process(List<Sentence> sentences)
         {
             RemoveJunkSentences(sentences);
+            MergeEllipsisFragments(sentences);
             MergeUrlFragments(sentences);
             // Future: MergeEmailFragments(sentences);
             // Future: MergeShortQuoteContinuations(sentences);
@@ -280,6 +281,46 @@ namespace ABC.DiscoveryCity.Words.Common.Processing
             return spaceRatio < 0.03;
         }
 
+        // =====================================================================
+        //  Pass 0.5: Merge ellipsis fragments
+        // =====================================================================
+
+        /// <summary>
+        /// When "..." appears in source text, the sentence builder splits each "."
+        /// into its own sentence. This pass merges consecutive dot-only sentences
+        /// back into the preceding sentence, restoring the ellipsis.
+        /// e.g. ["Something.", ".", "."] → ["Something..."]
+        /// </summary>
+        private static void MergeEllipsisFragments(List<Sentence> sentences)
+        {
+            if (sentences.Count < 2) return;
+
+            for (int i = 1; i < sentences.Count; /* conditional increment */)
+            {
+                string text = GetSentenceText(sentences[i]).Trim();
+                if (text.Length > 0 && text.Length <= 3 && IsAllDots(text))
+                {
+                    MergeRange(sentences, i - 1, i);
+                    // Don't increment — re-check same index in case next is also a dot
+                }
+                else
+                {
+                    i++;
+                }
+            }
+        }
+
+        private static bool IsAllDots(string s)
+        {
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] != '.') return false;
+            return true;
+        }
+
+        // =====================================================================
+        //  Pass 1: Merge URL fragment sentences
+        // =====================================================================
+
         /// <summary>
         /// Pass 1: Merge URL fragment sentences.
         /// 
@@ -502,7 +543,7 @@ namespace ABC.DiscoveryCity.Words.Common.Processing
         /// Filters a list of sentence strings, removing junk entries.
         /// Use this as a safety net in the ingestion pipeline AFTER sentence building,
         /// in case junk text slips through (e.g. from non-PDF sources or pre-built text).
-        /// 
+        ///
         /// Strips the [N] prefix before testing, so it works on both raw and formatted sentences.
         /// </summary>
         public static List<string> FilterJunkStrings(List<string> sentences)
@@ -525,6 +566,101 @@ namespace ABC.DiscoveryCity.Words.Common.Processing
                     result.Add(s);
             }
             return result;
+        }
+
+        // =====================================================================
+        //  String-level text artifact cleanup (called from RunCleanUp pipeline)
+        // =====================================================================
+
+        /// <summary>
+        /// Clean common OCR/extraction text artifacts in a single sentence string:
+        /// - Space after opening parenthesis: "( M" → "(M", "( fax" → "(fax"
+        /// - Spaces injected into URLs: "https:// www. example. com" → "https://www.example.com"
+        /// </summary>
+        public static string CleanTextArtifacts(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length < 3) return text;
+
+            // 1. Remove space(s) after opening parenthesis: "( " → "("
+            if (text.Contains("( "))
+                text = Regex.Replace(text, @"\(\s+", "(");
+
+            // 2. Collapse spaces in URLs
+            text = CollapseUrlSpaces(text);
+
+            return text;
+        }
+
+        /// <summary>
+        /// Merge consecutive dot-only strings into the previous string.
+        /// String-level safety net for ellipsis splitting (complements the
+        /// Sentence-level MergeEllipsisFragments pass).
+        /// </summary>
+        public static List<string> MergeEllipsisSentences(List<string> sentences)
+        {
+            if (sentences.Count < 2) return sentences;
+
+            for (int i = sentences.Count - 1; i >= 1; i--)
+            {
+                string trimmed = sentences[i].Trim();
+
+                // Case 1: entire sentence is just dots — merge whole thing with previous
+                if (trimmed.Length > 0 && trimmed.Length <= 3 && IsAllDots(trimmed))
+                {
+                    sentences[i - 1] = sentences[i - 1] + trimmed;
+                    sentences.RemoveAt(i);
+                }
+                // Case 2: sentence STARTS with dots then real content — ". New text"
+                // The leading dot(s) belong to the previous sentence (split ellipsis),
+                // move them back and keep the content as this sentence.
+                else if (trimmed.Length > 1 && trimmed[0] == '.')
+                {
+                    int dotCount = 0;
+                    while (dotCount < trimmed.Length && trimmed[dotCount] == '.') dotCount++;
+                    if (dotCount < trimmed.Length && dotCount <= 3)
+                    {
+                        sentences[i - 1] = sentences[i - 1] + trimmed.Substring(0, dotCount);
+                        sentences[i] = trimmed.Substring(dotCount).TrimStart();
+                    }
+                }
+            }
+            return sentences;
+        }
+
+        /// <summary>
+        /// Collapse spaces injected by OCR into URLs.
+        /// Handles: "https :// www . example . com" → "https://www.example.com"
+        /// Only activates when text contains a URL indicator (http/www).
+        /// </summary>
+        private static string CollapseUrlSpaces(string text)
+        {
+            if (text.IndexOf("http", StringComparison.OrdinalIgnoreCase) < 0 &&
+                text.IndexOf("www.", StringComparison.OrdinalIgnoreCase) < 0 &&
+                text.IndexOf("www ", StringComparison.OrdinalIgnoreCase) < 0)
+                return text;
+
+            // Step 1: Fix protocol spacing: "https :// " or "https:// " → "https://"
+            text = Regex.Replace(text, @"(https?)\s*:\s*//\s*", "$1://", RegexOptions.IgnoreCase);
+
+            // Step 2: Fix www spacing: "www . " or "www. " → "www."
+            text = Regex.Replace(text, @"\bwww\s*\.\s*", "www.", RegexOptions.IgnoreCase);
+
+            // Step 3: After a URL start (https:// or www.), collapse ". <lowercase>"
+            // patterns that are URL domain fragments. Loop because each pass fixes one dot.
+            // Guard: only collapses space before lowercase chars (not uppercase = new sentence).
+            if (text.Contains("://") || text.Contains("www."))
+            {
+                string prev;
+                do
+                {
+                    prev = text;
+                    text = Regex.Replace(text,
+                        @"((?:https?://|www\.)\S*?)\.\s+([a-z0-9])",
+                        "$1.$2");
+                } while (text != prev);
+            }
+
+            return text;
         }
     }
 }

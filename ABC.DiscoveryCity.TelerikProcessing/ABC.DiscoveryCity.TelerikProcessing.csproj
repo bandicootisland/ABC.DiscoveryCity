@@ -11,6 +11,12 @@
     <PackageReference Include="Telerik.Documents.Flow" Version="2025.4.1319" />
     <PackageReference Include="Telerik.Documents.Fixed" Version="2025.4.1319" />
     <PackageReference Include="Telerik.Documents.ImageUtils" Version="2025.4.1319" />
+    <PackageReference Include="Telerik.Documents.Spreadsheet" Version="2025.4.1319" />
+    <PackageReference Include="Telerik.Documents.Spreadsheet.FormatProviders.OpenXml" Version="2025.4.1319" />
+    <PackageReference Include="Telerik.Documents.Spreadsheet.FormatProviders.Xls" Version="2025.4.1319" />
+    <PackageReference Include="Telerik.Documents.Spreadsheet.FormatProviders.Pdf" Version="2025.4.1319" />
+    <PackageReference Include="Telerik.Documents.Fixed.FormatProviders.Image.Skia" Version="2025.4.1319" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.1" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -18,6 +18,9 @@
 	  <PackageReference Include="Telerik.Documents.Flow.FormatProviders.Pdf" Version="*" />
 	  <PackageReference Include="Telerik.Documents.ImageUtils" Version="*" />
 	  <PackageReference Include="Telerik.Documents.TesseractOcr" Version="2025.4.1216" />
+	  <PackageReference Include="Telerik.Documents.Spreadsheet" Version="*" />
+	  <PackageReference Include="Telerik.Documents.Spreadsheet.FormatProviders.OpenXml" Version="*" />
+	  <PackageReference Include="Telerik.Documents.Spreadsheet.FormatProviders.Xls" Version="*" />
 	  <PackageReference Include="Telerik.Zip" Version="*" />
   </ItemGroup>
 

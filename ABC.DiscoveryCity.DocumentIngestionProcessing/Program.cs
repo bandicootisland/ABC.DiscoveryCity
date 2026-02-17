@@ -219,7 +219,7 @@ if (reprocessMode)
                 }
 
                 // --- Reprocess steps (add future extractions here) ---
-                var extractedNames = ExtractNamesFromText(fullText);
+                var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
 
                 // Merge into existing metadata
                 var metadata = string.IsNullOrWhiteSpace(metadataJson)
@@ -232,6 +232,12 @@ if (reprocessMode)
                     metadata["Names"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedNames));
                 else
                     metadata.Remove("Names");
+
+                // Update Terms field
+                if (extractedTerms.Count > 0)
+                    metadata["Terms"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedTerms));
+                else
+                    metadata.Remove("Terms");
 
                 // Write back updated metadata
                 string updatedJson = JsonSerializer.Serialize(metadata);
@@ -440,7 +446,8 @@ int totalFiles = 0;
 int startedFiles = 0;   // Atomically claimed BEFORE work begins (for accurate limit enforcement)
 int processedFiles = 0;  // Incremented AFTER work completes
 int skippedFiles = 0;
-var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>(); 
+var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>();
+var imageThrottle = new SemaphoreSlim(10); // Cap concurrent image tasks to control memory
 
 Console.WriteLine($"Root Folder: {rootFolder}");
 
@@ -500,9 +507,12 @@ foreach (var folder in targetFolders)
         CleanGeneratedFiles(folder);
     }
 
-    // Scan for source PDFs, excluding the Published output directory
-    var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories)
+    // Scan for all supported file types, excluding the Published output directory
+    var supportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        { ".pdf", ".xlsx", ".xls", ".csv", ".avi", ".mp4", ".vob", ".mov", ".mkv", ".wmv", ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac" };
+    var pdfFiles = System.IO.Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories)
         .Where(f => !f.Contains(System.IO.Path.DirectorySeparatorChar + "Published" + System.IO.Path.DirectorySeparatorChar))
+        .Where(f => supportedExtensions.Contains(System.IO.Path.GetExtension(f)))
         .ToArray();
 
     // Use Parallel.ForEachAsync to process files concurrently
@@ -530,8 +540,21 @@ foreach (var folder in targetFolders)
             // Increment atomic counter
             int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
             Console.WriteLine($"[{currentCount}] Processing: {System.IO.Path.GetFileName(pdfPath)}");
-            
-            await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+
+            var fileExt = System.IO.Path.GetExtension(pdfPath).ToLowerInvariant();
+            switch (fileExt)
+            {
+                case ".xlsx" or ".xls" or ".csv":
+                    await ProcessSpreadsheet(pdfPath, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+                    break;
+                case ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv"
+                  or ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac":
+                    await ProcessMediaFile(pdfPath, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+                    break;
+                default:
+                    await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
+                    break;
+            }
             
             // Mark text extraction as done
             System.IO.File.Create(doneFile).Dispose();
@@ -610,14 +633,15 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
     // 2. Extract Metadata & Deduce Date
     var deducedDate = DeduceDateFromText(fullText);
     var deducedTitle = DeduceTitleFromText(fullText, System.IO.Path.GetFileNameWithoutExtension(pdfPath));
-    var extractedNames = ExtractNamesFromText(fullText);
-    
+    var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
+
     if (inspectMode)
     {
         Console.WriteLine($"\n[INSPECT] Deduced Date: {deducedDate:yyyy-MM-dd}");
         Console.WriteLine($"[INSPECT] Deduced Title: {deducedTitle}");
         Console.WriteLine($"[INSPECT] Names: {string.Join(", ", extractedNames)}");
-        return; 
+        Console.WriteLine($"[INSPECT] Terms: {string.Join(", ", extractedTerms)}");
+        return;
     }
 
     // Gather file-level info for enriched metadata
@@ -646,6 +670,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
         DeducedDate = deducedDate ?? DateTime.MinValue,
         Text = RunCleanUp(digitalBook.Sentences.Select(s => s.text).ToList()),
         Names = extractedNames,
+        Terms = extractedTerms,
         // Enriched metadata
         DataSetName = dataSetName ?? "",
         SourceName = sourceFolderName ?? "",
@@ -669,11 +694,30 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
 
             // NOTE: Do NOT clean MIME artifacts from sentences — raw text is evidence.
 
-            // 2. Add newline before EFTA file IDs (e.g., EFTA00039885)
-            s = Regex.Replace(s, @"(EFTA\d{8,})", "\n$1");
+            // 2. Fix OCR text artifacts: bracket spaces "( M"→"(M", URL spaces
+            s = SentencePostProcessor.CleanTextArtifacts(s);
 
-            cleaned.Add(s.Trim());
+            // 3. Split on EFTA file IDs — they appear at page headers/footers
+            //    and the OCR runs them into the next text: "EFTA0033210Original message"
+            //    becomes separate entries: "EFTA0033210", "Original message"
+            if (Regex.IsMatch(s, @"EFTA\d{8,}"))
+            {
+                var parts = Regex.Split(s, @"(EFTA\d{8,})");
+                foreach (var part in parts)
+                {
+                    var p = part.Trim();
+                    if (!string.IsNullOrWhiteSpace(p))
+                        cleaned.Add(p);
+                }
+            }
+            else
+            {
+                cleaned.Add(s.Trim());
+            }
         }
+
+        // Phase 1.5: Merge ellipsis fragments — consecutive "." strings combine with previous
+        cleaned = SentencePostProcessor.MergeEllipsisSentences(cleaned);
 
         // Phase 2: Filter junk BEFORE numbering (no gaps in sequence)
         cleaned = SentencePostProcessor.FilterJunkStrings(cleaned);
@@ -729,6 +773,7 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
     {
         var imageTask = Task.Run(async () =>
         {
+            await imageThrottle.WaitAsync(); // Throttle: max 10 concurrent image tasks
             try
             {
                 string thumbPath = ""; int thumbW = 0, thumbH = 0;
@@ -786,11 +831,216 @@ async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfIma
             {
                 Console.WriteLine($"  [WARN] Page image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
             }
+            finally
+            {
+                imageThrottle.Release();
+            }
         });
         pendingImageTasks.Add(imageTask);
     }
 }
 
+async Task ProcessSpreadsheet(string filePath, int? dataSetId = null, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
+{
+    // Skip if already processed
+    if (!forceReprocess && dbService.DocumentExists(filePath))
+    {
+        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(filePath)}");
+        return;
+    }
+
+    // 1. Load spreadsheet
+    var result = SpreadsheetLoader.Load(filePath);
+    var sentences = SpreadsheetLoader.ToSentences(result);
+
+    // 2. Build combined text for name/term extraction
+    string fullText = string.Join(" ", result.Rows.Select(r => r.Text));
+    var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
+
+    // Ensure Published output directory exists
+    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
+        System.IO.Directory.CreateDirectory(publishedDir);
+
+    // 3. Build metadata (reuse PdfMetadata for uniform DB storage)
+    var fileInfo = new System.IO.FileInfo(filePath);
+    int wordCount = string.IsNullOrWhiteSpace(fullText) ? 0 : fullText.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries).Length;
+
+    var metadata = new PdfMetadata
+    {
+        FileName = System.IO.Path.GetFileName(filePath),
+        Title = $"Spreadsheet: {result.FileName} ({result.SheetCount} sheet{(result.SheetCount != 1 ? "s" : "")}, {result.Rows.Count} rows)",
+        PageCount = result.SheetCount,
+        Text = sentences,
+        Names = extractedNames,
+        Terms = extractedTerms,
+        DataSetName = dataSetName ?? "",
+        SourceName = sourceFolderName ?? "",
+        OriginalFilePath = filePath,
+        IngestedAtUtc = DateTime.UtcNow,
+        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
+        WordCount = wordCount
+    };
+
+    // 4. Copy source file to Published folder
+    string publishedPath = filePath;
+    if (!string.IsNullOrEmpty(publishedDir))
+    {
+        publishedPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(filePath));
+        if (!System.IO.File.Exists(publishedPath))
+        {
+            System.IO.File.Copy(filePath, publishedPath);
+            Console.WriteLine($"  Copied → Published: {System.IO.Path.GetFileName(filePath)}");
+        }
+    }
+
+    // 5. Save JSON metadata
+    string dateStr = "UnknownDate";
+    string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}_{dateStr}";
+    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
+    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
+    string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
+    System.IO.File.WriteAllText(jsonPath, json);
+
+    // 6. Insert into Postgres
+    try
+    {
+        lock (dbService)
+        {
+            dbService.InsertDocument(publishedPath, metadata, dataSetId);
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"DB Error: {ex.Message}");
+    }
+
+    // 7. Generate spreadsheet thumbnail (real screenshot via Workbook→PDF→Skia, CSV falls back to heatmap)
+    if (!noImages && result.Rows.Count > 0)
+    {
+        try
+        {
+            string baseName = System.IO.Path.GetFileNameWithoutExtension(filePath);
+            var (fullPath, thumbPath, fullW, fullH, thumbW, thumbH, fullData, thumbData) =
+                result.Workbook != null
+                    ? SpreadsheetThumbnail.GenerateFromWorkbook(result.Workbook, outputDir, baseName)
+                    : SpreadsheetThumbnail.GenerateAndSave(result, outputDir, baseName);
+
+            if (!string.IsNullOrEmpty(fullPath))
+            {
+                lock (dbService)
+                {
+                    dbService.UpsertDocumentImages(publishedPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH,
+                        previewData: fullData, thumbData: thumbData);
+                }
+                Console.WriteLine($"  [THUMB] {baseName}: {fullW}x{fullH} preview, {thumbW}x{thumbH} thumb");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [WARN] Spreadsheet thumbnail error: {ex.Message}");
+        }
+    }
+
+    Console.WriteLine($"  [SPREADSHEET] {result.FileName}: {result.SheetCount} sheets, {result.Rows.Count} rows, {sentences.Count} sentences");
+    await Task.CompletedTask;
+}
+
+async Task ProcessMediaFile(string filePath, int? dataSetId = null, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
+{
+    // Skip if already processed
+    if (!forceReprocess && dbService.DocumentExists(filePath))
+    {
+        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(filePath)}");
+        return;
+    }
+
+    // 1. Extract metadata
+    var mediaMeta = MediaFileProcessor.GetMetadata(filePath);
+    var sentences = MediaFileProcessor.ToSentences(mediaMeta);
+
+    // Ensure Published output directory exists
+    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
+        System.IO.Directory.CreateDirectory(publishedDir);
+
+    // 2. Build metadata (reuse PdfMetadata for uniform DB storage)
+    var fileInfo = new System.IO.FileInfo(filePath);
+
+    var metadata = new PdfMetadata
+    {
+        FileName = System.IO.Path.GetFileName(filePath),
+        Title = $"{mediaMeta.MediaType.ToUpperInvariant()}: {mediaMeta.FileName}",
+        PageCount = 0,
+        Text = sentences,
+        Names = new List<string>(),
+        DataSetName = dataSetName ?? "",
+        SourceName = sourceFolderName ?? "",
+        OriginalFilePath = filePath,
+        IngestedAtUtc = DateTime.UtcNow,
+        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
+        WordCount = 0
+    };
+
+    // 3. Copy source file to Published folder
+    string publishedPath = filePath;
+    if (!string.IsNullOrEmpty(publishedDir))
+    {
+        publishedPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(filePath));
+        if (!System.IO.File.Exists(publishedPath))
+        {
+            System.IO.File.Copy(filePath, publishedPath);
+            Console.WriteLine($"  Copied → Published: {System.IO.Path.GetFileName(filePath)}");
+        }
+    }
+
+    // 4. Save JSON metadata
+    string dateStr = "UnknownDate";
+    string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}_{dateStr}";
+    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
+    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
+    string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
+    System.IO.File.WriteAllText(jsonPath, json);
+
+    // 5. Insert into Postgres
+    try
+    {
+        lock (dbService)
+        {
+            dbService.InsertDocument(publishedPath, metadata, dataSetId);
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"DB Error: {ex.Message}");
+    }
+
+    // 6. Capture thumbnail for video files (if ffmpeg is available)
+    if (MediaFileProcessor.IsVideoFile(filePath) && !noImages)
+    {
+        string thumbDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
+        string baseName = System.IO.Path.GetFileNameWithoutExtension(filePath);
+        string? thumbPath = MediaFileProcessor.CaptureThumbnail(filePath, thumbDir, baseName);
+        if (thumbPath != null)
+        {
+            try
+            {
+                var thumbInfo = new System.IO.FileInfo(thumbPath);
+                lock (dbService)
+                {
+                    dbService.UpsertDocumentImages(publishedPath, "", 0, 0, thumbPath, 100, 0);
+                }
+                Console.WriteLine($"  [MEDIA] Thumbnail saved: {System.IO.Path.GetFileName(thumbPath)}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [MEDIA] Thumbnail DB error: {ex.Message}");
+            }
+        }
+    }
+
+    string durationStr = mediaMeta.Duration.HasValue ? $", {mediaMeta.Duration.Value:hh\\:mm\\:ss}" : "";
+    Console.WriteLine($"  [{mediaMeta.MediaType.ToUpperInvariant()}] {mediaMeta.FileName}{durationStr}");
+    await Task.CompletedTask;
+}
 
 DateTime? DeduceDateFromText(string text)
 {
@@ -946,28 +1196,25 @@ string CleanMimeArtifacts(string text)
 }
 
 /// <summary>
-/// Extract names from document text using regex/heuristic patterns.
-/// Targets email headers (From:, To:, Cc:, Sent by:) and common name patterns.
+/// Extract names and terms from document text using regex/heuristic patterns.
+/// Names: high-confidence person names from email headers, salutations, and contextual patterns.
+/// Terms: broader capitalized-word pairs that may be names, places, or notable phrases.
 /// </summary>
-List<string> ExtractNamesFromText(string text)
+(List<string> Names, List<string> Terms) ExtractNamesAndTerms(string text)
 {
     var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    if (string.IsNullOrWhiteSpace(text)) return names.ToList();
+    var terms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    if (string.IsNullOrWhiteSpace(text)) return (new List<string>(), new List<string>());
 
     // Use first 8000 chars - most names appear in headers at the top
     string snippet = text.Length > 8000 ? text.Substring(0, 8000) : text;
 
-    // --- 1. Email header patterns (From:, To:, Cc:, Sent by:) ---
-    // Matches "From: FirstName LastName" or "To: FirstName LastName"
-    // Stops at common non-name tokens (email, angle brackets, dates, etc.)
+    // --- 1. Email header patterns (From:, To:, Cc:, Sent by:) → Names ---
     // NOTE: [a-z=] and [A-Z=] allow '=' as a wildcard for MIME-damaged characters
-    //       e.g. "Ep=tein" matches as a name, then '=' is stripped in CleanExtractedName
     var headerPatterns = new[]
     {
         @"(?:From|To|Cc|Bcc|Sent\s*(?:by)?)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
-        // "From: Jeffrey Epstein <email>"
         @"(?:From|To|Cc|Bcc)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*<",
-        // Multi-recipient: "To: FirstName LastName; FirstName2 LastName2"
         @"(?:To|Cc|Bcc)\s*:\s*(?:(?:[A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*;\s*)*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
     };
 
@@ -980,33 +1227,32 @@ List<string> ExtractNamesFromText(string text)
         }
     }
 
-    // --- 2. "Dear X" / "Hi X" / "Hello X" patterns ---
+    // --- 2. "Dear X" / "Hi X" / "Hello X" patterns → Names ---
     foreach (Match m in Regex.Matches(snippet, @"\b(?:Dear|Hi|Hello|Attn)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20})?)", RegexOptions.None))
     {
         var name = CleanExtractedName(m.Groups[1].Value);
         if (IsValidPersonName(name)) names.Add(name);
     }
 
-    // --- 3. Known-name-context patterns ---
-    // "Appt w/ PersonName" or "LUNCH w/ PersonName" or "meeting with PersonName"
+    // --- 3. Known-name-context patterns → Names ---
     foreach (Match m in Regex.Matches(snippet, @"\b(?:w/|with|meeting\s+with|Appt\s+w/|LUNCH\s+w/)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20}))", RegexOptions.None))
     {
         var name = CleanExtractedName(m.Groups[1].Value);
         if (IsValidPersonName(name)) names.Add(name);
     }
 
-    // --- 4. Capitalized "Firstname Lastname" sequences that look like person names ---
-    // This is the broadest pattern - two adjacent capitalized words not matching common non-name patterns
+    // --- 4. Capitalized "Firstname Lastname" sequences → Terms (unless already a Name) ---
     foreach (Match m in Regex.Matches(snippet, @"\b([A-Z=][a-z=]{2,15}\s+[A-Z=][a-z=]{2,20})\b"))
     {
-        var candidate = m.Groups[1].Value;
+        var candidate = CleanExtractedName(m.Groups[1].Value);
         if (IsValidPersonName(candidate) && !IsCommonPhrase(candidate))
         {
-            names.Add(candidate);
+            if (!names.Contains(candidate))
+                terms.Add(candidate);
         }
     }
 
-    return names.OrderBy(p => p).ToList();
+    return (names.OrderBy(p => p).ToList(), terms.OrderBy(t => t).ToList());
 }
 
 string CleanExtractedName(string name)
