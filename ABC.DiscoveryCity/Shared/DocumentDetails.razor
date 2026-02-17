@@ -193,15 +193,66 @@
             return Path.Combine(dir, Path.ChangeExtension(Path.GetFileName(path), ".mp4"));
         }
     }
-
-    protected override void OnParametersSet()
+  
+    private ISvgIcon FileIcon => Category switch
     {
-        // Reset PDF data and tab when document changes
-        if (Document?.FilePath != LoadedPdfPath)
+        FileCategory.Pdf => SvgIcon.FilePdf,
+        FileCategory.Spreadsheet => SvgIcon.FileExcel,
+        FileCategory.Video => SvgIcon.FileVideo,
+        FileCategory.Audio => SvgIcon.FileAudio,
+        _ => SvgIcon.File
+    };
+    //
+
+    private string FileCategoryLabel => Category switch
+    {
+        FileCategory.Pdf => "PDF Document",
+        FileCategory.Spreadsheet => "Spreadsheet",
+        FileCategory.Video => "Video File",
+        FileCategory.Audio => "Audio File",
+        _ => "Document"
+    };
+
+    private string ViewerTabTitle => Category switch
+    {
+        FileCategory.Pdf => "PDF Viewer",
+        FileCategory.Spreadsheet => "Spreadsheet Viewer",
+        FileCategory.Video or FileCategory.Audio => "Media Info",
+        _ => "Document Viewer"
+    };
+
+    private string PageCountLabel => Category switch
+    {
+        FileCategory.Spreadsheet => "Sheets",
+        _ => "Pages"
+    };
+
+    private string TextPreviewTitle => Category switch
+    {
+        FileCategory.Spreadsheet => "Spreadsheet Content",
+        FileCategory.Video or FileCategory.Audio => "Media Metadata",
+        _ => "Text Preview"
+    };
+
+    private string ContentTypeLabel => Category switch
+    {
+        FileCategory.Spreadsheet => "Row",
+        FileCategory.Video or FileCategory.Audio => "Metadata",
+        _ => "Sentence"
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Document?.FilePath != LoadedViewerPath)
         {
-            PdfData = null;
-            LoadedPdfPath = null;
-            _activeTabIndex = 0;
+            ViewerData = null;
+            LoadedViewerPath = null;
+            // Keep current tab — parent controls ActiveTabIndex
+            // If already on Viewer tab, auto-load the new document
+            if (ActiveTabIndex == 1 && HasNativeViewer)
+            {
+                await LoadViewerDataAsync();
+            }
         }
     }
 
