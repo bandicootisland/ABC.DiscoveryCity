@@ -224,7 +224,7 @@
             _ => FileCategory.Unknown
         };
     }
-
+  
     private ISvgIcon FileIcon => Category switch
     {
         FileCategory.Pdf => SvgIcon.FilePdf,
@@ -233,6 +233,7 @@
         FileCategory.Audio => SvgIcon.FileAudio,
         _ => SvgIcon.File
     };
+    //
 
     private string FileCategoryLabel => Category switch
     {
