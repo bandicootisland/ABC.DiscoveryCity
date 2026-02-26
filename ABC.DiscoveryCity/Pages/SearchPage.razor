@@ -44,8 +44,11 @@
                              PageSize="50"
                              RowHeight="60"
                              Height="100%"
-                             OnRowClick="@OnRowClick">
+                             SelectionMode="@GridSelectionMode.Single"
+                             SelectedItems="@SelectedItems"
+                             SelectedItemsChanged="@((IEnumerable<SearchResultDto> items) => OnSelectionChanged(items))">
                     <GridColumns>
+                        <GridCheckboxColumn SelectAll="false" Width="42px" />
                         <GridColumn Title="Thumb" Width="80px">
                              <Template>
                                 @{
@@ -330,10 +333,12 @@
             AvailableNames = combined.OrderBy(n => n).ToList();
     }
 
-    private void OnRowClick(GridRowClickEventArgs args)
+    private IEnumerable<SearchResultDto> SelectedItems { get; set; } = Enumerable.Empty<SearchResultDto>();
+
+    private void OnSelectionChanged(IEnumerable<SearchResultDto> items)
     {
-        var item = args.Item as SearchResultDto;
-        SelectedDetail = (SelectedDetail == item) ? null : item;
+        SelectedItems = items;
+        SelectedDetail = items.FirstOrDefault();
     }
 
     private static ISvgIcon GetFileIcon(string? fileName)
