@@ -13,6 +13,9 @@ public class SearchService
         _httpClient = httpClient;
     }
 
+    /// <summary>API base URL (without trailing slash) for building image src URLs etc.</summary>
+    public string ApiBaseUrl => _httpClient.BaseAddress!.ToString().TrimEnd('/');
+
     public async Task<List<SearchResultDto>> SearchAsync(string query, int limit = 20, bool exactMatch = false, List<string>? datasets = null, List<string>? names = null)
     {
         try

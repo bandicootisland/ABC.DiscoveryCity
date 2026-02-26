@@ -9,6 +9,11 @@
                 <TelerikTextBox @bind-Value="@SearchQuery"
                                 OnChange="@OnSearchTextChanged"
                                 PlaceHolder="Enter search term..." Width="100%" />
+                @if (!string.IsNullOrEmpty(SearchQuery))
+                {
+                    <TelerikButton OnClick="@OnClearSearch" Icon="@SvgIcon.X" Title="Clear search"
+                                   ButtonType="@ButtonType.Button" />
+                }
                 <TelerikButton ButtonType="@ButtonType.Submit" Icon="@SvgIcon.Search">Search</TelerikButton>
             </div>
         </EditForm>
@@ -33,6 +38,10 @@
                                 OnChange="@OnNamesSelectionChanged" />
             <TelerikButton OnClick="@OnNamesSearchClicked" Icon="@SvgIcon.Search" Title="Search with selected name filter"
                            Enabled="@(SelectedNames.Count > 0)" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary" />
+            @if (HasActiveFilters)
+            {
+                <TelerikButton OnClick="@OnClearAll" Icon="@SvgIcon.FilterClear" Title="Clear all filters" />
+            }
         </div>
     </div>
 </div>
@@ -50,6 +59,9 @@
     [Parameter] public EventCallback OnDataSetChanged { get; set; }
     [Parameter] public EventCallback OnNamesSearch { get; set; }
 
+    private bool HasActiveFilters =>
+        !string.IsNullOrEmpty(SearchQuery) || SelectedDataSets.Count > 0 || SelectedNames.Count > 0;
+
     private async Task OnSearchTextChanged(object newValue)
     {
         SearchQuery = newValue?.ToString() ?? "";
@@ -59,6 +71,25 @@
 
     private async Task OnSearchClicked()
     {
+        await OnSearch.InvokeAsync();
+    }
+
+    private async Task OnClearSearch()
+    {
+        SearchQuery = "";
+        await SearchQueryChanged.InvokeAsync(SearchQuery);
+        await OnSearch.InvokeAsync();
+    }
+
+    private async Task OnClearAll()
+    {
+        SearchQuery = "";
+        SelectedDataSets = new();
+        SelectedNames = new();
+        _previousNamesCount = 0;
+        await SearchQueryChanged.InvokeAsync(SearchQuery);
+        await SelectedDataSetsChanged.InvokeAsync(SelectedDataSets);
+        await SelectedNamesChanged.InvokeAsync(SelectedNames);
         await OnSearch.InvokeAsync();
     }
 

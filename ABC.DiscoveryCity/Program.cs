@@ -12,10 +12,11 @@ namespace ABC.DiscoveryCity
             builder.RootComponents.Add<App>("#app");
             builder.RootComponents.Add<HeadOutlet>("head::after");
 
-            // Configure HttpClient to point to the API
-            builder.Services.AddScoped(sp => new HttpClient 
-            { 
-                BaseAddress = new Uri("http://localhost:5022/") // API base URL
+            // Configure HttpClient to point to the API (reads from wwwroot/appsettings.json)
+            var apiBase = builder.Configuration["ApiBaseUrl"] ?? "http://localhost:5022";
+            builder.Services.AddScoped(sp => new HttpClient
+            {
+                BaseAddress = new Uri(apiBase.TrimEnd('/') + "/")
             });
             
             builder.Services.AddTelerikBlazor();
