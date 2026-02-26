@@ -4,12 +4,14 @@
 
 <div class="row mb-3">
     <div class="col-md-4">
-        <div class="input-group">
-            <TelerikTextBox @bind-Value="@SearchQuery"
-                            OnChange="@OnSearchTextChanged"
-                            PlaceHolder="Enter search term..." Width="100%" />
-            <TelerikButton OnClick="@OnSearchClicked" Icon="@SvgIcon.Search">Search</TelerikButton>
-        </div>
+        <EditForm Model="@this" OnValidSubmit="@OnSearchClicked">
+            <div class="input-group">
+                <TelerikTextBox @bind-Value="@SearchQuery"
+                                OnChange="@OnSearchTextChanged"
+                                PlaceHolder="Enter search term..." Width="100%" />
+                <TelerikButton ButtonType="@ButtonType.Submit" Icon="@SvgIcon.Search">Search</TelerikButton>
+            </div>
+        </EditForm>
     </div>
     <div class="col-md-5">
         <TelerikMultiSelect Data="@AvailableDataSets"
