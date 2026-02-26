@@ -13,7 +13,7 @@
                 <div class="col-md-5">
                     @if (!string.IsNullOrEmpty(Document?.ThumbnailPath))
                     {
-                        <img src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(OverviewImagePath)}")"
+                        <img src="@($"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(Document.FullImagePath ?? Document.ThumbnailPath)}")"
                              style="width: 100%; height: auto; border: 1px solid #ddd; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;" />
                     }
                     else
@@ -37,7 +37,7 @@
                 <div class="col-md-7">
                     <h4 class="mb-3">@TextPreviewTitle</h4>
                     <div class="card h-100">
-                        <div class="card-body" style="background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
+                        <div class="card-body" style="max-height: 600px; overflow-y: auto; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
                             <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
                             @if (!string.IsNullOrEmpty(Document?.Text))
                             {
@@ -54,62 +54,90 @@
         </div>
     </TabStripTab>
     <TabStripTab Title="@ViewerTabTitle">
-        <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
-            <SplitterPanes>
-                <SplitterPane Size="55%">
-                    @if (IsMediaFile)
-                    {
-                        @if (IsVideoFile)
+        @if (Category == FileCategory.Pdf)
+        {
+            <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
+                <SplitterPanes>
+                    <SplitterPane Size="55%">
+                        @if (IsLoadingViewer)
                         {
-                            <video controls style="width: 100%; max-height: 780px;"
-                                   src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(MediaFilePath)}")">
-                                Your browser does not support video playback.
-                            </video>
+                            <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
+                                <TelerikLoader Visible="true" />
+                                <span class="ms-2">Loading PDF...</span>
+                            </div>
+                        }
+                        else if (ViewerData != null && ViewerData.Length > 0)
+                        {
+                            <TelerikPdfViewer Data="@ViewerData"
+                                              Zoom="1.0m"
+                                              Width="100%"
+                                              Height="100%" />
                         }
                         else
                         {
-                            <audio controls style="width: 100%; margin-top: 40px;"
-                                   src="@($"http://localhost:5022/api/images/view?path={Uri.EscapeDataString(MediaFilePath)}")">
-                                Your browser does not support audio playback.
-                            </audio>
+                            <div class="d-flex align-items-center justify-content-center text-muted" style="height: 100%;">
+                                No PDF available
+                            </div>
                         }
-                    }
-                    else if (IsLoadingViewer)
-                    {
-                        <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
-                            <TelerikLoader Visible="true" />
-                            <span class="ms-2">Loading document...</span>
+                    </SplitterPane>
+                    <SplitterPane>
+                        <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
+                            <div style="color: #666; margin-bottom: 1em;">[Sentence]<br/><br/></div>
+                            @if (!string.IsNullOrEmpty(Document?.Text))
+                            {
+                                @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
+                            }
+                            else
+                            {
+                                <span class="text-muted fst-italic">No text content available.</span>
+                            }
                         </div>
-                    }
-                    else if (ViewerData != null && ViewerData.Length > 0)
-                    {
-                        <TelerikPdfViewer Data="@ViewerData"
-                                          Zoom="1.0m"
-                                          Width="100%"
-                                          Height="100%" />
-                    }
-                    else
-                    {
-                        <div class="d-flex align-items-center justify-content-center text-muted" style="height: 100%;">
-                            No PDF available
-                        </div>
-                    }
-                </SplitterPane>
-                <SplitterPane>
-                    <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
-                        <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
-                        @if (!string.IsNullOrEmpty(Document?.Text))
-                        {
-                            @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
-                        }
-                        else
-                        {
-                            <span class="text-muted fst-italic">No text content available.</span>
-                        }
-                    </div>
-                </SplitterPane>
-            </SplitterPanes>
-        </TelerikSplitter>
+                    </SplitterPane>
+                </SplitterPanes>
+            </TelerikSplitter>
+        }
+        else if (HasNativeViewer)
+        {
+            @if (IsLoadingViewer)
+            {
+                <div class="d-flex align-items-center justify-content-center" style="height: 800px;">
+                    <TelerikLoader Visible="true" />
+                    <span class="ms-2">Loading @FileCategoryLabel...</span>
+                </div>
+            }
+            else if (ViewerData != null && ViewerData.Length > 0)
+            {
+                <TelerikSpreadsheet Data="@ViewerData"
+                                    Height="800px"
+                                    Width="100%" />
+            }
+            else
+            {
+                <div class="d-flex align-items-center justify-content-center text-muted" style="height: 800px;">
+                    <TelerikIcon Icon="@FileIcon" />
+                    <span class="ms-2">No data available</span>
+                </div>
+            }
+        }
+        else
+        {
+            <div style="height: 800px; overflow-y: auto; padding: 20px; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
+                <div class="mb-3 d-flex align-items-center gap-2">
+                    <TelerikIcon Icon="@FileIcon" />
+                    <strong>@FileCategoryLabel</strong>
+                    <span class="text-muted">— @Document?.FileName</span>
+                </div>
+                <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
+                @if (!string.IsNullOrEmpty(Document?.Text))
+                {
+                    @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
+                }
+                else
+                {
+                    <span class="text-muted fst-italic">No content available.</span>
+                }
+            </div>
+        }
     </TabStripTab>
     <TabStripTab Title="Metadata">
         <div class="p-3">
@@ -124,7 +152,7 @@
             }
             <div class="card">
                 <div class="card-header"><strong>Document Metadata (JSONB)</strong></div>
-                <div class="card-body">
+                <div class="card-body" style="max-height: 600px; overflow-y: auto;">
                     @if (MetadataEntries.Count > 0)
                     {
                         <table class="table table-sm table-striped mb-0">
@@ -172,59 +200,31 @@
     private string RemoteUrl => Document?.SourceUrl ?? "";
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
 
-    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
-        { ".avi", ".mp4", ".vob" };
-    private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
-        { ".m4a" };
-
-    // For media files, FullImagePath may point to the video/audio file itself — always use ThumbnailPath.
-    // For documents (PDF etc.), prefer the higher-res FullImagePath when available.
-    private string OverviewImagePath => IsMediaFile
-        ? (Document?.ThumbnailPath ?? "")
-        : (Document?.FullImagePath ?? Document?.ThumbnailPath ?? "");
-
-    private bool IsMediaFile => Document?.FileName != null &&
-        (VideoExtensions.Contains(Path.GetExtension(Document.FileName)) ||
-         AudioExtensions.Contains(Path.GetExtension(Document.FileName)));
-
     private enum FileCategory { Pdf, Spreadsheet, Video, Audio, Unknown }
+
+    private FileCategory Category => GetFileCategory();
 
     private string FileExtension =>
         System.IO.Path.GetExtension(Document?.FileName ?? "").ToLowerInvariant();
-
-    private FileCategory Category => GetFileCategory();
 
     /// <summary>
     /// True when the file type has a native Telerik viewer (PDF or any spreadsheet).
     /// The API converts .xls/.csv to .xlsx on the fly for the TelerikSpreadsheet control.
     /// </summary>
     private bool HasNativeViewer => Category == FileCategory.Pdf || Category == FileCategory.Spreadsheet;
-
-    private bool IsVideoFile => Document?.FileName != null &&
-        VideoExtensions.Contains(Path.GetExtension(Document.FileName));
-
-    private string MediaFilePath
-    {
-        get
-        {
-            var path = Document?.FilePath ?? "";
-            var dir = Path.GetDirectoryName(path) ?? "";
-            return Path.Combine(dir, Path.ChangeExtension(Path.GetFileName(path), ".mp4"));
-        }
-    }
-
+//
     private FileCategory GetFileCategory()
     {
         return FileExtension switch
         {
             ".pdf" => FileCategory.Pdf,
             ".xlsx" or ".xls" or ".csv" => FileCategory.Spreadsheet,
-            ".avi" or ".mp4" or ".vob" => FileCategory.Video,
-            ".m4a" => FileCategory.Audio,
+            ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv" => FileCategory.Video,
+            ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => FileCategory.Audio,
             _ => FileCategory.Unknown
         };
     }
-
+  
     private ISvgIcon FileIcon => Category switch
     {
         FileCategory.Pdf => SvgIcon.FilePdf,
@@ -233,6 +233,7 @@
         FileCategory.Audio => SvgIcon.FileAudio,
         _ => SvgIcon.File
     };
+    //
 
     private string FileCategoryLabel => Category switch
     {
