@@ -3,10 +3,12 @@
     display: grid;
     grid-template-columns: 280px 1fr;
     height: 100vh;
-    background-color: #0d1117; /* Deep space dark for high data contrast */
+    background-color: #0d1117;
+    /* Deep space dark for high data contrast */
     color: #c9d1d9;
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    margin: -1rem; /* Adjust based on your MainLayout padding */
+    margin: -1rem;
+    /* Adjust based on your MainLayout padding */
 }
 
 .facet-sidebar {
@@ -72,7 +74,8 @@
     display: flex;
     flex-wrap: wrap;
     align-content: flex-start;
-    overflow-y: scroll; /* Changed from 'auto' to 'scroll' to prevent layout shift */
+    overflow-y: scroll;
+    /* Changed from 'auto' to 'scroll' to prevent layout shift */
     overflow-x: hidden;
 }
 

@@ -12,8 +12,7 @@
                                      OnChange="@OnSearchTextChanged"
                                      Placeholder="Enter search term..."
                                      Width="100%"
-                                     Filterable="true"
-                                     ClearButton="false" />
+                                     Filterable="true" />
                 @if (!string.IsNullOrEmpty(_localSearchText))
                 {
                     <TelerikButton OnClick="@OnClearSearch" Icon="@SvgIcon.X" Title="Clear search"

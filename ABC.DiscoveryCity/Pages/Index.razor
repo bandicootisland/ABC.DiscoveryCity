@@ -1,0 +1,87 @@
+@page "/"
+@inject NavigationManager NavigationManager
+
+<PageTitle>Dæmask - Home</PageTitle>
+
+<div class="daemask-home">
+    <!-- Gradient background effect -->
+    <div class="glow-orb blue"></div>
+    <div class="glow-orb orange"></div>
+
+    <div class="home-container">
+        <!-- Header -->
+        <header class="home-header">
+            <div class="logo-container ps-4">
+                <img src="/images/homepage/daemask-logo.jpg" alt="Dæmask Logo" class="brand-logo" />
+            </div>
+            <nav class="home-nav pe-4">
+                <button class="btn-ghost" @onclick='() => NavigationManager.NavigateTo("/search")'>Search</button>
+                <button class="btn-ghost" @onclick='() => NavigationManager.NavigateTo("/browse")'>Browse</button>
+                <button class="btn-primary" @onclick='() => NavigationManager.NavigateTo("/workspace")'>Enter Workspace</button>
+            </nav>
+        </header>
+
+        <!-- Hero Section -->
+        <section class="hero-section">
+            <div class="hero-content">
+                <h1 class="hero-title">
+                    Discover <br/>
+                    <span class="highlight-blue">Intelligence.</span><br/>
+                    <span class="highlight-orange">Visualize</span> Data.
+                </h1>
+                <p class="hero-subtitle">
+                    Dæmask provides a revolutionary approach to data discovery. 
+                    Explore your datasets, visualize relationships, and uncover insights 
+                    through an immersive, hardware-accelerated workspace.
+                </p>
+                
+                <div class="hero-actions">
+                    <button class="btn-primary-large" @onclick='() => NavigationManager.NavigateTo("/workspace")'>
+                        Launch Dæmask Workspace <i class="bi bi-arrow-right"></i>
+                    </button>
+                </div>
+                
+                <div class="hero-stats">
+                    <div class="stat-item">
+                        <span class="stat-value">1M+</span>
+                        <span class="stat-label">Documents Indexed</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value">Vector</span>
+                        <span class="stat-label">HNSW Search</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-value">WebGL</span>
+                        <span class="stat-label">Hardware Acceleration</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="hero-visual">
+                <div class="banner-wrapper">
+                    <img src="/images/homepage/daemask-banner.jpg" alt="Dæmask Environment" class="hero-banner" />
+                    <div class="banner-overlay"></div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- Feature Highlights -->
+        <section class="features-section">
+            <div class="feature-card">
+                <div class="feature-icon"><i class="bi bi-search"></i></div>
+                <h3>Deep Search</h3>
+                <p>Hybrid semantic and full-text search capabilities using Reciprocal Rank Fusion.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon"><i class="bi bi-grid-3x3"></i></div>
+                <h3>Grid & Pivot</h3>
+                <p>Filter, group, and examine metadata effortlessly across complex datasets.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon"><i class="bi bi-diagram-3"></i></div>
+                <h3>Graph Relationships</h3>
+                <p>Traverse data clusters in a frictionless, highly responsive WebGL environment.</p>
+            </div>
+        </section>
+    </div>
+</div>

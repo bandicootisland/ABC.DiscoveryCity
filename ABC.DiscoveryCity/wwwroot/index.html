@@ -57,6 +57,12 @@
                 container.scrollTop -= rowHeight;
             }
         };
+        window.scrollBrowseCardIntoView = (index) => {
+            const cards = document.querySelectorAll('.browse-card');
+            if (cards && cards.length > index) {
+                cards[index].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
+        };
         window.triggerFileDownload = (url, fileName) => {
             const anchor = document.createElement('a');
             anchor.href = url;

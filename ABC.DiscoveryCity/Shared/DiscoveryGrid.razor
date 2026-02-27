@@ -1,0 +1,44 @@
+@using ABC.DiscoveryCity.Models
+
+<div class="discovery-grid-container">
+    <table class="daemask-data-table">
+        <thead>
+            <tr>
+                <th style="width: 40px;"><input type="checkbox" /></th>
+                <th style="width: 60px;">Thumb</th>
+                <th style="width: 20%;">File Name</th>
+                <th>Date</th>
+                <th>Pages</th>
+                <th>DataSet</th>
+                <th style="width: 100px;">Relevance</th>
+                <th style="width: 35%;">Preview Text</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var doc in Documents)
+            {
+                <tr @onclick="() => OnRowClicked.InvokeAsync(doc)">
+                    <td><input type="checkbox" @onclick:stopPropagation /></td>
+                    <td>
+                        <div class="doc-thumb-mini">📄</div>
+                    </td>
+                    <td class="primary-text">@doc.Title</td>
+                    <td>@(doc.CreatedDate.Year > 2000 ? doc.CreatedDate.ToShortDateString() : "Unknown")</td>
+                    <td>@doc.PageCount</td>
+                    <td>DataSet 7</td> 
+                    <td>
+                        <div class="relevance-track">
+                            <div class="relevance-fill" style="width: @(doc.RelevanceScore * 100)%"></div>
+                        </div>
+                    </td>
+                    <td class="preview-text">@doc.Snippet</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Parameter] public List<DocumentNode> Documents { get; set; } = new();
+    [Parameter] public EventCallback<DocumentNode> OnRowClicked { get; set; }
+}

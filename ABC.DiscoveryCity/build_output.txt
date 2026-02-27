@@ -1,0 +1,24 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+C:\Program Files\dotnet\sdk\10.0.200-preview.0.26103.119\Sdks\Microsoft.NET.Sdk\targets\Microsoft.NET.RuntimeIdentifierInference.targets(383,5): message NETSDK1057: You are using a preview version of .NET. See: https://aka.ms/dotnet-support-policy [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+  [Telerik and Kendo UI Licensing]
+        Your Telerik UI for Blazor subscription is active. Expiration in 339 days.
+  [Telerik and Kendo UI Licensing]
+        Your Telerik Document Processing Libraries subscription is active. Expiration in 339 days.
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(28,88): error RZ10008: The attribute 'oninput' is used two or more times for this element. Attributes must be unique (case-insensitive). The attribute 'oninput' is used by the '@bind' directive attribute. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Layout\MainLayout.razor(32,31): warning CS8618: Non-nullable property 'NavigationManager' must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring the property as nullable. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(104,26): warning CS8625: Cannot convert null literal to non-nullable reference type. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(94,57): warning CS8625: Cannot convert null literal to non-nullable reference type. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(109,53): warning CS8618: Non-nullable field '_dotNetHelper' must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring the field as nullable. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+
+Build FAILED.
+
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Layout\MainLayout.razor(32,31): warning CS8618: Non-nullable property 'NavigationManager' must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring the property as nullable. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(104,26): warning CS8625: Cannot convert null literal to non-nullable reference type. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(94,57): warning CS8625: Cannot convert null literal to non-nullable reference type. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(109,53): warning CS8618: Non-nullable field '_dotNetHelper' must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring the field as nullable. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\Pages\DaemaskWorkspace.razor(28,88): error RZ10008: The attribute 'oninput' is used two or more times for this element. Attributes must be unique (case-insensitive). The attribute 'oninput' is used by the '@bind' directive attribute. [C:\Developer.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity\ABC.DiscoveryCity.csproj]
+    4 Warning(s)
+    1 Error(s)
+
+Time Elapsed 00:00:03.97

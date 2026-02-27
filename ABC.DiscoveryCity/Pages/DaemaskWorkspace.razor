@@ -3,6 +3,7 @@
 @using ABC.DiscoveryCity.Services
 @inject IJSRuntime JS
 @inject IWeftDataService DataService
+@inject UserListService UserListService
 
 <div class="daemask-layout">
     <aside class="facet-sidebar">
@@ -23,9 +24,16 @@
 
     <main class="workspace-core">
         <header class="workspace-toolbar">
-            <div class="search-bar">
-                <input type="text" @bind="SearchQuery" placeholder="Query Weft engine..." 
+            <div class="search-bar" style="display: flex; gap: 10px; align-items: center;">
+                <input type="text" value="@SearchQuery" @oninput="OnSearchInput" placeholder="Query Weft engine..." 
                        style="padding: 6px; background: #0d1117; border: 1px solid #30363d; color: white; width: 250px;"/>
+                <select @onchange="OnListSelected" disabled="@(!AvailableLists.Any())" style="padding: 6px; background: #0d1117; border: 1px solid #30363d; color: white; cursor: pointer;">
+                    <option value="">Load Saved List...</option>
+                    @foreach (var list in AvailableLists)
+                    {
+                        <option value="@list.Id" selected="@(_targetListId == list.Id)">@list.Name</option>
+                    }
+                </select>
                 <button @onclick="ExecuteSearch" style="padding: 6px 12px; background: #238636; color: white; border: none; cursor: pointer;">Search</button>
             </div>
             <div class="view-toggles">
@@ -47,36 +55,14 @@
             {
             @if (ActiveView == ViewMode.Grid)
             {
-                <div style="overflow-y: auto; height: 100%;">
-                    <table style="width: 100%; text-align: left; border-collapse: collapse;">
-                        <thead>
-                            <tr style="border-bottom: 1px solid #30363d;">
-                                <th>ID</th>
-                                <th>Title</th>
-                                <th>Type</th>
-                                <th>Score</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var doc in CurrentDocuments)
-                            {
-                                <tr style="border-bottom: 1px solid #21262d;">
-                                    <td>@doc.Id</td>
-                                    <td>@doc.Title</td>
-                                    <td>@doc.DocumentType</td>
-                                    <td>@doc.RelevanceScore</td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
+                <DiscoveryGrid Documents="CurrentDocuments" OnRowClicked="OpenInspector" />
             }
             else if (ActiveView == ViewMode.Pivot)
             {
                 <div id="pivot-container" class="pivot-grid">
                     @foreach (var doc in CurrentDocuments)
                     {
-                        <div class="pivot-card @doc.DocumentType" data-category="@doc.DocumentType">
+                        <div class="pivot-card @doc.DocumentType" data-category="@doc.DocumentType" @onclick="() => OpenInspector(doc)">
     <span style="font-size: 24px; margin-bottom: 10px;">📄</span>
     <span class="doc-title" style="font-size: 0.85rem;">@doc.Title</span>
     <span style="font-size: 0.7rem; color: #8b949e; margin-top: 5px;">@doc.DocumentType</span>
@@ -89,6 +75,8 @@
                 <div id="graph-canvas-container" style="width: 100%; height: 100%; overflow: hidden;"></div>
             }
         }
+
+            <DocumentInspector Document="ActiveDocument" OnCloseClicked="CloseInspector" />
         </section>
     </main>
 </div>
@@ -103,14 +91,51 @@
     private List<string> AvailableTypes = new() { "PDF", "Email", "Image", "Transcript" };
     private HashSet<string> SelectedTypes = new() { "PDF", "Email", "Image", "Transcript" };
 
+    private DocumentNode ActiveDocument { get; set; } = null;
+
+    private void OpenInspector(DocumentNode doc)
+    {
+        ActiveDocument = doc;
+        StateHasChanged();
+    }
+
+    private void CloseInspector()
+    {
+        ActiveDocument = null;
+        StateHasChanged();
+    }
+
     private bool IsLoading { get; set; } = false;
     private DotNetObjectReference<DaemaskWorkspace> _dotNetHelper;
+    private List<UserList> AvailableLists { get; set; } = new();
+    private string _targetListId = "";
 
     protected override async Task OnInitializedAsync()
     {
         // Initialize the helper
         _dotNetHelper = DotNetObjectReference.Create(this);
+        AvailableLists = await UserListService.GetAllAsync();
         await ExecuteSearch();
+    }
+
+    private async Task OnListSelected(ChangeEventArgs e)
+    {
+        _targetListId = e.Value?.ToString() ?? "";
+        if (!string.IsNullOrEmpty(_targetListId))
+        {
+            SearchQuery = ""; // Clear text query
+        }
+        await ExecuteSearch();
+    }
+
+    private void OnSearchInput(ChangeEventArgs e)
+    {
+        SearchQuery = e.Value?.ToString() ?? "";
+        if (!string.IsNullOrEmpty(_targetListId))
+        {
+            _targetListId = ""; // Unselect list when typing in search
+            StateHasChanged();
+        }
     }
 
     private async Task ExecuteSearch()
@@ -121,7 +146,10 @@
         try
         {
             var typesToQuery = ActiveView == ViewMode.Pivot ? AvailableTypes.ToHashSet() : SelectedTypes;
-            CurrentDocuments = await DataService.QueryDocumentsAsync(SearchQuery, typesToQuery);
+            
+            var queryParameter = !string.IsNullOrEmpty(_targetListId) ? $"list:{_targetListId}" : SearchQuery;
+            
+            CurrentDocuments = await DataService.QueryDocumentsAsync(queryParameter, typesToQuery);
             
             if (ActiveView == ViewMode.Graph) 
             {
@@ -195,13 +223,13 @@
     [JSInvokable]
     public void OnNodeSelectedFromGraph(string nodeId)
     {
-        // For now, let's just log it to the UI or console so we know it works.
-        // Eventually, this will set an 'ActiveDocumentId' and slide open a reading pane.
-        Console.WriteLine($"[Dæmask Architect] JS invoked C#. Selected Node ID: {nodeId}");
+        // Find the full document model from our current dataset based on the ID JS sent us
+        var targetDoc = CurrentDocuments.FirstOrDefault(d => d.Id == nodeId);
         
-        // Example of updating UI state based on the click:
-        SearchQuery = $"ID:{nodeId}";
-        StateHasChanged(); 
+        if (targetDoc != null)
+        {
+            OpenInspector(targetDoc);
+        }
     }
 
     

@@ -60,15 +60,49 @@
         <TelerikDialog @bind-Visible="_showSaveListDialog" Title="Save to List" Width="400px">
             <DialogContent>
                 <div class="mb-3">
-                    <label class="form-label">List Name</label>
-                    <TelerikTextBox @bind-Value="_newListName" PlaceHolder="Enter list name..." Width="100%" />
+                    <label class="form-label">Destination</label>
+                    <div class="d-flex flex-column gap-2 mb-2">
+                        <label class="form-check">
+                            <input type="radio" class="form-check-input" checked="@(_saveToListMode == "new")" @onchange="@(() => _saveToListMode = "new")" />
+                            Create new list
+                        </label>
+                        @if (AvailableLists != null && AvailableLists.Any())
+                        {
+                            <label class="form-check">
+                                <input type="radio" class="form-check-input" checked="@(_saveToListMode == "existing")" @onchange="@(() => _saveToListMode = "existing")" />
+                                Add to existing list
+                            </label>
+                        }
+                    </div>
                 </div>
+
+                @if (_saveToListMode == "new")
+                {
+                    <div class="mb-3">
+                        <label class="form-label">New List Name</label>
+                        <input type="text" class="form-control" @bind="_newListName" @bind:event="oninput" placeholder="Enter list name..." />
+                    </div>
+                }
+                else
+                {
+                    <div class="mb-3">
+                        <label class="form-label">Select List</label>
+                        <TelerikDropDownList Data="@AvailableLists"
+                                             @bind-Value="_selectedExistingListId"
+                                             TextField="Name"
+                                             ValueField="Id"
+                                             DefaultText="Select a list..."
+                                             Width="100%">
+                        </TelerikDropDownList>
+                    </div>
+                }
+                
                 <p class="text-muted small">@SelectedItems.Count() documents will be saved.</p>
             </DialogContent>
             <DialogButtons>
                 <TelerikButton OnClick="@(() => _showSaveListDialog = false)">Cancel</TelerikButton>
                 <TelerikButton OnClick="@SaveSelectionToList" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
-                               Enabled="@(!string.IsNullOrWhiteSpace(_newListName))">Save</TelerikButton>
+                               Enabled="@CanSaveList">Save</TelerikButton>
             </DialogButtons>
         </TelerikDialog>
     }
@@ -243,6 +277,12 @@
     private bool _showAdvancedFind;
     private bool _showSaveListDialog;
     private string _newListName = "";
+    private string _saveToListMode = "new"; 
+    private string? _selectedExistingListId;
+    private List<UserList> AvailableLists { get; set; } = new();
+
+    private bool CanSaveList => 
+        _saveToListMode == "new" ? !string.IsNullOrWhiteSpace(_newListName) : !string.IsNullOrEmpty(_selectedExistingListId);
 
     // Debounce: cancels in-flight scroll requests when new scrolls arrive
     private CancellationTokenSource _gridReadCts = new();
@@ -258,6 +298,8 @@
         AvailableDataSets = (await SearchService.GetDataSetNamesAsync())
             .OrderBy(n => Regex.Replace(n, @"\d+", m => m.Value.PadLeft(10, '0')))
             .ToList();
+            
+        AvailableLists = await UserListService.GetAllAsync();
         // Grid will fire OnRead automatically on first render
     }
 
@@ -495,12 +537,33 @@
 
     private async Task SaveSelectionToList()
     {
-        if (string.IsNullOrWhiteSpace(_newListName) || !SelectedItems.Any()) return;
-        var list = UserListService.CreateFromSearchResults(_newListName, SearchQuery, SelectedItems);
-        await UserListService.SaveAsync(list);
-        NotificationService.ShowSuccess($"Saved {list.Items.Count} documents to \"{_newListName}\"");
+        if (!SelectedItems.Any()) return;
+
+        if (_saveToListMode == "new")
+        {
+            if (string.IsNullOrWhiteSpace(_newListName)) return;
+            var list = UserListService.CreateFromSearchResults(_newListName, SearchQuery, SelectedItems);
+            await UserListService.SaveAsync(list);
+            NotificationService.ShowSuccess($"Saved {list.Items.Count} documents to new list \"{_newListName}\"");
+        }
+        else if (_saveToListMode == "existing" && !string.IsNullOrEmpty(_selectedExistingListId))
+        {
+            var targetList = await UserListService.GetByIdAsync(_selectedExistingListId);
+            if (targetList != null)
+            {
+                var sourceList = UserListService.CreateFromSearchResults(" temp ", SearchQuery, SelectedItems);
+                UserListService.Append(targetList, sourceList); 
+                await UserListService.SaveAsync(targetList);
+                NotificationService.ShowSuccess($"Added {SelectedItems.Count()} documents to \"{targetList.Name}\"");
+            }
+        }
+        
+        // Refresh available lists so next time we open it, it's up to date
+        AvailableLists = await UserListService.GetAllAsync();
+        
         _showSaveListDialog = false;
         _newListName = "";
+        _selectedExistingListId = null;
     }
 
     private void OnAdvancedFindApply(AdvancedFindCriteria criteria)
