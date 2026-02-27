@@ -1,19 +1,14 @@
 @using Telerik.Blazor
 @using Telerik.Blazor.Components
 @using Telerik.Blazor.Components.Common.Icon
-@inject IJSRuntime JS
 
 <div class="row mb-3">
     <div class="col-md-4">
         <EditForm Model="@this" OnValidSubmit="@OnSearchClicked">
             <div class="input-group">
-                <TelerikAutoComplete Data="@_searchHistory"
-                                     @bind-Value="@_localSearchText"
-                                     OnChange="@OnSearchTextChanged"
-                                     Placeholder="Enter search term..."
-                                     Width="100%"
-                                     Filterable="true"
-                                     ClearButton="false" />
+                <TelerikTextBox @bind-Value="@_localSearchText"
+                                OnChange="@OnSearchTextChanged"
+                                PlaceHolder="Enter search term..." Width="100%" />
                 @if (!string.IsNullOrEmpty(_localSearchText))
                 {
                     <TelerikButton OnClick="@OnClearSearch" Icon="@SvgIcon.X" Title="Clear search"
@@ -75,33 +70,10 @@
 
     // Local backing field — isolates the text box from parent re-renders
     private string _localSearchText = "";
-    private List<string> _searchHistory = new();
 
-    protected override async Task OnInitializedAsync()
+    protected override void OnInitialized()
     {
         _localSearchText = SearchQuery;
-        await LoadSearchHistory();
-    }
-
-    private async Task LoadSearchHistory()
-    {
-        try
-        {
-            var history = await JS.InvokeAsync<List<string>>("pageState.getSearchHistory");
-            _searchHistory = history ?? new();
-        }
-        catch { _searchHistory = new(); }
-    }
-
-    private async Task SaveToHistory(string query)
-    {
-        if (string.IsNullOrWhiteSpace(query)) return;
-        try
-        {
-            await JS.InvokeVoidAsync("pageState.addToSearchHistory", query);
-            await LoadSearchHistory();
-        }
-        catch { }
     }
 
     private bool HasActiveFilters =>
@@ -118,7 +90,6 @@
     {
         // Sync local text to parent before searching
         await SearchQueryChanged.InvokeAsync(_localSearchText);
-        await SaveToHistory(_localSearchText);
         await OnSearch.InvokeAsync();
     }
 
