@@ -6,6 +6,7 @@
 @using Telerik.Blazor.Components.Common.Icon
 @using static ABC.DiscoveryCity.Services.TextFormatExtensions
 @inject SearchService SearchService
+@inject IJSRuntime JS
 
 <PageTitle>Discovery Search</PageTitle>
 
@@ -30,10 +31,16 @@
     {
         <div class="mb-2 text-muted"><strong>@TotalCount.ToString("N0")</strong> documents found</div>
     }
-    <TelerikSplitter Orientation="@SplitterOrientation.Vertical" Height="calc(100vh - 160px)">
+    <div class="d-flex align-items-center gap-3 mb-1">
+        <label class="form-check form-check-inline mb-0">
+            <input type="checkbox" class="form-check-input" @bind="IsMultiSelectMode" />
+            <span class="form-check-label text-muted small">Multi-select</span>
+        </label>
+    </div>
+    <TelerikSplitter Orientation="@SplitterOrientation.Vertical" Height="calc(100vh - 185px)">
         <SplitterPanes>
             <SplitterPane Size="650px" Min="300px">
-                <div @onkeydown="OnGridKeyDown" tabindex="0" style="outline: none; height: 100%;">
+                <div @onkeydown="OnGridKeyDown" @onkeydown:preventDefault tabindex="0" style="outline: none; height: 100%;">
                 <TelerikGrid @ref="GridRef"
                              TItem="SearchResultDto"
                              OnRead="@OnGridRead"
@@ -45,11 +52,12 @@
                              PageSize="50"
                              RowHeight="60"
                              Height="100%"
-                             SelectionMode="@GridSelectionMode.Single"
+                             SelectionMode="@(IsMultiSelectMode ? GridSelectionMode.Multiple : GridSelectionMode.Single)"
                              SelectedItems="@SelectedItems"
-                             SelectedItemsChanged="@((IEnumerable<SearchResultDto> items) => OnSelectionChanged(items))">
+                             SelectedItemsChanged="@((IEnumerable<SearchResultDto> items) => OnSelectionChanged(items))"
+                             OnRowClick="@OnRowClick">
                     <GridColumns>
-                        <GridCheckboxColumn SelectAll="false" Width="42px" />
+                        <GridCheckboxColumn SelectAll="@IsMultiSelectMode" Width="42px" />
                         <GridColumn Title="Thumb" Width="80px">
                              <Template>
                                 @{
@@ -162,6 +170,7 @@
 
     private SearchResultDto? SelectedDetail { get; set; }
     private int _detailTabIndex;
+    private bool IsMultiSelectMode { get; set; } = false;
 
     // Debounce: cancels in-flight scroll requests when new scrolls arrive
     private CancellationTokenSource _gridReadCts = new();
@@ -239,6 +248,13 @@
             TotalCount = result.TotalCount;
             HasSearched = true;
 
+            // Clear preview when fresh results arrive so skeleton shows
+            if (skip == 0)
+            {
+                SelectedDetail = null;
+                SelectedItems = Enumerable.Empty<SearchResultDto>();
+            }
+
             UpdateAvailableNames(result.Items);
         }
         catch (Exception ex)
@@ -271,7 +287,7 @@
 
         try
         {
-            await Task.Delay(500, token);
+            await Task.Delay(300, token);
             if (!token.IsCancellationRequested)
             {
                 RebindGrid();
@@ -339,13 +355,39 @@
 
     private IEnumerable<SearchResultDto> SelectedItems { get; set; } = Enumerable.Empty<SearchResultDto>();
 
+    // Suppress SelectedItemsChanged when OnRowClick already handled the toggle
+    private bool _suppressSelectionChanged;
+
+    private void OnRowClick(GridRowClickEventArgs args)
+    {
+        if (!IsMultiSelectMode) return; // Single-select uses default grid behaviour
+
+        var item = (SearchResultDto)args.Item;
+        var currentList = SelectedItems.ToList();
+
+        if (currentList.Contains(item))
+            currentList.Remove(item);
+        else
+            currentList.Add(item);
+
+        SelectedItems = currentList;
+        SelectedDetail = item; // Show the clicked item in the detail pane
+        _suppressSelectionChanged = true;
+    }
+
     private void OnSelectionChanged(IEnumerable<SearchResultDto> items)
     {
+        if (_suppressSelectionChanged)
+        {
+            _suppressSelectionChanged = false;
+            return;
+        }
+
         SelectedItems = items;
         SelectedDetail = items.FirstOrDefault();
     }
 
-    private void OnGridKeyDown(KeyboardEventArgs e)
+    private async Task OnGridKeyDown(KeyboardEventArgs e)
     {
         if (e.Key == "Escape")
         {
@@ -364,6 +406,7 @@
         var item = GridData[newIndex];
         SelectedDetail = item;
         SelectedItems = new[] { item };
+        await JS.InvokeVoidAsync("scrollGridRowIntoView", newIndex, 60);
     }
 
     private void OnPageKeyDown(KeyboardEventArgs e)

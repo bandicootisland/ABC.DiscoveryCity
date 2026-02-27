@@ -45,6 +45,19 @@
     <script src="js/pageState.js"></script>
     <script>navigator.serviceWorker.register('service-worker.js');</script>
     <script>
+        window.scrollGridRowIntoView = (rowIndex, rowHeight) => {
+            const container = document.querySelector('.k-grid-content');
+            if (!container) return;
+            const targetTop = rowIndex * rowHeight;
+            const targetBottom = targetTop + rowHeight;
+            const viewTop = container.scrollTop;
+            const viewBottom = viewTop + container.clientHeight;
+            if (targetBottom > viewBottom) {
+                container.scrollTop += rowHeight;
+            } else if (targetTop < viewTop) {
+                container.scrollTop -= rowHeight;
+            }
+        };
         window.triggerFileDownload = (url, fileName) => {
             const anchor = document.createElement('a');
             anchor.href = url;
