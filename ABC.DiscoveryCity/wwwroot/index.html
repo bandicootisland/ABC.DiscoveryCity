@@ -19,7 +19,6 @@
     <script src="https://unpkg.com/force-graph"></script>
     <script src="https://unpkg.com/isotope-layout@3/dist/isotope.pkgd.min.js"></script>
     <script src="js/daemask-viz.js"></script>
-    <script src="_content/Telerik.UI.for.Blazor/js/telerik-blazor.js"></script>
 </head>
 
 <body>
@@ -65,6 +64,14 @@
             document.body.appendChild(anchor);
             anchor.click();
             document.body.removeChild(anchor);
+        };
+        window.copyTextToClipboard = async (text) => {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch {
+                return false;
+            }
         };
         window.saveTextAsFile = (filename, content) => {
             var link = document.createElement('a');

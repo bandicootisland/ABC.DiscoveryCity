@@ -1,0 +1,113 @@
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+
+<TelerikWindow @bind-Visible="@Visible"
+               Title="Advanced Find"
+               Width="550px"
+               Height="auto"
+               Draggable="true"
+               Modal="false">
+    <WindowActions>
+        <WindowAction Name="Close" />
+    </WindowActions>
+    <WindowContent>
+        <div class="p-3">
+            <div class="mb-3">
+                <label class="form-label fw-bold">Search Text</label>
+                <TelerikTextBox @bind-Value="@_criteria.TextQuery" PlaceHolder="Keywords..." Width="100%" />
+            </div>
+
+            <div class="row mb-3">
+                <div class="col-6">
+                    <label class="form-label fw-bold">Date From</label>
+                    <TelerikDatePicker @bind-Value="@_criteria.DateFrom" Width="100%" Format="yyyy-MM-dd" />
+                </div>
+                <div class="col-6">
+                    <label class="form-label fw-bold">Date To</label>
+                    <TelerikDatePicker @bind-Value="@_criteria.DateTo" Width="100%" Format="yyyy-MM-dd" />
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-bold">DataSets</label>
+                <TelerikMultiSelect Data="@AvailableDataSets"
+                                    @bind-Value="@_criteria.DataSets"
+                                    Placeholder="All DataSets"
+                                    Width="100%"
+                                    AutoClose="false"
+                                    Filterable="true" />
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-bold">Names</label>
+                <TelerikMultiSelect Data="@AvailableNames"
+                                    @bind-Value="@_criteria.Names"
+                                    Placeholder="Any name..."
+                                    Width="100%"
+                                    AutoClose="false"
+                                    Filterable="true"
+                                    AllowCustom="true" />
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-bold">File Types</label>
+                <div class="d-flex flex-wrap gap-3">
+                    <label class="form-check form-check-inline">
+                        <input type="checkbox" class="form-check-input" @bind="_criteria.IncludePdf" /> PDF
+                    </label>
+                    <label class="form-check form-check-inline">
+                        <input type="checkbox" class="form-check-input" @bind="_criteria.IncludeSpreadsheet" /> Spreadsheet
+                    </label>
+                    <label class="form-check form-check-inline">
+                        <input type="checkbox" class="form-check-input" @bind="_criteria.IncludeVideo" /> Video
+                    </label>
+                    <label class="form-check form-check-inline">
+                        <input type="checkbox" class="form-check-input" @bind="_criteria.IncludeAudio" /> Audio
+                    </label>
+                    <label class="form-check form-check-inline">
+                        <input type="checkbox" class="form-check-input" @bind="_criteria.IncludeOther" /> Other
+                    </label>
+                </div>
+            </div>
+
+            <div class="row mb-3">
+                <div class="col-6">
+                    <label class="form-label fw-bold">Min Pages</label>
+                    <TelerikNumericTextBox @bind-Value="@_criteria.MinPages" Min="0" Width="100%" />
+                </div>
+                <div class="col-6">
+                    <label class="form-label fw-bold">Max Pages</label>
+                    <TelerikNumericTextBox @bind-Value="@_criteria.MaxPages" Min="0" Width="100%" />
+                </div>
+            </div>
+
+            <div class="d-flex justify-content-end gap-2">
+                <TelerikButton OnClick="@OnReset" ButtonType="@ButtonType.Button">Reset</TelerikButton>
+                <TelerikButton OnClick="@OnApply" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary">Apply</TelerikButton>
+            </div>
+        </div>
+    </WindowContent>
+</TelerikWindow>
+
+@code {
+    [Parameter] public bool Visible { get; set; }
+    [Parameter] public EventCallback<bool> VisibleChanged { get; set; }
+    [Parameter] public List<string> AvailableDataSets { get; set; } = new();
+    [Parameter] public List<string> AvailableNames { get; set; } = new();
+    [Parameter] public EventCallback<AdvancedFindCriteria> OnApplyCriteria { get; set; }
+
+    private AdvancedFindCriteria _criteria = new();
+
+    private async Task OnApply()
+    {
+        await OnApplyCriteria.InvokeAsync(_criteria);
+        Visible = false;
+        await VisibleChanged.InvokeAsync(false);
+    }
+
+    private void OnReset()
+    {
+        _criteria.Reset();
+    }
+}

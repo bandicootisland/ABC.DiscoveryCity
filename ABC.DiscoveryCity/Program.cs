@@ -23,6 +23,8 @@ namespace ABC.DiscoveryCity
             
             builder.Services.AddScoped<IWeftDataService, MockWeftDataService>();
             
+            builder.Services.AddScoped<NotificationService>();
+            builder.Services.AddScoped<UserListService>();
             builder.Services.AddScoped<TorrentService>();
             builder.Services.AddScoped<SearchService>();
             

@@ -6,6 +6,8 @@
 @using Telerik.Blazor.Components.Common.Icon
 @using static ABC.DiscoveryCity.Services.TextFormatExtensions
 @inject SearchService SearchService
+@inject UserListService UserListService
+@inject NotificationService NotificationService
 @inject IJSRuntime JS
 
 <PageTitle>Discovery Search</PageTitle>
@@ -20,23 +22,56 @@
                    @bind-SelectedNames="SelectedNames"
                    OnSearch="@OnSearchRequested"
                    OnDataSetChanged="@OnDataSetFilterChanged"
-                   OnNamesSearch="@OnNamesSearchRequested" />
+                   OnNamesSearch="@OnNamesSearchRequested"
+                   TotalCount="@TotalCount"
+                   OnAdvancedFind="@(() => _showAdvancedFind = true)" />
+
+    <AdvancedFindDialog @bind-Visible="_showAdvancedFind"
+                        AvailableDataSets="@AvailableDataSets"
+                        AvailableNames="@AvailableNames"
+                        OnApplyCriteria="@OnAdvancedFindApply" />
 
     @if (GridData != null && GridData.Count == 0 && TotalCount == 0 && HasSearched)
     {
         <div class="alert alert-warning">No results found.</div>
     }
-
-    @if (TotalCount > 0)
+    @if (string.IsNullOrWhiteSpace(SearchQuery) && TotalCount > 0)
     {
-        <div class="mb-2 text-muted"><strong>@TotalCount.ToString("N0")</strong> documents found</div>
+        <div class="mb-1 text-muted fst-italic small">Browsing recent documents</div>
     }
     <div class="d-flex align-items-center gap-3 mb-1">
         <label class="form-check form-check-inline mb-0">
             <input type="checkbox" class="form-check-input" @bind="IsMultiSelectMode" />
             <span class="form-check-label text-muted small">Multi-select</span>
         </label>
+        @if (IsMultiSelectMode && SelectedItems.Any())
+        {
+            <TelerikButton OnClick="@(() => _showSaveListDialog = true)"
+                           Icon="@SvgIcon.Save"
+                           ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                           Size="@ThemeConstants.Button.Size.Small">
+                Save @SelectedItems.Count() to List
+            </TelerikButton>
+        }
     </div>
+
+    @if (_showSaveListDialog)
+    {
+        <TelerikDialog @bind-Visible="_showSaveListDialog" Title="Save to List" Width="400px">
+            <DialogContent>
+                <div class="mb-3">
+                    <label class="form-label">List Name</label>
+                    <TelerikTextBox @bind-Value="_newListName" PlaceHolder="Enter list name..." Width="100%" />
+                </div>
+                <p class="text-muted small">@SelectedItems.Count() documents will be saved.</p>
+            </DialogContent>
+            <DialogButtons>
+                <TelerikButton OnClick="@(() => _showSaveListDialog = false)">Cancel</TelerikButton>
+                <TelerikButton OnClick="@SaveSelectionToList" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                               Enabled="@(!string.IsNullOrWhiteSpace(_newListName))">Save</TelerikButton>
+            </DialogButtons>
+        </TelerikDialog>
+    }
     <TelerikSplitter Orientation="@SplitterOrientation.Vertical" Height="calc(100vh - 185px)">
         <SplitterPanes>
             <SplitterPane Size="650px" Min="300px">
@@ -79,7 +114,21 @@
                              </Template>
                         </GridColumn>
                         <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
-                        <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date (Estimated)" Width="120px" DisplayFormat="{0:yyyy-MM-dd}" />
+                        <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date" Width="120px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    if (item?.Date != null)
+                                    {
+                                        <span title="Date deduced from document content">~@item.Date.Value.ToString("yyyy-MM-dd")</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">Unknown</span>
+                                    }
+                                }
+                            </Template>
+                        </GridColumn>
                         <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
                         <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
                         <GridColumn Title="Names" Width="150px">
@@ -94,7 +143,21 @@
                                 }
                             </Template>
                         </GridColumn>
-                        <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" DisplayFormat="{0:F4}" Width="100px" />
+                        <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" Width="120px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var pct = Math.Max(0, (1 - (item?.Distance ?? 1)) * 100);
+                                    var color = pct >= 70 ? "#28a745" : pct >= 40 ? "#ffc107" : "#dc3545";
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                        <div style="flex: 1; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;">
+                                            <div style="width: @($"{pct:F0}%"); height: 100%; background: @color; border-radius: 4px;"></div>
+                                        </div>
+                                        <span style="font-size: 0.8em; min-width: 36px; text-align: right;">@($"{pct:F0}%")</span>
+                                    </div>
+                                }
+                            </Template>
+                        </GridColumn>
                         <GridColumn Field="@nameof(SearchResultDto.Text)" Title="Preview Text">
                             <Template>
                                 @{
@@ -115,7 +178,13 @@
                     {
                         <div class="d-flex justify-content-between align-items-center mb-2">
                             <h5 class="mb-0">@SelectedDetail.FileName</h5>
-                            <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
+                            <div class="d-flex gap-1">
+                                @if (!string.IsNullOrEmpty(SelectedDetail.FilePath))
+                                {
+                                    <TelerikButton OnClick="@(() => DownloadFile(SelectedDetail))" Icon="@SvgIcon.Download" Title="Download original file" />
+                                }
+                                <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
+                            </div>
                         </div>
                         <DocumentDetails Document="@SelectedDetail"
                                          @bind-ActiveTabIndex="_detailTabIndex"
@@ -171,6 +240,9 @@
     private SearchResultDto? SelectedDetail { get; set; }
     private int _detailTabIndex;
     private bool IsMultiSelectMode { get; set; } = false;
+    private bool _showAdvancedFind;
+    private bool _showSaveListDialog;
+    private string _newListName = "";
 
     // Debounce: cancels in-flight scroll requests when new scrolls arrive
     private CancellationTokenSource _gridReadCts = new();
@@ -419,6 +491,36 @@
         _gridReadCts.Cancel();
         _searchTextCts.Cancel();
         _dataSetDebounceCts.Cancel();
+    }
+
+    private async Task SaveSelectionToList()
+    {
+        if (string.IsNullOrWhiteSpace(_newListName) || !SelectedItems.Any()) return;
+        var list = UserListService.CreateFromSearchResults(_newListName, SearchQuery, SelectedItems);
+        await UserListService.SaveAsync(list);
+        NotificationService.ShowSuccess($"Saved {list.Items.Count} documents to \"{_newListName}\"");
+        _showSaveListDialog = false;
+        _newListName = "";
+    }
+
+    private void OnAdvancedFindApply(AdvancedFindCriteria criteria)
+    {
+        if (!string.IsNullOrWhiteSpace(criteria.TextQuery))
+            SearchQuery = criteria.TextQuery;
+
+        if (criteria.DataSets.Count > 0)
+            SelectedDataSets = new List<string>(criteria.DataSets);
+
+        if (criteria.Names.Count > 0)
+            SelectedNames = new List<string>(criteria.Names);
+
+        RebindGrid();
+    }
+
+    private async Task DownloadFile(SearchResultDto doc)
+    {
+        var url = $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(doc.FilePath!)}";
+        await JS.InvokeVoidAsync("triggerFileDownload", url, doc.FileName);
     }
 
     private static ISvgIcon GetFileIcon(string? fileName)

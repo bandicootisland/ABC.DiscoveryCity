@@ -1,0 +1,211 @@
+@page "/browse"
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+@using Telerik.Blazor.Components.Common.Icon
+@using static ABC.DiscoveryCity.Services.TextFormatExtensions
+@inject SearchService SearchService
+@inject IJSRuntime JS
+
+<PageTitle>Browse Documents</PageTitle>
+
+<div class="container-fluid">
+    <h3>Browse Documents</h3>
+
+    <div class="mb-3">
+        <div class="input-group" style="max-width: 400px;">
+            <TelerikTextBox @bind-Value="@_searchQuery" PlaceHolder="Filter documents..." Width="100%" />
+            <TelerikButton OnClick="@OnSearch" Icon="@SvgIcon.Search">Search</TelerikButton>
+            @if (!string.IsNullOrEmpty(_searchQuery))
+            {
+                <TelerikButton OnClick="@OnClear" Icon="@SvgIcon.X" Title="Clear" />
+            }
+        </div>
+    </div>
+
+    <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="calc(100vh - 170px)">
+        <SplitterPanes>
+            <SplitterPane Size="35%" Min="250px">
+                <div class="browse-card-list" style="height: 100%; overflow-y: auto; padding: 8px;">
+                    @if (_documents == null)
+                    {
+                        <div class="d-flex justify-content-center p-4">
+                            <TelerikLoader Visible="true" />
+                        </div>
+                    }
+                    else if (_documents.Count == 0)
+                    {
+                        <div class="text-center text-muted p-4">No documents found.</div>
+                    }
+                    else
+                    {
+                        @foreach (var doc in _documents)
+                        {
+                            <div class="browse-card @(doc == _selectedDoc ? "selected" : "")"
+                                 @onclick="@(() => SelectDocument(doc))">
+                                <div class="d-flex gap-3">
+                                    @if (!string.IsNullOrEmpty(doc.ThumbnailPath))
+                                    {
+                                        <img src="@($"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(doc.ThumbnailPath)}")"
+                                             class="browse-card-thumb" alt="" />
+                                    }
+                                    else
+                                    {
+                                        <div class="browse-card-thumb-placeholder">
+                                            <TelerikIcon Icon="@GetFileIcon(doc.FileName)" />
+                                        </div>
+                                    }
+                                    <div class="flex-grow-1 overflow-hidden">
+                                        <div class="fw-bold text-truncate" title="@doc.FileName">@doc.FileName</div>
+                                        <div class="text-muted small">
+                                            @if (doc.Date != null)
+                                            {
+                                                <span title="Date deduced from document content">~@doc.Date.Value.ToString("yyyy-MM-dd")</span>
+                                            }
+                                            else
+                                            {
+                                                <span>Unknown date</span>
+                                            }
+                                        </div>
+                                        @if (!string.IsNullOrEmpty(doc.DataSetName))
+                                        {
+                                            <span class="badge bg-secondary mt-1">@doc.DataSetName</span>
+                                        }
+                                        @if (doc.Names is { Count: > 0 })
+                                        {
+                                            <div class="mt-1">
+                                                @foreach (var name in doc.Names.Take(3))
+                                                {
+                                                    <span class="badge bg-info text-dark me-1">@name</span>
+                                                }
+                                                @if (doc.Names.Count > 3)
+                                                {
+                                                    <span class="text-muted small">+@(doc.Names.Count - 3)</span>
+                                                }
+                                            </div>
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                        @if (_hasMore)
+                        {
+                            <div class="text-center py-3">
+                                <TelerikButton OnClick="@LoadMore" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary">
+                                    Load more
+                                </TelerikButton>
+                            </div>
+                        }
+                    }
+                </div>
+            </SplitterPane>
+            <SplitterPane Min="300px">
+                <div class="border rounded p-3 bg-light" style="height: 100%; overflow-y: auto;">
+                    @if (_selectedDoc != null)
+                    {
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h5 class="mb-0">@_selectedDoc.FileName</h5>
+                            <div class="d-flex gap-1">
+                                @if (!string.IsNullOrEmpty(_selectedDoc.FilePath))
+                                {
+                                    <TelerikButton OnClick="@(() => DownloadFile(_selectedDoc))" Icon="@SvgIcon.Download" Title="Download" />
+                                }
+                                <TelerikButton OnClick="@(() => _selectedDoc = null)" Icon="@SvgIcon.X" Title="Close" />
+                            </div>
+                        </div>
+                        <DocumentDetails Document="@_selectedDoc"
+                                         @bind-ActiveTabIndex="_detailTabIndex"
+                                         SearchQuery="@_searchQuery" />
+                    }
+                    else
+                    {
+                        <div class="text-center text-muted p-5">
+                            <em>Select a document card to view details</em>
+                        </div>
+                    }
+                </div>
+            </SplitterPane>
+        </SplitterPanes>
+    </TelerikSplitter>
+</div>
+
+@code {
+    private string _searchQuery = "";
+    private List<SearchResultDto>? _documents;
+    private SearchResultDto? _selectedDoc;
+    private int _detailTabIndex;
+    private int _loadedCount;
+    private int _totalCount;
+    private bool _hasMore;
+    private const int PageSize = 50;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadDocuments(reset: true);
+    }
+
+    private async Task LoadDocuments(bool reset)
+    {
+        if (reset)
+        {
+            _loadedCount = 0;
+            _documents = null;
+            _selectedDoc = null;
+        }
+
+        var query = string.IsNullOrWhiteSpace(_searchQuery) ? null : _searchQuery;
+        var result = await SearchService.SearchPagedAsync(query, _loadedCount, PageSize, exactMatch: true);
+
+        if (reset)
+            _documents = result.Items;
+        else
+            _documents!.AddRange(result.Items);
+
+        _totalCount = result.TotalCount;
+        _loadedCount = _documents.Count;
+        _hasMore = _loadedCount < _totalCount;
+    }
+
+    private async Task OnSearch()
+    {
+        SearchService.ClearPageCache();
+        await LoadDocuments(reset: true);
+    }
+
+    private async Task OnClear()
+    {
+        _searchQuery = "";
+        SearchService.ClearPageCache();
+        await LoadDocuments(reset: true);
+    }
+
+    private async Task LoadMore()
+    {
+        await LoadDocuments(reset: false);
+    }
+
+    private void SelectDocument(SearchResultDto doc)
+    {
+        _selectedDoc = doc;
+        _detailTabIndex = 0;
+    }
+
+    private async Task DownloadFile(SearchResultDto doc)
+    {
+        var url = $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(doc.FilePath!)}";
+        await JS.InvokeVoidAsync("triggerFileDownload", url, doc.FileName);
+    }
+
+    private static ISvgIcon GetFileIcon(string? fileName)
+    {
+        var ext = System.IO.Path.GetExtension(fileName ?? "").ToLowerInvariant();
+        return ext switch
+        {
+            ".pdf" => SvgIcon.FilePdf,
+            ".xlsx" or ".xls" or ".csv" => SvgIcon.FileExcel,
+            ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv" => SvgIcon.FileVideo,
+            ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => SvgIcon.FileAudio,
+            _ => SvgIcon.File
+        };
+    }
+}

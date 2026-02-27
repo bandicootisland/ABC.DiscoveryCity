@@ -1,0 +1,237 @@
+@page "/lists"
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+@using Telerik.Blazor.Components.Common.Icon
+@inject UserListService ListService
+@inject NotificationService NotificationService
+@inject NavigationManager Nav
+@inject SearchService SearchService
+@inject IJSRuntime JS
+
+<PageTitle>My Lists</PageTitle>
+
+<div class="container-fluid">
+    <h3>My Lists</h3>
+
+    @if (_lists == null)
+    {
+        <TelerikLoader Visible="true" />
+    }
+    else if (_lists.Count == 0)
+    {
+        <div class="alert alert-info">
+            No saved lists yet. Multi-select documents on the Search page and click "Save to List".
+        </div>
+    }
+    else
+    {
+        @if (_selectedLists.Count >= 2)
+        {
+            <div class="mb-3 d-flex gap-2">
+                <TelerikButton OnClick="@(() => DoSetOperation("merge"))" Icon="@SvgIcon.HyperlinkOpen">Merge</TelerikButton>
+                <TelerikButton OnClick="@(() => DoSetOperation("xor"))">XOR</TelerikButton>
+                <TelerikButton OnClick="@(() => DoSetOperation("trim"))">Trim (A - B)</TelerikButton>
+                <TelerikButton OnClick="@(() => DoSetOperation("append"))">Append (B → A)</TelerikButton>
+                <span class="text-muted small align-self-center">@_selectedLists.Count lists selected</span>
+            </div>
+        }
+
+        <TelerikGrid Data="@_lists"
+                     SelectionMode="@GridSelectionMode.Multiple"
+                     SelectedItems="@_selectedLists"
+                     SelectedItemsChanged="@((IEnumerable<UserList> items) => _selectedLists = items.ToList())"
+                     Sortable="true"
+                     Height="auto">
+            <GridColumns>
+                <GridCheckboxColumn Width="42px" />
+                <GridColumn Field="@nameof(UserList.Name)" Title="Name" Width="200px" />
+                <GridColumn Title="Documents" Width="100px">
+                    <Template>
+                        @{ var list = (UserList)context; }
+                        @list.Items.Count
+                    </Template>
+                </GridColumn>
+                <GridColumn Field="@nameof(UserList.CreatedAt)" Title="Created" Width="150px" DisplayFormat="{0:yyyy-MM-dd HH:mm}" />
+                <GridColumn Field="@nameof(UserList.ModifiedAt)" Title="Modified" Width="150px" DisplayFormat="{0:yyyy-MM-dd HH:mm}" />
+                <GridColumn Field="@nameof(UserList.SourceQuery)" Title="Source Query" />
+                <GridColumn Title="Actions" Width="280px">
+                    <Template>
+                        @{
+                            var list = (UserList)context;
+                            <div class="d-flex gap-1">
+                                <TelerikButton OnClick="@(() => ToggleExpand(list.Id))"
+                                               Icon="@(_expandedId == list.Id ? SvgIcon.MinusCircle : SvgIcon.PlusCircle)"
+                                               Size="@ThemeConstants.Button.Size.Small">View</TelerikButton>
+                                <TelerikButton OnClick="@(() => StartRename(list))"
+                                               Icon="@SvgIcon.Pencil"
+                                               Size="@ThemeConstants.Button.Size.Small">Rename</TelerikButton>
+                                <TelerikButton OnClick="@(() => ExportToExcel(list))"
+                                               Icon="@SvgIcon.FileExcel"
+                                               Size="@ThemeConstants.Button.Size.Small">Export</TelerikButton>
+                                @if (!string.IsNullOrEmpty(list.SourceQuery))
+                                {
+                                    <TelerikButton OnClick="@(() => OpenInSearch(list))"
+                                                   Icon="@SvgIcon.Search"
+                                                   Size="@ThemeConstants.Button.Size.Small">Search</TelerikButton>
+                                }
+                                <TelerikButton OnClick="@(() => DeleteList(list))"
+                                               Icon="@SvgIcon.Trash"
+                                               Size="@ThemeConstants.Button.Size.Small"
+                                               ThemeColor="@ThemeConstants.Button.ThemeColor.Error" />
+                            </div>
+                        }
+                    </Template>
+                </GridColumn>
+            </GridColumns>
+        </TelerikGrid>
+
+        @if (_expandedId != null)
+        {
+            var expandedList = _lists.FirstOrDefault(l => l.Id == _expandedId);
+            if (expandedList != null)
+            {
+                <div class="mt-3 border rounded p-3">
+                    <h5>@expandedList.Name — @expandedList.Items.Count documents</h5>
+                    <TelerikGrid Data="@expandedList.Items"
+                                 Sortable="true"
+                                 Pageable="true"
+                                 PageSize="20"
+                                 Height="400px">
+                        <GridColumns>
+                            <GridColumn Field="@nameof(UserListItem.FileName)" Title="File Name" Width="250px" />
+                            <GridColumn Field="@nameof(UserListItem.DataSetName)" Title="DataSet" Width="120px" />
+                            <GridColumn Field="@nameof(UserListItem.Date)" Title="Date" Width="110px" DisplayFormat="{0:yyyy-MM-dd}" />
+                            <GridColumn Field="@nameof(UserListItem.PageCount)" Title="Pages" Width="80px" />
+                            <GridColumn Title="Names">
+                                <Template>
+                                    @{
+                                        var item = (UserListItem)context;
+                                        @if (item.Names is { Count: > 0 })
+                                        {
+                                            @string.Join(", ", item.Names)
+                                        }
+                                    }
+                                </Template>
+                            </GridColumn>
+                        </GridColumns>
+                    </TelerikGrid>
+                </div>
+            }
+        }
+    }
+
+    @if (_showRenameDialog)
+    {
+        <TelerikDialog @bind-Visible="_showRenameDialog" Title="Rename List" Width="400px">
+            <DialogContent>
+                <TelerikTextBox @bind-Value="_renameText" PlaceHolder="New name..." Width="100%" />
+            </DialogContent>
+            <DialogButtons>
+                <TelerikButton OnClick="@(() => _showRenameDialog = false)">Cancel</TelerikButton>
+                <TelerikButton OnClick="@ConfirmRename" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                               Enabled="@(!string.IsNullOrWhiteSpace(_renameText))">Rename</TelerikButton>
+            </DialogButtons>
+        </TelerikDialog>
+    }
+</div>
+
+@code {
+    private List<UserList>? _lists;
+    private List<UserList> _selectedLists = new();
+    private string? _expandedId;
+    private bool _showRenameDialog;
+    private string _renameText = "";
+    private string? _renameTargetId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadLists();
+    }
+
+    private async Task LoadLists()
+    {
+        _lists = await ListService.GetAllAsync();
+    }
+
+    private void ToggleExpand(string id)
+    {
+        _expandedId = _expandedId == id ? null : id;
+    }
+
+    private void StartRename(UserList list)
+    {
+        _renameTargetId = list.Id;
+        _renameText = list.Name;
+        _showRenameDialog = true;
+    }
+
+    private async Task ConfirmRename()
+    {
+        if (_renameTargetId == null || string.IsNullOrWhiteSpace(_renameText)) return;
+        await ListService.RenameAsync(_renameTargetId, _renameText);
+        _showRenameDialog = false;
+        await LoadLists();
+    }
+
+    private async Task DeleteList(UserList list)
+    {
+        await ListService.DeleteAsync(list.Id);
+        NotificationService.ShowSuccess($"Deleted \"{list.Name}\"");
+        await LoadLists();
+    }
+
+    private void OpenInSearch(UserList list)
+    {
+        Nav.NavigateTo($"/search?q={Uri.EscapeDataString(list.SourceQuery ?? "")}");
+    }
+
+    private async Task ExportToExcel(UserList list)
+    {
+        // Build CSV content as a simple export
+        var lines = new List<string> { "FileName,DataSet,Date,Pages,Names" };
+        foreach (var item in list.Items)
+        {
+            var names = item.Names != null ? string.Join("; ", item.Names) : "";
+            var date = item.Date?.ToString("yyyy-MM-dd") ?? "";
+            lines.Add($"\"{item.FileName}\",\"{item.DataSetName}\",\"{date}\",{item.PageCount},\"{names}\"");
+        }
+        var csv = string.Join("\n", lines);
+        var fileName = $"{list.Name}.csv";
+        await JS.InvokeVoidAsync("saveTextAsFile", fileName, csv);
+        NotificationService.ShowSuccess($"Exported \"{list.Name}\" as {fileName}");
+    }
+
+    private async Task DoSetOperation(string operation)
+    {
+        if (_selectedLists.Count < 2) return;
+        var a = _selectedLists[0];
+        var b = _selectedLists[1];
+
+        var result = operation switch
+        {
+            "merge" => ListService.Merge(a, b),
+            "xor" => ListService.Xor(a, b),
+            "trim" => ListService.Trim(a, b),
+            "append" => ListService.Append(a, b),
+            _ => null
+        };
+
+        if (result == null) return;
+
+        if (operation == "append")
+        {
+            // Append modifies target in place
+            await ListService.SaveAsync(a);
+            NotificationService.ShowSuccess($"Appended {b.Name} into {a.Name}");
+        }
+        else
+        {
+            await ListService.SaveAsync(result);
+            NotificationService.ShowSuccess($"Created \"{result.Name}\" with {result.Items.Count} documents");
+        }
+
+        _selectedLists = new();
+        await LoadLists();
+    }
+}

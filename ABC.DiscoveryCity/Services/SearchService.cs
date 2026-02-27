@@ -5,12 +5,14 @@ namespace ABC.DiscoveryCity.Services;
 public class SearchService
 {
     private readonly HttpClient _httpClient;
+    private readonly NotificationService _notifications;
     private readonly SlidingWindowPageCache _pageCache = new();
     private string _activeCacheFingerprint = "";
 
-    public SearchService(HttpClient httpClient)
+    public SearchService(HttpClient httpClient, NotificationService notifications)
     {
         _httpClient = httpClient;
+        _notifications = notifications;
     }
 
     /// <summary>API base URL (without trailing slash) for building image src URLs etc.</summary>
@@ -31,6 +33,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"Search error: {ex.Message}");
+            _notifications.ShowError($"Search failed: {ex.Message}");
             return new List<SearchResultDto>();
         }
     }
@@ -50,6 +53,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"Recent docs error: {ex.Message}");
+            _notifications.ShowError($"Failed to load recent documents: {ex.Message}");
             return new List<SearchResultDto>();
         }
     }
@@ -94,6 +98,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"Paged search error: {ex.Message}");
+            _notifications.ShowError($"Search failed: {ex.Message}");
             return new PagedSearchResult();
         }
     }
@@ -202,6 +207,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"PDF fetch error: {ex.Message}");
+            _notifications.ShowError($"Failed to load PDF: {ex.Message}");
             return Array.Empty<byte>();
         }
     }
@@ -219,6 +225,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"Spreadsheet fetch error: {ex.Message}");
+            _notifications.ShowError($"Failed to load spreadsheet: {ex.Message}");
             return Array.Empty<byte>();
         }
     }
@@ -233,6 +240,7 @@ public class SearchService
         catch (Exception ex)
         {
              Console.WriteLine($"GetImages error: {ex.Message}");
+             _notifications.ShowError($"Failed to load images: {ex.Message}");
              return new List<ImageDto>();
         }
     }
@@ -246,6 +254,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"GetSystemStats error: {ex.Message}");
+            _notifications.ShowError($"Failed to load system stats: {ex.Message}");
             return null;
         }
     }
@@ -260,6 +269,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"GetDataSetStats error: {ex.Message}");
+            _notifications.ShowError($"Failed to load dataset stats: {ex.Message}");
             return new List<DataSetStatsDto>();
         }
     }
@@ -274,6 +284,7 @@ public class SearchService
         catch (Exception ex)
         {
             Console.WriteLine($"GetDataSetNames error: {ex.Message}");
+            _notifications.ShowError($"Failed to load dataset names: {ex.Message}");
             return new List<string>();
         }
     }

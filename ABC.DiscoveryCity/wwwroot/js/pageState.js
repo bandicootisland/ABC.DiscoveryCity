@@ -29,5 +29,35 @@ window.pageState = {
         } catch {
             return false;
         }
+    },
+
+    addToSearchHistory: function (query) {
+        if (!query || !query.trim()) return;
+        try {
+            var raw = localStorage.getItem('searchHistory');
+            var history = raw ? JSON.parse(raw) : [];
+            history = history.filter(h => h !== query);
+            history.unshift(query);
+            if (history.length > 20) history = history.slice(0, 20);
+            localStorage.setItem('searchHistory', JSON.stringify(history));
+        } catch { }
+    },
+
+    getSearchHistory: function () {
+        try {
+            var raw = localStorage.getItem('searchHistory');
+            return raw ? JSON.parse(raw) : [];
+        } catch {
+            return [];
+        }
+    },
+
+    clearSearchHistory: function () {
+        try {
+            localStorage.removeItem('searchHistory');
+            return true;
+        } catch {
+            return false;
+        }
     }
 };

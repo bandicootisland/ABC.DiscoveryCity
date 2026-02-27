@@ -5,6 +5,8 @@
 @using Telerik.Blazor.Components
 @using Telerik.Blazor.Components.Common.Icon
 @inject SearchService SearchService
+@inject IJSRuntime JS
+@inject NotificationService NotificationService
 
 <TelerikTabStrip ActiveTabIndex="@ActiveTabIndex" ActiveTabIndexChanged="@OnTabChanged">
     <TabStripTab Title="Overview">
@@ -29,13 +31,19 @@
                          <ul class="list-unstyled mb-0">
                              <li class="mb-1"><strong>Est. Date:</strong> @(Document?.Date?.ToString("yyyy-MM-dd") ?? "Unknown")</li>
                              <li class="mb-1"><strong>@PageCountLabel:</strong> @Document?.PageCount</li>
-                             <li class="mb-1"><strong>Relevance:</strong> @Document?.Distance.ToString("F4")</li>
+                             <li class="mb-1"><strong>Relevance:</strong> @($"{Math.Max(0, (1 - (Document?.Distance ?? 1)) * 100):F0}%")</li>
                              <li class="mb-1"><strong>File:</strong> <span class="text-break">@Document?.FileName</span></li>
                          </ul>
                     </div>
                 </div>
                 <div class="col-md-7">
-                    <h4 class="mb-3">@TextPreviewTitle</h4>
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                        <h4 class="mb-0">@TextPreviewTitle</h4>
+                        @if (!string.IsNullOrEmpty(Document?.Text))
+                        {
+                            <TelerikButton OnClick="@CopyTextToClipboard" Icon="@SvgIcon.Copy" Title="Copy text to clipboard" />
+                        }
+                    </div>
                     <div class="card h-100">
                         <div class="card-body" style="max-height: 600px; overflow-y: auto; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
                             <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
@@ -82,7 +90,13 @@
                     </SplitterPane>
                     <SplitterPane>
                         <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
-                            <div style="color: #666; margin-bottom: 1em;">[Sentence]<br/><br/></div>
+                            <div class="d-flex align-items-center justify-content-between" style="color: #666; margin-bottom: 1em;">
+                                <span>[Sentence]</span>
+                                @if (!string.IsNullOrEmpty(Document?.Text))
+                                {
+                                    <TelerikButton OnClick="@CopyTextToClipboard" Icon="@SvgIcon.Copy" Title="Copy text to clipboard" FillMode="@ThemeConstants.Button.FillMode.Flat" />
+                                }
+                            </div>
                             @if (!string.IsNullOrEmpty(Document?.Text))
                             {
                                 @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
@@ -351,6 +365,23 @@
         catch { }
 
         return entries;
+    }
+
+    private async Task CopyTextToClipboard()
+    {
+        if (string.IsNullOrEmpty(Document?.Text)) return;
+        try
+        {
+            var success = await JS.InvokeAsync<bool>("copyTextToClipboard", Document.Text);
+            if (success)
+                NotificationService.ShowSuccess("Text copied to clipboard");
+            else
+                NotificationService.ShowWarning("Could not copy text — clipboard access denied");
+        }
+        catch (Exception ex)
+        {
+            NotificationService.ShowError($"Copy failed: {ex.Message}");
+        }
     }
 
     private static string StripDrivePrefix(string path)
