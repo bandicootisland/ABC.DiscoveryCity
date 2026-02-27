@@ -9,7 +9,7 @@
 
 <PageTitle>Discovery Search</PageTitle>
 
-<div class="container-fluid">
+<div class="container-fluid" @onkeydown="OnPageKeyDown" tabindex="-1">
     <h3>Discovery Search</h3>
 
     <SearchToolbar @bind-SearchQuery="SearchQuery"
@@ -223,7 +223,7 @@
         {
             var result = await SearchService.SearchPagedAsync(
                 query, skip, take, exactMatch: true,
-                ActiveDataSetFilter, ActiveNamesFilter);
+                ActiveDataSetFilter, ActiveNamesFilter, token);
 
             if (token.IsCancellationRequested)
             {
@@ -347,6 +347,12 @@
 
     private void OnGridKeyDown(KeyboardEventArgs e)
     {
+        if (e.Key == "Escape")
+        {
+            CancelSearch();
+            return;
+        }
+
         if (GridData == null || GridData.Count == 0) return;
         if (e.Key != "ArrowDown" && e.Key != "ArrowUp") return;
 
@@ -358,6 +364,18 @@
         var item = GridData[newIndex];
         SelectedDetail = item;
         SelectedItems = new[] { item };
+    }
+
+    private void OnPageKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") CancelSearch();
+    }
+
+    private void CancelSearch()
+    {
+        _gridReadCts.Cancel();
+        _searchTextCts.Cancel();
+        _dataSetDebounceCts.Cancel();
     }
 
     private static ISvgIcon GetFileIcon(string? fileName)

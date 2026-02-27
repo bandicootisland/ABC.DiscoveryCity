@@ -60,7 +60,8 @@ public class SearchService
     /// </summary>
     public async Task<PagedSearchResult> SearchPagedAsync(
         string? query, int skip, int take, bool exactMatch = false,
-        List<string>? datasets = null, List<string>? names = null)
+        List<string>? datasets = null, List<string>? names = null,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -81,7 +82,7 @@ public class SearchService
 
             // Cache MISS — fetch from API
             var url = BuildPagedUrl(query, skip, take, exactMatch, datasets, names);
-            var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url);
+            var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url, cancellationToken);
             var result = response ?? new PagedSearchResult();
 
             _pageCache.StorePage(skip, result.Items, result.TotalCount, skip);
