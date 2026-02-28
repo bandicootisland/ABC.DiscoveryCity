@@ -62,6 +62,15 @@
         </div>
     </TabStripTab>
     <TabStripTab Title="@ViewerTabTitle">
+        @if (ReconstructedDownloadUrl != null)
+        {
+            <div class="px-3 py-1 bg-light border-bottom small">
+                <TelerikIcon Icon="@SvgIcon.HyperlinkOpen" />
+                <a href="@ReconstructedDownloadUrl" target="_blank" rel="noopener noreferrer" class="text-break">
+                    @ReconstructedDownloadUrl
+                </a>
+            </div>
+        }
         @if (Category == FileCategory.Pdf)
         {
             <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
