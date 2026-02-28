@@ -5,6 +5,8 @@
 @using Telerik.Blazor.Components.Common.Icon
 @using static ABC.DiscoveryCity.Services.TextFormatExtensions
 @inject SearchService SearchService
+@inject UserListService UserListService
+@inject NotificationService NotificationService
 @inject IJSRuntime JS
 
 <PageTitle>Browse Documents</PageTitle>
@@ -22,6 +24,31 @@
             }
         </div>
     </div>
+
+    <TelerikContextMenu @ref="_contextMenu"
+                        Data="@_contextMenuItems"
+                        TextField="Text"
+                        IconField="Icon"
+                        SeparatorField="IsSeparator"
+                        OnClick="@((ContextMenuItem item) => OnContextMenuClick(item))" />
+
+    @if (_showQuickNewListDialog)
+    {
+        <TelerikDialog @bind-Visible="_showQuickNewListDialog" Title="New List" Width="350px">
+            <DialogContent>
+                <div class="mb-3">
+                    <label class="form-label">List Name</label>
+                    <input type="text" class="form-control" @bind="_quickNewListName" @bind:event="oninput" placeholder="Enter list name..." />
+                </div>
+                <p class="text-muted small">1 document will be added.</p>
+            </DialogContent>
+            <DialogButtons>
+                <TelerikButton OnClick="@(() => _showQuickNewListDialog = false)">Cancel</TelerikButton>
+                <TelerikButton OnClick="@SaveQuickNewList" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                               Enabled="@(!string.IsNullOrWhiteSpace(_quickNewListName))">Save</TelerikButton>
+            </DialogButtons>
+        </TelerikDialog>
+    }
 
     <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="calc(100vh - 170px)">
         <SplitterPanes>
@@ -42,7 +69,9 @@
                         @foreach (var doc in _documents)
                         {
                             <div class="browse-card @(doc == _selectedDoc ? "selected" : "")"
-                                 @onclick="@(() => SelectDocument(doc))">
+                                 @onclick="@(() => SelectDocument(doc))"
+                                 @oncontextmenu="@(e => OnCardContextMenu(e, doc))"
+                                 @oncontextmenu:preventDefault>
                                 <div class="d-flex gap-3">
                                     @if (!string.IsNullOrEmpty(doc.ThumbnailPath))
                                     {
@@ -110,6 +139,22 @@
                                 {
                                     <TelerikButton OnClick="@(() => DownloadFile(_selectedDoc))" Icon="@SvgIcon.Download" Title="Download" />
                                 }
+                                <TelerikSplitButton OnClick="@(() => QuickAddToLastList(_selectedDoc!))"
+                                                    Icon="@SvgIcon.ListUnordered"
+                                                    Size="@ThemeConstants.Button.Size.Small"
+                                                    Title="Add to most recent list">
+                                    <SplitButtonContent>Add to List</SplitButtonContent>
+                                    <SplitButtonItems>
+                                        @foreach (var list in RecentLists)
+                                        {
+                                            var capturedList = list;
+                                            <SplitButtonItem OnClick="@(() => QuickAddToList(_selectedDoc!, capturedList))"
+                                                             Icon="@SvgIcon.ListUnordered">@capturedList.Name</SplitButtonItem>
+                                        }
+                                        <SplitButtonItem OnClick="@(() => ShowQuickNewListDialog(_selectedDoc!))"
+                                                         Icon="@SvgIcon.Plus">New List...</SplitButtonItem>
+                                    </SplitButtonItems>
+                                </TelerikSplitButton>
                                 <TelerikButton OnClick="@(() => _selectedDoc = null)" Icon="@SvgIcon.X" Title="Close" />
                             </div>
                         </div>
@@ -139,9 +184,18 @@
     private bool _hasMore;
     private const int PageSize = 50;
 
+    // Context menu & quick add-to-list
+    private TelerikContextMenu<ContextMenuItem>? _contextMenu;
+    private SearchResultDto? _contextMenuTarget;
+    private List<ContextMenuItem> _contextMenuItems = new();
+    private bool _showQuickNewListDialog;
+    private string _quickNewListName = "";
+    private List<UserList> _availableLists = new();
+
     protected override async Task OnInitializedAsync()
     {
         await LoadDocuments(reset: true);
+        _availableLists = await UserListService.GetAllAsync();
     }
 
     private async Task LoadDocuments(bool reset)
@@ -227,5 +281,95 @@
             ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => SvgIcon.FileAudio,
             _ => SvgIcon.File
         };
+    }
+
+    // --- Context menu & quick add-to-list ---
+
+    private List<UserList> RecentLists =>
+        _availableLists.OrderByDescending(l => l.ModifiedAt).Take(5).ToList();
+
+    private async Task OnCardContextMenu(MouseEventArgs e, SearchResultDto doc)
+    {
+        _contextMenuTarget = doc;
+        _contextMenuItems = BuildContextMenuItems();
+        await _contextMenu!.ShowAsync(e.ClientX, e.ClientY);
+    }
+
+    private List<ContextMenuItem> BuildContextMenuItems()
+    {
+        var items = new List<ContextMenuItem>();
+        var recent = RecentLists;
+        foreach (var list in recent)
+        {
+            items.Add(new ContextMenuItem
+            {
+                Text = list.Name,
+                Icon = SvgIcon.ListUnordered,
+                ListId = list.Id
+            });
+        }
+        if (recent.Count > 0)
+            items.Add(new ContextMenuItem { IsSeparator = true });
+        items.Add(new ContextMenuItem
+        {
+            Text = "New List...",
+            Icon = SvgIcon.Plus,
+            ListId = null
+        });
+        return items;
+    }
+
+    private async Task OnContextMenuClick(ContextMenuItem item)
+    {
+        if (item.IsSeparator || _contextMenuTarget == null) return;
+
+        if (item.ListId != null)
+            await QuickAddToList(_contextMenuTarget, (await UserListService.GetByIdAsync(item.ListId))!);
+        else
+            ShowQuickNewListDialog(_contextMenuTarget);
+    }
+
+    private async Task QuickAddToList(SearchResultDto doc, UserList targetList)
+    {
+        var source = UserListService.CreateFromSearchResults("_", null, new[] { doc });
+        UserListService.Append(targetList, source);
+        await UserListService.SaveAsync(targetList);
+        _availableLists = await UserListService.GetAllAsync();
+        NotificationService.ShowSuccess($"Added \"{doc.FileName}\" to \"{targetList.Name}\"");
+    }
+
+    private async Task QuickAddToLastList(SearchResultDto doc)
+    {
+        var last = RecentLists.FirstOrDefault();
+        if (last != null)
+            await QuickAddToList(doc, last);
+        else
+            ShowQuickNewListDialog(doc);
+    }
+
+    private void ShowQuickNewListDialog(SearchResultDto doc)
+    {
+        _contextMenuTarget = doc;
+        _quickNewListName = "";
+        _showQuickNewListDialog = true;
+    }
+
+    private async Task SaveQuickNewList()
+    {
+        if (string.IsNullOrWhiteSpace(_quickNewListName) || _contextMenuTarget == null) return;
+        var list = UserListService.CreateFromSearchResults(_quickNewListName, null, new[] { _contextMenuTarget });
+        await UserListService.SaveAsync(list);
+        _availableLists = await UserListService.GetAllAsync();
+        NotificationService.ShowSuccess($"Created list \"{_quickNewListName}\" with \"{_contextMenuTarget.FileName}\"");
+        _showQuickNewListDialog = false;
+        _quickNewListName = "";
+    }
+
+    private class ContextMenuItem
+    {
+        public string Text { get; set; } = "";
+        public ISvgIcon? Icon { get; set; }
+        public string? ListId { get; set; }
+        public bool IsSeparator { get; set; }
     }
 }
