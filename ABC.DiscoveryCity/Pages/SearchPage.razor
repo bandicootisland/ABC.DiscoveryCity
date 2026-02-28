@@ -107,6 +107,25 @@
             </DialogButtons>
         </TelerikDialog>
     }
+
+    @if (_showQuickNewListDialog)
+    {
+        <TelerikDialog @bind-Visible="_showQuickNewListDialog" Title="New List" Width="350px">
+            <DialogContent>
+                <div class="mb-3">
+                    <label class="form-label">List Name</label>
+                    <input type="text" class="form-control" @bind="_quickNewListName" @bind:event="oninput" placeholder="Enter list name..." />
+                </div>
+                <p class="text-muted small">1 document will be added.</p>
+            </DialogContent>
+            <DialogButtons>
+                <TelerikButton OnClick="@(() => _showQuickNewListDialog = false)">Cancel</TelerikButton>
+                <TelerikButton OnClick="@SaveQuickNewList" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                               Enabled="@(!string.IsNullOrWhiteSpace(_quickNewListName))">Save</TelerikButton>
+            </DialogButtons>
+        </TelerikDialog>
+    }
+
     <TelerikSplitter Orientation="@SplitterOrientation.Vertical" Height="calc(100vh - 185px)">
         <SplitterPanes>
             <SplitterPane Size="650px" Min="300px">
@@ -125,7 +144,8 @@
                              SelectionMode="@(IsMultiSelectMode ? GridSelectionMode.Multiple : GridSelectionMode.Single)"
                              SelectedItems="@SelectedItems"
                              SelectedItemsChanged="@((IEnumerable<SearchResultDto> items) => OnSelectionChanged(items))"
-                             OnRowClick="@OnRowClick">
+                             OnRowClick="@OnRowClick"
+                             OnRowContextMenu="@OnRowContextMenu">
                     <GridColumns>
                         <GridCheckboxColumn SelectAll="@IsMultiSelectMode" Width="42px" />
                         <GridColumn Title="Thumb" Width="80px">
@@ -205,6 +225,12 @@
                         </GridColumn>
                     </GridColumns>
                 </TelerikGrid>
+                <TelerikContextMenu @ref="GridContextMenu"
+                                    Data="@_contextMenuItems"
+                                    TextField="Text"
+                                    IconField="Icon"
+                                    SeparatorField="IsSeparator"
+                                    OnClick="@((ContextMenuItem item) => OnContextMenuClick(item))" />
                 </div>
             </SplitterPane>
             <SplitterPane Min="200px">
@@ -218,6 +244,23 @@
                                 {
                                     <TelerikButton OnClick="@(() => DownloadFile(SelectedDetail))" Icon="@SvgIcon.Download" Title="Download original file" />
                                 }
+                                <TelerikSplitButton OnClick="@(() => QuickAddToLastList(SelectedDetail!))"
+                                                    Icon="@SvgIcon.ListUnordered"
+                                                    Size="@ThemeConstants.Button.Size.Small"
+                                                    Title="Add to most recent list">
+                                    <SplitButtonContent>Add to List</SplitButtonContent>
+                                    <SplitButtonItems>
+                                        @foreach (var list in RecentLists)
+                                        {
+                                            var capturedList = list;
+                                            <SplitButtonItem OnClick="@(() => QuickAddToList(SelectedDetail!, capturedList))"
+                                                             Text="@capturedList.Name" />
+                                        }
+                                        <SplitButtonItem OnClick="@(() => ShowQuickNewListDialog(SelectedDetail!))"
+                                                         Text="New List..."
+                                                         Icon="@SvgIcon.Plus" />
+                                    </SplitButtonItems>
+                                </TelerikSplitButton>
                                 <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
                             </div>
                         </div>
@@ -279,9 +322,16 @@
     private bool _showAdvancedFind;
     private bool _showSaveListDialog;
     private string _newListName = "";
-    private string _saveToListMode = "new"; 
+    private string _saveToListMode = "new";
     private string? _selectedExistingListId;
     private List<UserList> AvailableLists { get; set; } = new();
+
+    // Context menu & quick add-to-list
+    private TelerikContextMenu<ContextMenuItem>? GridContextMenu;
+    private SearchResultDto? _contextMenuTarget;
+    private List<ContextMenuItem> _contextMenuItems = new();
+    private bool _showQuickNewListDialog;
+    private string _quickNewListName = "";
 
     private bool CanSaveList => 
         _saveToListMode == "new" ? !string.IsNullOrWhiteSpace(_newListName) : !string.IsNullOrEmpty(_selectedExistingListId);
@@ -599,5 +649,96 @@
             ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => SvgIcon.FileAudio,
             _ => SvgIcon.File
         };
+    }
+
+    // --- Context menu & quick add-to-list ---
+
+    private List<UserList> RecentLists =>
+        (AvailableLists ?? new()).OrderByDescending(l => l.ModifiedAt).Take(5).ToList();
+
+    private async Task OnRowContextMenu(GridRowClickEventArgs args)
+    {
+        _contextMenuTarget = (SearchResultDto)args.Item;
+        _contextMenuItems = BuildContextMenuItems();
+        if (args.EventArgs is MouseEventArgs mouseArgs)
+            await GridContextMenu!.ShowAsync(mouseArgs.ClientX, mouseArgs.ClientY);
+    }
+
+    private List<ContextMenuItem> BuildContextMenuItems()
+    {
+        var items = new List<ContextMenuItem>();
+        var recent = RecentLists;
+        foreach (var list in recent)
+        {
+            items.Add(new ContextMenuItem
+            {
+                Text = list.Name,
+                Icon = SvgIcon.ListUnordered,
+                ListId = list.Id
+            });
+        }
+        if (recent.Count > 0)
+            items.Add(new ContextMenuItem { IsSeparator = true });
+        items.Add(new ContextMenuItem
+        {
+            Text = "New List...",
+            Icon = SvgIcon.Plus,
+            ListId = null
+        });
+        return items;
+    }
+
+    private async Task OnContextMenuClick(ContextMenuItem item)
+    {
+        if (item.IsSeparator || _contextMenuTarget == null) return;
+
+        if (item.ListId != null)
+            await QuickAddToList(_contextMenuTarget, (await UserListService.GetByIdAsync(item.ListId))!);
+        else
+            ShowQuickNewListDialog(_contextMenuTarget);
+    }
+
+    private async Task QuickAddToList(SearchResultDto doc, UserList targetList)
+    {
+        var source = UserListService.CreateFromSearchResults("_", null, new[] { doc });
+        UserListService.Append(targetList, source);
+        await UserListService.SaveAsync(targetList);
+        AvailableLists = await UserListService.GetAllAsync();
+        NotificationService.ShowSuccess($"Added \"{doc.FileName}\" to \"{targetList.Name}\"");
+    }
+
+    private async Task QuickAddToLastList(SearchResultDto doc)
+    {
+        var last = RecentLists.FirstOrDefault();
+        if (last != null)
+            await QuickAddToList(doc, last);
+        else
+            ShowQuickNewListDialog(doc);
+    }
+
+    private void ShowQuickNewListDialog(SearchResultDto doc)
+    {
+        _contextMenuTarget = doc;
+        _quickNewListName = "";
+        _showQuickNewListDialog = true;
+    }
+
+    private async Task SaveQuickNewList()
+    {
+        if (string.IsNullOrWhiteSpace(_quickNewListName) || _contextMenuTarget == null) return;
+        var list = UserListService.CreateFromSearchResults(_quickNewListName, null, new[] { _contextMenuTarget });
+        await UserListService.SaveAsync(list);
+        AvailableLists = await UserListService.GetAllAsync();
+        NotificationService.ShowSuccess($"Created list \"{_quickNewListName}\" with \"{_contextMenuTarget.FileName}\"");
+        _showQuickNewListDialog = false;
+        _quickNewListName = "";
+    }
+
+    private class ContextMenuItem
+    {
+        public string Text { get; set; } = "";
+        public ISvgIcon? Icon { get; set; }
+        public string? ListId { get; set; }
+        public bool IsSeparator { get; set; }
     }
 }
