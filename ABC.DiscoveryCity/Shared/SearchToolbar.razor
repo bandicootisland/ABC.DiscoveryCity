@@ -21,6 +21,10 @@
                 <TelerikButton ButtonType="@ButtonType.Submit" Icon="@SvgIcon.Search">Search</TelerikButton>
                 <TelerikButton OnClick="@OnAdvancedFindClicked" Icon="@SvgIcon.Filter" Title="Advanced Find"
                                ButtonType="@ButtonType.Button" />
+                <label class="form-check form-check-inline mb-0 ms-2" title="Search by filename only">
+                    <input type="checkbox" class="form-check-input" checked="@FilenameOnly" @onchange="OnFilenameOnlyToggled" />
+                    <span class="form-check-label text-muted small">Filename</span>
+                </label>
                 @if (TotalCount > 0)
                 {
                     <span class="ms-2 text-muted small" style="white-space: nowrap;"><strong>@TotalCount.ToString("N0")</strong> found</span>
@@ -71,6 +75,8 @@
     [Parameter] public EventCallback OnNamesSearch { get; set; }
     [Parameter] public int TotalCount { get; set; }
     [Parameter] public EventCallback OnAdvancedFind { get; set; }
+    [Parameter] public bool FilenameOnly { get; set; }
+    [Parameter] public EventCallback<bool> FilenameOnlyChanged { get; set; }
 
     // Local backing field — isolates the text box from parent re-renders
     private string _localSearchText = "";
@@ -174,5 +180,13 @@
         if (SelectedNames.Count == 0) return;
         _previousNamesCount = SelectedNames.Count;
         await OnNamesSearch.InvokeAsync();
+    }
+
+    private async Task OnFilenameOnlyToggled(ChangeEventArgs e)
+    {
+        FilenameOnly = (bool)(e.Value ?? false);
+        await FilenameOnlyChanged.InvokeAsync(FilenameOnly);
+        if (!string.IsNullOrWhiteSpace(_localSearchText))
+            await OnSearch.InvokeAsync();
     }
 }

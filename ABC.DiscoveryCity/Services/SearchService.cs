@@ -65,11 +65,11 @@ public class SearchService
     public async Task<PagedSearchResult> SearchPagedAsync(
         string? query, int skip, int take, bool exactMatch = false,
         List<string>? datasets = null, List<string>? names = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool filenameOnly = false)
     {
         try
         {
-            var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names);
+            var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly);
             if (fingerprint != _activeCacheFingerprint)
             {
                 _pageCache.Clear();
@@ -80,19 +80,19 @@ public class SearchService
             if (_pageCache.TryGetPage(skip, out var cachedItems, out var cachedTotal))
             {
                 Console.WriteLine($"[ClientCache] HIT skip={skip}");
-                _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names);
+                _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names, filenameOnly);
                 return new PagedSearchResult { Items = cachedItems, TotalCount = cachedTotal };
             }
 
             // Cache MISS — fetch from API
-            var url = BuildPagedUrl(query, skip, take, exactMatch, datasets, names);
+            var url = BuildPagedUrl(query, skip, take, exactMatch, datasets, names, filenameOnly);
             var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url, cancellationToken);
             var result = response ?? new PagedSearchResult();
 
             _pageCache.StorePage(skip, result.Items, result.TotalCount, skip);
             Console.WriteLine($"[ClientCache] MISS skip={skip}, stored ({result.Items.Count} items, total={result.TotalCount})");
 
-            _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names);
+            _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names, filenameOnly);
             return result;
         }
         catch (Exception ex)
@@ -108,9 +108,9 @@ public class SearchService
     /// </summary>
     public PagedSearchResult? TryGetCachedPage(
         string? query, int skip, bool exactMatch,
-        List<string>? datasets, List<string>? names)
+        List<string>? datasets, List<string>? names, bool filenameOnly = false)
     {
-        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names);
+        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly);
         if (fingerprint != _activeCacheFingerprint) return null;
         if (_pageCache.TryGetPage(skip, out var items, out var total))
             return new PagedSearchResult { Items = items, TotalCount = total };
@@ -127,11 +127,13 @@ public class SearchService
     }
 
     private static string BuildPagedUrl(string? query, int skip, int take,
-        bool exactMatch, List<string>? datasets, List<string>? names)
+        bool exactMatch, List<string>? datasets, List<string>? names, bool filenameOnly = false)
     {
         var url = $"api/search/paged?skip={skip}&take={take}&exactMatch={exactMatch.ToString().ToLowerInvariant()}";
         if (!string.IsNullOrWhiteSpace(query))
             url += $"&query={Uri.EscapeDataString(query)}";
+        if (filenameOnly)
+            url += "&filenameOnly=true";
         if (datasets is { Count: > 0 })
             url += "&" + string.Join("&", datasets.Select(d => $"datasets={Uri.EscapeDataString(d)}"));
         if (names is { Count: > 0 })
@@ -140,11 +142,12 @@ public class SearchService
     }
 
     private static string BuildCacheFingerprint(string? query, bool exactMatch,
-        List<string>? datasets, List<string>? names)
+        List<string>? datasets, List<string>? names, bool filenameOnly = false)
     {
         var parts = new List<string>();
         parts.Add(query ?? "");
         parts.Add(exactMatch ? "1" : "0");
+        if (filenameOnly) parts.Add("fn=1");
         if (datasets is { Count: > 0 })
             parts.Add("ds=" + string.Join(",", datasets.OrderBy(d => d)));
         if (names is { Count: > 0 })
@@ -157,7 +160,8 @@ public class SearchService
     /// Fire-and-forget — does not block the caller. Errors are swallowed.
     /// </summary>
     private async Task PrefetchAdjacentPagesAsync(int currentSkip, int take,
-        string? query, bool exactMatch, List<string>? datasets, List<string>? names)
+        string? query, bool exactMatch, List<string>? datasets, List<string>? names,
+        bool filenameOnly = false)
     {
         var adjacentSkips = new List<int>();
         var prevSkip = currentSkip - take;
@@ -170,7 +174,7 @@ public class SearchService
 
         if (adjacentSkips.Count == 0) return;
 
-        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names);
+        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly);
 
         foreach (var adjSkip in adjacentSkips)
         {
@@ -179,7 +183,7 @@ public class SearchService
                 // Guard: if filters changed while prefetching, discard
                 if (fingerprint != _activeCacheFingerprint) return;
 
-                var url = BuildPagedUrl(query, adjSkip, take, exactMatch, datasets, names);
+                var url = BuildPagedUrl(query, adjSkip, take, exactMatch, datasets, names, filenameOnly);
                 var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url);
                 if (response is { Items.Count: > 0 } && fingerprint == _activeCacheFingerprint)
                 {

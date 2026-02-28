@@ -1726,6 +1726,43 @@ public partial class DbService
     }
 
     /// <summary>
+    /// Lightweight filename-only search that returns matching document IDs.
+    /// Searches only the ParentDocuments.FileName column — skips text content, vector, and metadata.
+    /// Used when the "Filename" toggle is enabled in the search toolbar.
+    /// </summary>
+    public int[] SearchByFileNameIds(string query,
+        List<string>? datasetNames = null, List<string>? nameValues = null)
+    {
+        using var conn = _dataSource.OpenConnection();
+        var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
+
+        var whereClauses = new List<string> { "p.FileName ILIKE @pattern" };
+        if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
+        if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+        var whereClause = "WHERE " + string.Join(" AND ", whereClauses);
+
+        var sql = $@"
+            SELECT p.Id
+            FROM ParentDocuments p
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            {whereClause}
+            ORDER BY p.ProcessedAt DESC
+            LIMIT 50000;";
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.CommandTimeout = 120;
+        cmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+
+        var ids = new List<int>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) ids.Add(reader.GetInt32(0));
+        return ids.ToArray();
+    }
+
+    /// <summary>
     /// Lightweight query returning document IDs ordered by ProcessedAt DESC (no search predicates).
     /// Returns both the IDs (capped at 50K for cache) and the real total count for UI display.
     /// Used by the browse cache — run once, cache the IDs, hydrate pages via HydrateByIds.

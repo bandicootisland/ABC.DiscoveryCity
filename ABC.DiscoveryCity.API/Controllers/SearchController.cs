@@ -65,7 +65,8 @@ public class SearchController : ControllerBase
         [FromQuery] int take = 50,
         [FromQuery] bool exactMatch = false,
         [FromQuery] List<string>? datasets = null,
-        [FromQuery] List<string>? names = null)
+        [FromQuery] List<string>? names = null,
+        [FromQuery] bool filenameOnly = false)
     {
         var datasetNames = datasets?.Where(s => !string.IsNullOrEmpty(s)).ToList();
         var nameValues = names?.Where(s => !string.IsNullOrEmpty(s)).ToList();
@@ -112,14 +113,16 @@ public class SearchController : ControllerBase
         }
 
         // Search query present — use cached two-phase approach
-        var cacheKey = BuildCacheKey(query, exactMatch, datasetNames, nameValues);
+        var cacheKey = BuildCacheKey(query, exactMatch, datasetNames, nameValues, filenameOnly);
 
         // Get or create the full cache entry (IDs + hydrated records)
         var entry = _cache.GetOrCreate(cacheKey, cacheEntry =>
         {
             cacheEntry.SlidingExpiration = TimeSpan.FromMinutes(5);
-            Console.WriteLine($"[SearchCache] MISS — running CTE for: {query}");
-            var ids = _dbService.SearchMatchingIds(query, exactMatch, datasetNames, nameValues);
+            Console.WriteLine($"[SearchCache] MISS — running {(filenameOnly ? "filename" : "CTE")} for: {query}");
+            var ids = filenameOnly
+                ? _dbService.SearchByFileNameIds(query, datasetNames, nameValues)
+                : _dbService.SearchMatchingIds(query, exactMatch, datasetNames, nameValues);
             return new SearchCacheEntry { Ids = ids };
         })!;
 
@@ -181,13 +184,14 @@ public class SearchController : ControllerBase
     }
 
     private static string BuildCacheKey(string query, bool exactMatch,
-        List<string>? datasets, List<string>? names)
+        List<string>? datasets, List<string>? names, bool filenameOnly = false)
     {
         var sb = new StringBuilder();
         sb.Append("search:");
         sb.Append(query.ToLowerInvariant());
         sb.Append(':');
         sb.Append(exactMatch ? "exact" : "fuzzy");
+        if (filenameOnly) sb.Append(":fn");
         if (datasets is { Count: > 0 })
         {
             sb.Append(":ds=");

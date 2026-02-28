@@ -24,7 +24,8 @@
                    OnDataSetChanged="@OnDataSetFilterChanged"
                    OnNamesSearch="@OnNamesSearchRequested"
                    TotalCount="@TotalCount"
-                   OnAdvancedFind="@(() => _showAdvancedFind = true)" />
+                   OnAdvancedFind="@(() => _showAdvancedFind = true)"
+                   @bind-FilenameOnly="FilenameOnly" />
 
     <AdvancedFindDialog @bind-Visible="_showAdvancedFind"
                         AvailableDataSets="@AvailableDataSets"
@@ -249,6 +250,7 @@
 @code {
     private string SearchQuery { get; set; } = "";
     private bool HasSearched { get; set; } = false;
+    private bool FilenameOnly { get; set; } = false;
 
     // Server-side paged grid state
     private List<SearchResultDto>? GridData { get; set; }
@@ -316,7 +318,7 @@
         var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
 
         // Fast path: if page is already in client cache, return instantly — no debounce, no HTTP call
-        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter);
+        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter, FilenameOnly);
         if (cached != null)
         {
             args.Data = cached.Items;
@@ -346,7 +348,7 @@
         {
             var result = await SearchService.SearchPagedAsync(
                 query, skip, take, exactMatch: true,
-                ActiveDataSetFilter, ActiveNamesFilter, token);
+                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
 
             if (token.IsCancellationRequested)
             {

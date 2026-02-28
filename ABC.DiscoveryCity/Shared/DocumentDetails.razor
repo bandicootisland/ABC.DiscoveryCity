@@ -83,8 +83,14 @@
                         }
                         else
                         {
-                            <div class="d-flex align-items-center justify-content-center text-muted" style="height: 100%;">
-                                No PDF available
+                            <div class="d-flex flex-column align-items-center justify-content-center text-muted" style="height: 100%;">
+                                <span>File not available locally.</span>
+                                @if (ReconstructedDownloadUrl != null)
+                                {
+                                    <a href="@ReconstructedDownloadUrl" target="_blank" rel="noopener noreferrer" class="mt-2">
+                                        <TelerikIcon Icon="@SvgIcon.Download" /> Download from source
+                                    </a>
+                                }
                             </div>
                         }
                     </SplitterPane>
@@ -127,9 +133,17 @@
             }
             else
             {
-                <div class="d-flex align-items-center justify-content-center text-muted" style="height: 800px;">
-                    <TelerikIcon Icon="@FileIcon" />
-                    <span class="ms-2">No data available</span>
+                <div class="d-flex flex-column align-items-center justify-content-center text-muted" style="height: 800px;">
+                    <div>
+                        <TelerikIcon Icon="@FileIcon" />
+                        <span class="ms-2">File not available locally.</span>
+                    </div>
+                    @if (ReconstructedDownloadUrl != null)
+                    {
+                        <a href="@ReconstructedDownloadUrl" target="_blank" rel="noopener noreferrer" class="mt-2">
+                            <TelerikIcon Icon="@SvgIcon.Download" /> Download from source
+                        </a>
+                    }
                 </div>
             }
         }
@@ -149,6 +163,14 @@
                 else
                 {
                     <span class="text-muted fst-italic">No content available.</span>
+                    @if (ReconstructedDownloadUrl != null)
+                    {
+                        <div class="mt-2">
+                            <a href="@ReconstructedDownloadUrl" target="_blank" rel="noopener noreferrer">
+                                <TelerikIcon Icon="@SvgIcon.Download" /> Download from source
+                            </a>
+                        </div>
+                    }
                 }
             </div>
         }
@@ -212,6 +234,20 @@
     private string? LoadedViewerPath { get; set; }
 
     private string RemoteUrl => Document?.SourceUrl ?? "";
+
+    private string? ReconstructedDownloadUrl
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(Document?.SourceUrl) || string.IsNullOrEmpty(Document?.FileName))
+                return null;
+            var baseUrl = Document.SourceUrl.TrimEnd('/');
+            if (!string.IsNullOrEmpty(Document.DataSetName))
+                return $"{baseUrl}/{Uri.EscapeDataString(Document.DataSetName)}/{Uri.EscapeDataString(Document.FileName)}";
+            return $"{baseUrl}/{Uri.EscapeDataString(Document.FileName)}";
+        }
+    }
+
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
 
     private enum FileCategory { Pdf, Spreadsheet, Video, Audio, Unknown }
