@@ -78,6 +78,11 @@ public partial class DbService
         return IsWindows ? path.Replace('/', '\\') : path.Replace('\\', '/');
     }
 
+    /// <summary>
+    /// Common command timeout in seconds for all database operations.
+    /// </summary>
+    private const int DbCommandTimeout = 120;
+
     // Default connection string for convenience, but allows override
     private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
 
@@ -401,14 +406,14 @@ public partial class DbService
                     CREATE INDEX IF NOT EXISTS idx_parent_sentences_fts ON ParentDocuments 
                     USING GIN (jsonb_to_tsvector('english', COALESCE(Sentences, '[]'::jsonb), '[""string""]'));", conn))
                 {
-                    cmd.CommandTimeout = 300;
+                    cmd.CommandTimeout = DbCommandTimeout;
                     cmd.ExecuteNonQuery();
                 }
                 Console.WriteLine("  Sentences full-text search index created.");
                 using (var cmd = new NpgsqlCommand(@"
                     CREATE INDEX IF NOT EXISTS idx_chunks_text_trgm ON DocumentChunks USING GIN (TextContent gin_trgm_ops);", conn))
                 {
-                    cmd.CommandTimeout = 300;
+                    cmd.CommandTimeout = DbCommandTimeout;
                     cmd.ExecuteNonQuery();
                 }
                 Console.WriteLine("  Chunk text trigram index created.");
@@ -418,7 +423,7 @@ public partial class DbService
                     CREATE INDEX IF NOT EXISTS idx_parent_names_trgm ON ParentDocuments USING GIN ((Metadata->>'Names') gin_trgm_ops);
                     CREATE INDEX IF NOT EXISTS idx_parent_filename_trgm ON ParentDocuments USING GIN (FileName gin_trgm_ops);", conn))
                 {
-                    cmd.CommandTimeout = 300;
+                    cmd.CommandTimeout = DbCommandTimeout;
                     cmd.ExecuteNonQuery();
                 }
                 Console.WriteLine("  Metadata trigram indexes created.");
@@ -475,7 +480,7 @@ public partial class DbService
                                 USING hnsw (Embedding vector_cosine_ops)
                                 WITH (m = 24, ef_construction = 128);", conn))
                             {
-                                cmd.CommandTimeout = 300;
+                                cmd.CommandTimeout = DbCommandTimeout;
                                 cmd.ExecuteNonQuery();
                             }
                             Console.WriteLine("  HNSW vector index created (optimized for 1M+ chunks).");
@@ -506,7 +511,7 @@ public partial class DbService
                         USING hnsw (Embedding vector_cosine_ops)
                         WITH (m = 16, ef_construction = 64);", conn))
                     {
-                        cmd.CommandTimeout = 300;
+                        cmd.CommandTimeout = DbCommandTimeout;
                         cmd.ExecuteNonQuery();
                     }
                     Console.WriteLine("  Parent document HNSW vector index created.");
@@ -1053,8 +1058,7 @@ public partial class DbService
         if (namesFilter) extraWhere.Add(NamesAndClause("p"));
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
-        // Full-text search across Sentences JSONB AND metadata
-        // Option A: Search DocumentChunks for text matches
+        // Full-text search across DocumentChunks (index-backed) AND metadata (ILIKE)
         string sql = $@"
             WITH text_matches AS (
                 SELECT c.ParentId,
@@ -1063,8 +1067,7 @@ public partial class DbService
                 FROM DocumentChunks c
                 JOIN ParentDocuments p2 ON c.ParentId = p2.Id
                 {extraJoin}
-                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
-                   OR c.TextContent ILIKE @pattern)
+                WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                 {extraWhereStr}
                 GROUP BY c.ParentId
             ),
@@ -1115,6 +1118,7 @@ public partial class DbService
         ";
 
         using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.CommandTimeout = DbCommandTimeout;
         cmd.Parameters.AddWithValue("query", query);
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (limit > 0) cmd.Parameters.AddWithValue("limit", limit);
@@ -1346,7 +1350,7 @@ public partial class DbService
         var countSql = $@"SELECT COUNT(*) FROM ParentDocuments p
             LEFT JOIN DataSets d ON p.DataSetId = d.Id {whereClause}";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = 120;
+        countCmd.CommandTimeout = DbCommandTimeout;
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
@@ -1377,7 +1381,7 @@ public partial class DbService
             OFFSET @skip LIMIT @take;";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = 120;
+        cmd.CommandTimeout = DbCommandTimeout;
         cmd.Parameters.AddWithValue("skip", skip);
         cmd.Parameters.AddWithValue("take", take);
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
@@ -1411,8 +1415,7 @@ public partial class DbService
                 FROM DocumentChunks c
                 JOIN ParentDocuments p ON c.ParentId = p.Id
                 {extraJoin}
-                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
-                   OR c.TextContent ILIKE @pattern)
+                WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                 {extraWhereStr}
                 GROUP BY c.ParentId
             ),
@@ -1441,7 +1444,7 @@ public partial class DbService
         // Count query
         var countSql = matchesCte + " SELECT COUNT(*) FROM matching_docs;";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = 120;
+        countCmd.CommandTimeout = DbCommandTimeout;
         countCmd.Parameters.AddWithValue("query", query);
         countCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
@@ -1474,7 +1477,7 @@ public partial class DbService
             OFFSET @skip LIMIT @take;";
 
         using var dataCmd = new NpgsqlCommand(dataSql, conn);
-        dataCmd.CommandTimeout = 120;
+        dataCmd.CommandTimeout = DbCommandTimeout;
         dataCmd.Parameters.AddWithValue("query", query);
         dataCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         dataCmd.Parameters.AddWithValue("skip", skip);
@@ -1534,7 +1537,7 @@ public partial class DbService
         // Count
         var countSql = matchesCte + " SELECT COUNT(*) FROM matching_docs;";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = 120;
+        countCmd.CommandTimeout = DbCommandTimeout;
         countCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
@@ -1566,7 +1569,7 @@ public partial class DbService
             OFFSET @skip LIMIT @take;";
 
         using var dataCmd = new NpgsqlCommand(dataSql, conn);
-        dataCmd.CommandTimeout = 120;
+        dataCmd.CommandTimeout = DbCommandTimeout;
         dataCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         dataCmd.Parameters.AddWithValue("skip", skip);
         dataCmd.Parameters.AddWithValue("take", take);
@@ -1681,7 +1684,7 @@ public partial class DbService
                     FROM DocumentChunks c
                     JOIN ParentDocuments p ON c.ParentId = p.Id
                     {extraJoin}
-                    WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query) OR c.TextContent ILIKE @pattern)
+                    WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                     {extraWhereStr}
                     GROUP BY c.ParentId
                 ),
@@ -1751,7 +1754,7 @@ public partial class DbService
             LIMIT 50000;";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = 120;
+        cmd.CommandTimeout = DbCommandTimeout;
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
@@ -1785,7 +1788,7 @@ public partial class DbService
         var countSql = $@"SELECT COUNT(*) FROM ParentDocuments p
             LEFT JOIN DataSets d ON p.DataSetId = d.Id {whereClause}";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = 120;
+        countCmd.CommandTimeout = DbCommandTimeout;
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
@@ -1800,7 +1803,7 @@ public partial class DbService
             LIMIT 50000;";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = 120;
+        cmd.CommandTimeout = DbCommandTimeout;
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
 
@@ -1848,7 +1851,7 @@ public partial class DbService
             ORDER BY array_position(@ids, p.Id);";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = 120;
+        cmd.CommandTimeout = DbCommandTimeout;
         cmd.Parameters.AddWithValue("ids", ids);
         if (!string.IsNullOrWhiteSpace(query)) cmd.Parameters.AddWithValue("query", query);
 
@@ -1886,7 +1889,7 @@ public partial class DbService
 
             // Option B: Count total sentences across all documents
             using var cmdSentences = new NpgsqlCommand("SELECT COALESCE(SUM(jsonb_array_length(Sentences)), 0) FROM ParentDocuments WHERE Sentences IS NOT NULL", conn);
-            cmdSentences.CommandTimeout = 120;
+            cmdSentences.CommandTimeout = DbCommandTimeout;
             long sentences = (long)(cmdSentences.ExecuteScalar() ?? 0L);
 
             return (docs, images, sentences);
@@ -1957,7 +1960,7 @@ public partial class DbService
             ";
 
             using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.CommandTimeout = 120;
+            cmd.CommandTimeout = DbCommandTimeout;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
@@ -2155,7 +2158,7 @@ public partial class DbService
                 LIMIT @limit OFFSET @offset;", conn);
             cmd.Parameters.AddWithValue("limit", limit);
             cmd.Parameters.AddWithValue("offset", offset);
-            cmd.CommandTimeout = 120;
+            cmd.CommandTimeout = DbCommandTimeout;
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
@@ -2188,7 +2191,7 @@ public partial class DbService
                     (SELECT Sentences FROM ParentDocuments WHERE Id = @pid)
                 ) AS elem;", conn);
             cmd.Parameters.AddWithValue("pid", parentId);
-            cmd.CommandTimeout = 30;
+            cmd.CommandTimeout = DbCommandTimeout;
 
             var result = cmd.ExecuteScalar();
             return result as string ?? "";
@@ -2244,7 +2247,7 @@ public partial class DbService
             ";
             using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("limit", limit);
-            cmd.CommandTimeout = 120;
+            cmd.CommandTimeout = DbCommandTimeout;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
@@ -2296,7 +2299,7 @@ public partial class DbService
         {
             using var conn = _dataSource.OpenConnection();
             using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM ParentDocuments WHERE Embedding IS NULL AND Sentences IS NOT NULL AND jsonb_array_length(Sentences) > 0;", conn);
-            cmd.CommandTimeout = 120;
+            cmd.CommandTimeout = DbCommandTimeout;
             return (long)(cmd.ExecuteScalar() ?? 0L);
         }
         catch (Exception ex)
