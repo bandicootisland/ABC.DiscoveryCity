@@ -254,11 +254,10 @@
                                         {
                                             var capturedList = list;
                                             <SplitButtonItem OnClick="@(() => QuickAddToList(SelectedDetail!, capturedList))"
-                                                             Text="@capturedList.Name" />
+                                                             Icon="@SvgIcon.ListUnordered">@capturedList.Name</SplitButtonItem>
                                         }
                                         <SplitButtonItem OnClick="@(() => ShowQuickNewListDialog(SelectedDetail!))"
-                                                         Text="New List..."
-                                                         Icon="@SvgIcon.Plus" />
+                                                         Icon="@SvgIcon.Plus">New List...</SplitButtonItem>
                                     </SplitButtonItems>
                                 </TelerikSplitButton>
                                 <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
