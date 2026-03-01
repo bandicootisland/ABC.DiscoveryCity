@@ -1059,20 +1059,21 @@ public partial class DbService
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
         // Full-text search across DocumentChunks (index-backed) AND metadata (ILIKE)
+        // Uses COUNT(*) ranking instead of ts_rank to avoid detoasting all chunk text
         string sql = $@"
             WITH text_matches AS (
-                SELECT c.ParentId,
-                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score,
-                       (ARRAY_AGG(c.TextContent ORDER BY ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query)) DESC))[1] as best_chunk
+                SELECT c.ParentId, COUNT(*) as score
                 FROM DocumentChunks c
-                JOIN ParentDocuments p2 ON c.ParentId = p2.Id
+                {(datasetFilter ? "JOIN ParentDocuments p2 ON c.ParentId = p2.Id" : "")}
                 {extraJoin}
                 WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                 {extraWhereStr}
                 GROUP BY c.ParentId
+                ORDER BY score DESC
+                LIMIT 500
             ),
             metadata_matches AS (
-                SELECT p.Id as ParentId, 0.5 as score, '' as best_chunk
+                SELECT p.Id as ParentId, 0.5::bigint as score
                 FROM ParentDocuments p
                 {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
@@ -1084,11 +1085,11 @@ public partial class DbService
                 {(namesFilter ? "AND " + NamesAndClause("p") : "")}
             ),
             matching_docs AS (
-                SELECT ParentId, MAX(score) as score, MAX(best_chunk) as best_chunk
+                SELECT ParentId, MAX(score) as score
                 FROM (
-                    SELECT ParentId, score, best_chunk FROM text_matches
+                    SELECT ParentId, score FROM text_matches
                     UNION ALL
-                    SELECT ParentId, score, best_chunk FROM metadata_matches
+                    SELECT ParentId, score FROM metadata_matches
                 ) combined
                 GROUP BY ParentId
                 ORDER BY score DESC
@@ -1098,7 +1099,9 @@ public partial class DbService
                    p.FilePath,
                    d.pdffolder as PdfFolder,
                    COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                   COALESCE(NULLIF(md.best_chunk, ''), (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem)) as FullText,
+                   (SELECT c.TextContent FROM DocumentChunks c WHERE c.ParentId = p.Id
+                    AND to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                    LIMIT 1) as FullText,
                    md.score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
@@ -1408,19 +1411,19 @@ public partial class DbService
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
         // CTE that finds all matching doc IDs with scores
+        // Uses COUNT(*) ranking instead of ts_rank to avoid detoasting all chunk text
         var matchesCte = $@"
             WITH text_matches AS (
-                SELECT c.ParentId,
-                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
+                SELECT c.ParentId, COUNT(*) as score
                 FROM DocumentChunks c
-                JOIN ParentDocuments p ON c.ParentId = p.Id
+                {(datasetFilter ? "JOIN ParentDocuments p ON c.ParentId = p.Id" : "")}
                 {extraJoin}
                 WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                 {extraWhereStr}
                 GROUP BY c.ParentId
             ),
             metadata_matches AS (
-                SELECT p.Id as ParentId, 0.5 as score
+                SELECT p.Id as ParentId, 0.5::bigint as score
                 FROM ParentDocuments p
                 {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
@@ -1680,16 +1683,16 @@ public partial class DbService
             var textIds = new List<int>();
             var textSql = $@"
                 WITH text_matches AS (
-                    SELECT c.ParentId, MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
+                    SELECT c.ParentId, COUNT(*) as score
                     FROM DocumentChunks c
-                    JOIN ParentDocuments p ON c.ParentId = p.Id
+                    {(datasetFilter ? "JOIN ParentDocuments p ON c.ParentId = p.Id" : "")}
                     {extraJoin}
                     WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
                     {extraWhereStr}
                     GROUP BY c.ParentId
                 ),
                 metadata_matches AS (
-                    SELECT p.Id as ParentId, 0.5 as score
+                    SELECT p.Id as ParentId, 0.5::bigint as score
                     FROM ParentDocuments p
                     {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                     WHERE (p.Metadata->>'Title' ILIKE @pattern OR p.Metadata->>'Names' ILIKE @pattern OR p.Metadata->>'FileName' ILIKE @pattern OR p.FileName ILIKE @pattern)
