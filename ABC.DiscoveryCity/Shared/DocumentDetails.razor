@@ -62,46 +62,17 @@
         </div>
     </TabStripTab>
     <TabStripTab Title="@ViewerTabTitle">
-        @if (ReconstructedDownloadUrl != null)
-        {
-            <div class="px-3 py-1 bg-light border-bottom small">
-                <TelerikIcon Icon="@SvgIcon.HyperlinkOpen" />
-                <a href="@ReconstructedDownloadUrl" target="_blank" rel="noopener noreferrer" class="text-break">
-                    @ReconstructedDownloadUrl
-                </a>
-            </div>
-        }
         @if (Category == FileCategory.Pdf)
         {
             <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
                 <SplitterPanes>
                     <SplitterPane Size="55%">
-                        @if (IsLoadingViewer)
-                        {
-                            <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
-                                <TelerikLoader Visible="true" />
-                                <span class="ms-2">Loading PDF...</span>
-                            </div>
-                        }
-                        else if (ViewerData != null && ViewerData.Length > 0)
-                        {
-                            <TelerikPdfViewer Data="@ViewerData"
-                                              Zoom="1.0m"
-                                              Width="100%"
-                                              Height="100%" />
-                        }
-                        else
-                        {
-                            <div class="d-flex flex-column align-items-center justify-content-center text-muted" style="height: 100%;">
-                                <span>File not available locally.</span>
-                                @if (ReconstructedDownloadUrl != null)
-                                {
-                                    <a href="@ReconstructedDownloadUrl" target="_blank" rel="noopener noreferrer" class="mt-2">
-                                        <TelerikIcon Icon="@SvgIcon.Download" /> Download from source
-                                    </a>
-                                }
-                            </div>
-                        }
+                        <PdfDocumentViewer Data="@ViewerData"
+                                           FilePath="@Document?.FilePath"
+                                           DownloadUrl="@ReconstructedDownloadUrl"
+                                           PreviewImageUrl="@PreviewImageUrl"
+                                           AutoLoad="false"
+                                           Height="100%" />
                     </SplitterPane>
                     <SplitterPane>
                         <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: var(--kendo-base-bg, #f9f9f9); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
@@ -271,6 +242,17 @@
     /// The API converts .xls/.csv to .xlsx on the fly for the TelerikSpreadsheet control.
     /// </summary>
     private bool HasNativeViewer => Category == FileCategory.Pdf || Category == FileCategory.Spreadsheet;
+
+    private string? PreviewImageUrl
+    {
+        get
+        {
+            var imagePath = Document?.FullImagePath ?? Document?.ThumbnailPath;
+            return string.IsNullOrEmpty(imagePath)
+                ? null
+                : $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(imagePath)}";
+        }
+    }
 //
     private FileCategory GetFileCategory()
     {

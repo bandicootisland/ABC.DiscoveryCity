@@ -1,0 +1,142 @@
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+@inject SearchService SearchService
+
+@* External link bar — always visible when a download URL is available *@
+@if (!string.IsNullOrEmpty(DownloadUrl))
+{
+    <div class="d-flex align-items-center gap-2 px-3 py-1 small"
+         style="background: var(--kendo-base-bg, #f8f9fa); border-bottom: 1px solid var(--kendo-component-border, #dee2e6);">
+        <TelerikIcon Icon="@SvgIcon.HyperlinkOpen" />
+        <a href="@DownloadUrl" target="_blank" rel="noopener noreferrer" class="text-break">
+            @DownloadUrl
+        </a>
+    </div>
+}
+
+@if (IsLoading)
+{
+    <div class="d-flex align-items-center justify-content-center" style="height: 100%;">
+        <TelerikLoader Visible="true" />
+        <span class="ms-2">Loading PDF...</span>
+    </div>
+}
+else if (_data != null && _data.Length > 0)
+{
+    <TelerikPdfViewer Data="@_data"
+                      Zoom="@Zoom"
+                      Width="100%"
+                      Height="@Height" />
+}
+else
+{
+    @* Fallback: show preview image if available, otherwise a message *@
+    <div class="d-flex flex-column align-items-center justify-content-center" style="height: 100%; padding: 20px;">
+        @if (!string.IsNullOrEmpty(PreviewImageUrl))
+        {
+            <img src="@PreviewImageUrl"
+                 style="max-width: 100%; max-height: 70vh; object-fit: contain; border: 1px solid var(--kendo-component-border, #ddd); box-shadow: 2px 2px 8px rgba(0,0,0,0.15);"
+                 alt="Document preview" />
+            <div class="text-muted small mt-2">Preview image — full PDF not available locally</div>
+        }
+        else
+        {
+            <div class="text-muted">
+                <TelerikIcon Icon="@SvgIcon.FilePdf" />
+                <span class="ms-1">@(_error ?? "PDF not available locally.")</span>
+            </div>
+        }
+
+        @if (!string.IsNullOrEmpty(DownloadUrl))
+        {
+            <a href="@DownloadUrl" target="_blank" rel="noopener noreferrer" class="btn btn-outline-primary mt-3">
+                <TelerikIcon Icon="@SvgIcon.Download" /> Download from source
+            </a>
+        }
+    </div>
+}
+
+@code {
+    /// <summary>File path on the server to fetch PDF bytes from.</summary>
+    [Parameter] public string? FilePath { get; set; }
+
+    /// <summary>Optional pre-loaded byte array. When set, skips the HTTP fetch.</summary>
+    [Parameter] public byte[]? Data { get; set; }
+
+    /// <summary>Zoom level for the PDF viewer.</summary>
+    [Parameter] public decimal Zoom { get; set; } = 1.0m;
+
+    /// <summary>CSS height value for the viewer.</summary>
+    [Parameter] public string Height { get; set; } = "100%";
+
+    /// <summary>Optional fallback download URL shown when the file isn't available.</summary>
+    [Parameter] public string? DownloadUrl { get; set; }
+
+    /// <summary>Preview image URL (thumbnail or full page image) shown when PDF bytes aren't available.</summary>
+    [Parameter] public string? PreviewImageUrl { get; set; }
+
+    /// <summary>Set to true to load the PDF immediately. If false, call LoadAsync() manually (lazy load).</summary>
+    [Parameter] public bool AutoLoad { get; set; } = true;
+
+    private byte[]? _data;
+    private string? _loadedPath;
+    private string? _error;
+
+    public bool IsLoading { get; private set; }
+    public bool IsLoaded => _data is { Length: > 0 };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // If caller provides Data directly, use it
+        if (Data != null)
+        {
+            _data = Data;
+            _loadedPath = FilePath;
+            return;
+        }
+
+        // If path changed, reset and optionally reload
+        if (FilePath != _loadedPath)
+        {
+            _data = null;
+            _loadedPath = null;
+            _error = null;
+
+            if (AutoLoad && !string.IsNullOrEmpty(FilePath))
+            {
+                await LoadAsync();
+            }
+        }
+    }
+
+    /// <summary>Fetch PDF bytes from the API. Safe to call multiple times — no-ops if already loaded for current path.</summary>
+    public async Task LoadAsync()
+    {
+        if (string.IsNullOrEmpty(FilePath) || IsLoading) return;
+        if (FilePath == _loadedPath && _data != null) return;
+
+        IsLoading = true;
+        _error = null;
+        StateHasChanged();
+
+        try
+        {
+            _data = await SearchService.GetPdfBytesAsync(FilePath);
+            _loadedPath = FilePath;
+
+            if (_data == null || _data.Length == 0)
+                _error = "File not available locally.";
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"PdfDocumentViewer load error: {ex.Message}");
+            _error = "Failed to load PDF.";
+        }
+        finally
+        {
+            IsLoading = false;
+            StateHasChanged();
+        }
+    }
+}

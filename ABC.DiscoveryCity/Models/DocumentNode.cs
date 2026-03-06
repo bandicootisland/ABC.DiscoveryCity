@@ -34,5 +34,17 @@ namespace ABC.DiscoveryCity.Models
 
         [JsonPropertyName("relevancescore")]
         public decimal RelevanceScore { get; set; }
+
+        [JsonPropertyName("filepath")]
+        public string? FilePath { get; set; }
+
+        [JsonPropertyName("thumbnailpath")]
+        public string? ThumbnailPath { get; set; }
+
+        [JsonPropertyName("sourceurl")]
+        public string? SourceUrl { get; set; }
+
+        [JsonPropertyName("datasetname")]
+        public string? DataSetName { get; set; }
     }
 }

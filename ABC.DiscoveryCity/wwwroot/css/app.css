@@ -111,8 +111,8 @@ code {
 .k-grid tr.k-selected:hover > td,
 .k-grid td.k-selected,
 .k-grid .k-table-row.k-selected > td {
-    background-color: #d4edda !important;
-    color: inherit !important;
+    background-color: var(--kendo-selected-bg, #d4edda) !important;
+    color: var(--kendo-selected-text, inherit) !important;
 }
 
 .form-floating > .form-control-plaintext::placeholder, .form-floating > .form-control::placeholder {
@@ -131,4 +131,49 @@ code {
 }
 .details-noscroll {
     overflow: visible !important;
+}
+
+/* === Kendo theme-aware overrides for Bootstrap utility classes === */
+body.k-body {
+    color: var(--kendo-body-text, inherit);
+    background-color: var(--kendo-body-bg, inherit);
+}
+
+.k-body .text-muted {
+    color: var(--kendo-subtle-text, #6c757d) !important;
+}
+
+.k-body h1, .k-body h2, .k-body h3, .k-body h4, .k-body h5, .k-body h6 {
+    color: var(--kendo-body-text, inherit);
+}
+
+.k-body .form-check-label {
+    color: var(--kendo-body-text, inherit);
+}
+
+.k-body .form-control {
+    color: var(--kendo-body-text, inherit);
+    background-color: var(--kendo-input-bg, var(--kendo-component-bg, #fff));
+    border-color: var(--kendo-input-border, var(--kendo-component-border, #ced4da));
+}
+
+.k-body .alert-warning {
+    background-color: var(--kendo-base-bg, #fff3cd);
+    color: var(--kendo-body-text, #664d03);
+    border-color: var(--kendo-component-border, #ffecb5);
+}
+
+.k-body .fw-bold,
+.k-body .text-truncate,
+.k-body label,
+.k-body .form-label {
+    color: var(--kendo-body-text, inherit);
+}
+
+.k-body .border {
+    border-color: var(--kendo-component-border, #dee2e6) !important;
+}
+
+.k-body .bg-light {
+    background-color: var(--kendo-base-bg, #f8f9fa) !important;
 }

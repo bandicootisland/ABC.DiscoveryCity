@@ -4,6 +4,7 @@
     border: 1px solid var(--kendo-component-border, #dee2e6);
     border-radius: 8px;
     background: var(--kendo-component-bg, white);
+    color: var(--kendo-body-text, inherit);
     cursor: pointer;
     transition: box-shadow 0.15s, border-color 0.15s;
 }

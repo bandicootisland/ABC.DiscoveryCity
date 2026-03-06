@@ -28,8 +28,10 @@ namespace ABC.DiscoveryCity.Services
                         {
                             Id = item.FilePath ?? Guid.NewGuid().ToString(),
                             Title = item.FileName,
-                            DocumentType = item.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" : 
-                                          (item.FileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ? "Transcript" : 
+                            FilePath = item.FilePath,
+                            DataSetName = item.DataSetName,
+                            DocumentType = item.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" :
+                                          (item.FileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ? "Transcript" :
                                           (item.FileName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) ? "Email" : "Image")),
                             CreatedDate = item.Date ?? DateTime.UtcNow,
                             Author = "Unknown",
@@ -50,8 +52,12 @@ namespace ABC.DiscoveryCity.Services
                 {
                     Id = r.FilePath ?? Guid.NewGuid().ToString(),
                     Title = r.FileName,
-                    DocumentType = r.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" : 
-                                  (r.FileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ? "Transcript" : 
+                    FilePath = r.FilePath,
+                    ThumbnailPath = r.FullImagePath ?? r.ThumbnailPath,
+                    SourceUrl = r.SourceUrl,
+                    DataSetName = r.DataSetName,
+                    DocumentType = r.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" :
+                                  (r.FileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ? "Transcript" :
                                   (r.FileName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) ? "Email" : "Image")),
                     CreatedDate = r.Date ?? DateTime.UtcNow,
                     Author = "Unknown",

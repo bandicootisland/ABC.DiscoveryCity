@@ -1,4 +1,6 @@
 @using ABC.DiscoveryCity.Models
+@using ABC.DiscoveryCity.Services
+@inject SearchService SearchService
 
 <div class="inspector-pane @(Document != null ? "open" : "")">
     @if (Document != null)
@@ -13,11 +15,11 @@
         </div>
 
         <div class="inspector-tabs">
-            <button class="@(ActiveTab == "Overview" ? "active" : "")" @onclick="@(() => ActiveTab = "Overview")">Overview</button>
-            <button class="@(ActiveTab == "PDF" ? "active" : "")" @onclick="@(() => ActiveTab = "PDF")">PDF Viewer</button>
-            <button class="@(ActiveTab == "Metadata" ? "active" : "")" @onclick="@(() => ActiveTab = "Metadata")">Metadata</button>
+            <button class="@(ActiveTab == "Overview" ? "active" : "")" @onclick="@(() => SetTab("Overview"))">Overview</button>
+            <button class="@(ActiveTab == "PDF" ? "active" : "")" @onclick="@(() => SetTab("PDF"))">PDF Viewer</button>
+            <button class="@(ActiveTab == "Metadata" ? "active" : "")" @onclick="@(() => SetTab("Metadata"))">Metadata</button>
         </div>
-        
+
         <div class="inspector-body">
             @if (ActiveTab == "Overview")
             {
@@ -35,7 +37,20 @@
             }
             else if (ActiveTab == "PDF")
             {
-                <div class="pdf-placeholder">PDF Rendering Component will go here</div>
+                @if (IsPdf)
+                {
+                    <PdfDocumentViewer FilePath="@Document.FilePath"
+                                       DownloadUrl="@ReconstructedDownloadUrl"
+                                       PreviewImageUrl="@PreviewImageUrl"
+                                       AutoLoad="true"
+                                       Height="calc(100vh - 200px)" />
+                }
+                else
+                {
+                    <div class="d-flex align-items-center justify-content-center text-muted" style="height: 300px;">
+                        <span>PDF viewer is only available for PDF documents.</span>
+                    </div>
+                }
             }
             else if (ActiveTab == "Metadata")
             {
@@ -54,4 +69,35 @@
     [Parameter] public EventCallback OnCloseClicked { get; set; }
 
     private string ActiveTab = "Overview";
+
+    private bool IsPdf => Document?.Title?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true;
+
+    private string? PreviewImageUrl =>
+        string.IsNullOrEmpty(Document?.ThumbnailPath)
+            ? null
+            : $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(Document.ThumbnailPath)}";
+
+    private string? ReconstructedDownloadUrl
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(Document?.SourceUrl) || string.IsNullOrEmpty(Document?.Title))
+                return null;
+            var baseUrl = Document.SourceUrl.TrimEnd('/');
+            if (!string.IsNullOrEmpty(Document.DataSetName))
+                return $"{baseUrl}/{Uri.EscapeDataString(Document.DataSetName)}/{Uri.EscapeDataString(Document.Title)}";
+            return $"{baseUrl}/{Uri.EscapeDataString(Document.Title)}";
+        }
+    }
+
+    private void SetTab(string tab)
+    {
+        ActiveTab = tab;
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (Document == null)
+            ActiveTab = "Overview";
+    }
 }
