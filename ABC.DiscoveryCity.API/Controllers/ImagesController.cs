@@ -147,6 +147,64 @@ public class ImagesController : ControllerBase
 
         return BadRequest($"Unsupported spreadsheet format: {ext}");
     }
+
+    // -----------------------------------------------------------------------
+    // User file uploads
+    // -----------------------------------------------------------------------
+
+    private static readonly string UserUploadsDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        "DiscoveryCity", "UserUploads");
+
+    [HttpPost("upload")]
+    public async Task<IActionResult> UploadUserFile(
+        [FromForm] IFormFile file,
+        [FromForm] string documentPath)
+    {
+        if (file == null || file.Length == 0)
+            return BadRequest("No file provided.");
+        if (string.IsNullOrWhiteSpace(documentPath))
+            return BadRequest("Document path is required.");
+
+        Directory.CreateDirectory(UserUploadsDir);
+
+        // Store with a unique name to avoid collisions
+        var safeFileName = Path.GetFileName(file.FileName);
+        var storedName = $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_{safeFileName}";
+        var storedPath = Path.Combine(UserUploadsDir, storedName);
+
+        await using (var stream = new FileStream(storedPath, FileMode.Create))
+        {
+            await file.CopyToAsync(stream);
+        }
+
+        var contentType = string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType;
+        var id = _dbService.InsertUserEdit(documentPath, safeFileName, file.Length, contentType, storedPath);
+
+        return Ok(new { id, storedPath, fileName = safeFileName });
+    }
+
+    [HttpGet("user-edits")]
+    public IActionResult GetUserEdits([FromQuery] string documentPath)
+    {
+        if (string.IsNullOrWhiteSpace(documentPath))
+            return BadRequest("Document path is required.");
+
+        var edits = _dbService.GetUserEdits(documentPath);
+        return Ok(edits);
+    }
+
+    [HttpGet("user-edit/{id}")]
+    public IActionResult ViewUserEdit(int id)
+    {
+        var edit = _dbService.GetUserEdit(id);
+        if (edit == null) return NotFound();
+
+        if (!System.IO.File.Exists(edit.StoredPath))
+            return NotFound("File not found on disk.");
+
+        return PhysicalFile(edit.StoredPath, edit.ContentType, enableRangeProcessing: true);
+    }
 }
 
 public class ImageDto

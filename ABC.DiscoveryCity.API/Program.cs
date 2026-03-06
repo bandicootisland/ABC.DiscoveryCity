@@ -75,6 +75,7 @@ using (var scope = app.Services.CreateScope())
 {
     var dbService = scope.ServiceProvider.GetRequiredService<ABC.DiscoveryCity.PostgreSQL.DbService>();
     dbService.InitTieredSearchTables();
+    dbService.InitUserEditsTables();
 }
 
 // Configure the HTTP request pipeline.

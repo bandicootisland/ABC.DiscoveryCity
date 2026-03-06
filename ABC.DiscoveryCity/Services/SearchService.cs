@@ -293,6 +293,61 @@ public class SearchService
         }
     }
 
+    // -----------------------------------------------------------------------
+    // User file uploads
+    // -----------------------------------------------------------------------
+
+    /// <summary>Upload a user-supplied file and associate it with a document.</summary>
+    public async Task<UserEditResult?> UploadUserFileAsync(string documentPath, Stream fileStream, string fileName)
+    {
+        try
+        {
+            using var content = new MultipartFormDataContent();
+            content.Add(new StreamContent(fileStream), "file", fileName);
+            content.Add(new StringContent(documentPath), "documentPath");
+
+            var response = await _httpClient.PostAsync("api/images/upload", content);
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<UserEditResult>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"UploadUserFile error: {ex.Message}");
+            _notifications.ShowError($"Upload failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Get all user-uploaded files for a document.</summary>
+    public async Task<List<UserEditResult>> GetUserEditsAsync(string documentPath)
+    {
+        try
+        {
+            var response = await _httpClient.GetFromJsonAsync<List<UserEditResult>>(
+                $"api/images/user-edits?documentPath={Uri.EscapeDataString(documentPath)}");
+            return response ?? new();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetUserEdits error: {ex.Message}");
+            return new();
+        }
+    }
+
+    /// <summary>Get the byte array for a user-uploaded file.</summary>
+    public async Task<byte[]?> GetUserEditBytesAsync(int id)
+    {
+        try
+        {
+            return await _httpClient.GetByteArrayAsync($"api/images/user-edit/{id}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetUserEditBytes error: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>
     /// Bounded sliding-window page cache: keeps at most MaxPages pages in memory.
     /// Evicts the page farthest from the current scroll position when full.
@@ -417,4 +472,14 @@ public class DataSetStatsDto
     public long SentenceCount { get; set; }
     public DateTime? FirstProcessed { get; set; }
     public DateTime? LastProcessed { get; set; }
+}
+
+public class UserEditResult
+{
+    public int Id { get; set; }
+    public string StoredPath { get; set; } = "";
+    public string FileName { get; set; } = "";
+    public string? DocumentPath { get; set; }
+    public long FileSize { get; set; }
+    public DateTime UploadedAt { get; set; }
 }
