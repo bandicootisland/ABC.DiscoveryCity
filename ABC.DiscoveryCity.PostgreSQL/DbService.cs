@@ -238,6 +238,9 @@ public partial class DbService
                 using (var cmd = new NpgsqlCommand("ALTER TABLE Sources ALTER COLUMN BaseFilePath DROP NOT NULL;", conn))
                     try { cmd.ExecuteNonQuery(); } catch { /* already nullable */ }
 
+                // Tiered search cache tables
+                InitTieredSearchTables();
+
                 Console.WriteLine("Schema migrations complete.");
                 return;
             }

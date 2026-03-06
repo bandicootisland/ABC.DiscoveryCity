@@ -32,6 +32,15 @@
                         AvailableNames="@AvailableNames"
                         OnApplyCriteria="@OnAdvancedFindApply" />
 
+    @if (_isEnriching)
+    {
+        <div class="d-flex align-items-center gap-2 mb-1" style="opacity: 0.7;">
+            <div style="flex: 0 0 80px; height: 3px; background: var(--kendo-base-bg, #e9ecef); border-radius: 2px; overflow: hidden;">
+                <div style="width: @($"{_completedTiers * 25}%"); height: 100%; background: var(--kendo-selected-bg, #0d6efd); border-radius: 2px; transition: width 0.5s;"></div>
+            </div>
+            <span class="text-muted small">@_completedTiers/4</span>
+        </div>
+    }
     @if (GridData != null && GridData.Count == 0 && TotalCount == 0 && HasSearched)
     {
         <div class="alert alert-warning">No results found.</div>
@@ -161,7 +170,7 @@
                                     }
                                     else
                                     {
-                                        <div style="width: 50px; height: 52px; background: #f0f0f0; display: flex; align-items: center; justify-content: center; color: #aaa;">
+                                        <div style="width: 50px; height: 52px; background: var(--kendo-base-bg, #f0f0f0); display: flex; align-items: center; justify-content: center; color: var(--kendo-subtle-text, #aaa);">
                                             <TelerikIcon Icon="@GetFileIcon(item?.FileName)" />
                                         </div>
                                     }
@@ -205,7 +214,7 @@
                                     var pct = Math.Max(0, (1 - (item?.Distance ?? 1)) * 100);
                                     var color = pct >= 70 ? "#28a745" : pct >= 40 ? "#ffc107" : "#dc3545";
                                     <div style="display: flex; align-items: center; gap: 6px;">
-                                        <div style="flex: 1; height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden;">
+                                        <div style="flex: 1; height: 8px; background: var(--kendo-base-bg, #e9ecef); border-radius: 4px; overflow: hidden;">
                                             <div style="width: @($"{pct:F0}%"); height: 100%; background: @color; border-radius: 4px;"></div>
                                         </div>
                                         <span style="font-size: 0.8em; min-width: 36px; text-align: right;">@($"{pct:F0}%")</span>
@@ -344,6 +353,13 @@
     // Debounce for search text — waits 500ms after typing stops
     private CancellationTokenSource _searchTextCts = new();
 
+    // Enrichment polling: when search results are still being enriched by slower tiers,
+    // we poll again after a delay to get improved results
+    private CancellationTokenSource _enrichmentPollCts = new();
+    private int _lastMergeVersion;
+    private bool _isEnriching;
+    private int _completedTiers;
+
     protected override async Task OnInitializedAsync()
     {
         AvailableDataSets = (await SearchService.GetDataSetNamesAsync())
@@ -421,6 +437,22 @@
             }
 
             UpdateAvailableNames(result.Items);
+
+            // Track enrichment state for UI indicator
+            _isEnriching = result.Enriching;
+            _completedTiers = result.CompletedTiers;
+
+            // Enrichment polling: keep polling while tiers are still running
+            if (result.Enriching)
+            {
+                _lastMergeVersion = result.MergeVersion;
+                ScheduleEnrichmentPoll(skip, take);
+            }
+            else
+            {
+                _lastMergeVersion = result.MergeVersion;
+                _isEnriching = false;
+            }
         }
         catch (Exception ex)
         {
@@ -436,6 +468,10 @@
     /// </summary>
     private void RebindGrid()
     {
+        _enrichmentPollCts.Cancel();
+        _lastMergeVersion = 0;
+        _isEnriching = false;
+        _completedTiers = 0;
         SearchService.ClearPageCache();
         GridRef?.Rebind();
     }
@@ -584,6 +620,61 @@
         _gridReadCts.Cancel();
         _searchTextCts.Cancel();
         _dataSetDebounceCts.Cancel();
+        _enrichmentPollCts.Cancel();
+    }
+
+    /// <summary>
+    /// Schedules a background poll for enriched results after slower tiers complete.
+    /// Poll intervals increase: 300ms after first return, 500ms after second.
+    /// Clears client cache and rebinds the grid to pick up re-ranked results.
+    /// </summary>
+    private void ScheduleEnrichmentPoll(int currentSkip, int currentTake)
+    {
+        _enrichmentPollCts.Cancel();
+        _enrichmentPollCts = new CancellationTokenSource();
+        var token = _enrichmentPollCts.Token;
+
+        // Gentle intervals: no spinner, no UI block
+        var delay = _lastMergeVersion <= 1 ? 1500 : 3000;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, token);
+                if (token.IsCancellationRequested) return;
+
+                // Fetch silently — don't use Rebind() which triggers the grid spinner
+                var result = await SearchService.SearchPagedAsync(
+                    SearchQuery, currentSkip, currentTake, exactMatch: true,
+                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
+
+                if (token.IsCancellationRequested) return;
+
+                await InvokeAsync(() =>
+                {
+                    _isEnriching = result.Enriching;
+                    _completedTiers = result.CompletedTiers;
+
+                    // Only update grid data if results actually changed
+                    if (result.TotalCount != TotalCount || result.MergeVersion != _lastMergeVersion)
+                    {
+                        GridData = result.Items;
+                        TotalCount = result.TotalCount;
+                        SearchService.ClearPageCache();
+                    }
+
+                    _lastMergeVersion = result.MergeVersion;
+
+                    if (result.Enriching)
+                        ScheduleEnrichmentPoll(currentSkip, currentTake);
+
+                    StateHasChanged();
+                });
+            }
+            catch (TaskCanceledException) { }
+            catch (Exception ex) { Console.WriteLine($"Enrichment poll error: {ex.Message}"); }
+        }, token);
     }
 
     private async Task SaveSelectionToList()

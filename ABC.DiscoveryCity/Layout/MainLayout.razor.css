@@ -14,8 +14,8 @@ main {
 }
 
 .top-row {
-    background-color: #f7f7f7;
-    border-bottom: 1px solid #d6d5d5;
+    background-color: var(--kendo-base-bg, #f7f7f7);
+    border-bottom: 1px solid var(--kendo-component-border, #d6d5d5);
     justify-content: flex-end;
     height: 2.5rem;
     display: flex;
@@ -40,6 +40,47 @@ main {
 
 article.content {
     padding-top: 0.5rem !important;
+}
+
+.theme-picker {
+    position: relative;
+}
+
+.theme-dropdown {
+    position: absolute;
+    top: 2.2rem;
+    right: 0;
+    background: var(--kendo-component-bg, #fff);
+    border: 1px solid var(--kendo-component-border, #d6d5d5);
+    color: var(--kendo-component-text, #333);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: 1000;
+    min-width: 160px;
+    padding: 4px 0;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.theme-dropdown ::deep hr {
+    margin: 4px 0;
+    border-color: var(--kendo-component-border, #d6d5d5);
+}
+
+.theme-option {
+    padding: 6px 14px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    white-space: nowrap;
+}
+
+.theme-option:hover {
+    background: var(--kendo-hover-bg, #f0f0f0);
+}
+
+.theme-option.active {
+    font-weight: 600;
+    color: var(--kendo-selected-text, #0d6efd);
 }
 
 @media (max-width: 640.98px) {

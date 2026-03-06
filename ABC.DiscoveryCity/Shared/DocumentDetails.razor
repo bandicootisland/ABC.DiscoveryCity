@@ -16,7 +16,7 @@
                     @if (!string.IsNullOrEmpty(Document?.ThumbnailPath))
                     {
                         <img src="@($"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(Document.FullImagePath ?? Document.ThumbnailPath)}")"
-                             style="width: 100%; height: auto; border: 1px solid #ddd; box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;" />
+                             style="width: 100%; height: auto; border: 1px solid var(--kendo-component-border, #ddd); box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;" />
                     }
                     else
                     {
@@ -45,8 +45,8 @@
                         }
                     </div>
                     <div class="card h-100">
-                        <div class="card-body" style="max-height: 600px; overflow-y: auto; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
-                            <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
+                        <div class="card-body" style="max-height: 600px; overflow-y: auto; background-color: var(--kendo-base-bg, #f9f9f9); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.95em; line-height: 1.5;">
+                            <div style="color: var(--kendo-subtle-text, #666); margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
                             @if (!string.IsNullOrEmpty(Document?.Text))
                             {
                                 @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
@@ -104,8 +104,8 @@
                         }
                     </SplitterPane>
                     <SplitterPane>
-                        <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
-                            <div class="d-flex align-items-center justify-content-between" style="color: #666; margin-bottom: 1em;">
+                        <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: var(--kendo-base-bg, #f9f9f9); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
+                            <div class="d-flex align-items-center justify-content-between" style="color: var(--kendo-subtle-text, #666); margin-bottom: 1em;">
                                 <span>[Sentence]</span>
                                 @if (!string.IsNullOrEmpty(Document?.Text))
                                 {
@@ -158,13 +158,13 @@
         }
         else
         {
-            <div style="height: 800px; overflow-y: auto; padding: 20px; background-color: #f9f9f9; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
+            <div style="height: 800px; overflow-y: auto; padding: 20px; background-color: var(--kendo-base-bg, #f9f9f9); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
                 <div class="mb-3 d-flex align-items-center gap-2">
                     <TelerikIcon Icon="@FileIcon" />
                     <strong>@FileCategoryLabel</strong>
                     <span class="text-muted">— @Document?.FileName</span>
                 </div>
-                <div style="color: #666; margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
+                <div style="color: var(--kendo-subtle-text, #666); margin-bottom: 1em;">[@ContentTypeLabel]<br/><br/></div>
                 @if (!string.IsNullOrEmpty(Document?.Text))
                 {
                     @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))

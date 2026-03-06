@@ -70,6 +70,13 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Initialize tiered search cache tables on startup
+using (var scope = app.Services.CreateScope())
+{
+    var dbService = scope.ServiceProvider.GetRequiredService<ABC.DiscoveryCity.PostgreSQL.DbService>();
+    dbService.InitTieredSearchTables();
+}
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {

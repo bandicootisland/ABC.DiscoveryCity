@@ -1,6 +1,7 @@
 using ABC.DiscoveryCity.PostgreSQL;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 
@@ -12,6 +13,9 @@ public class SearchController : ControllerBase
 {
     private readonly DbService _dbService;
     private readonly IMemoryCache _cache;
+
+    // Tracks in-flight fan-out tasks so we don't launch duplicates
+    private static readonly ConcurrentDictionary<string, Task> _inFlightSearches = new();
 
     public SearchController(DbService dbService, IMemoryCache cache)
     {
@@ -53,10 +57,10 @@ public class SearchController : ControllerBase
     private const int ReadAhead = 50; // Pre-fetch this many extra records beyond the requested page
 
     /// <summary>
-    /// Server-side paged search for virtual scrolling grid.
-    /// Two-phase with record caching: first request runs CTE and caches IDs,
-    /// subsequent requests hydrate from cached DTOs (with read-ahead prefetch).
-    /// Scrolling back to already-viewed pages is instant — no DB hit.
+    /// Server-side paged search with tiered fan-out.
+    /// First call launches parallel tier searches, returns as soon as fast tiers complete.
+    /// Subsequent calls read from merged cache, triggering re-merge if new tiers finished.
+    /// Response includes enrichment status so the client knows whether to poll again.
     /// </summary>
     [HttpGet("paged")]
     public async Task<IActionResult> SearchPaged(
@@ -71,88 +75,233 @@ public class SearchController : ControllerBase
         var datasetNames = datasets?.Where(s => !string.IsNullOrEmpty(s)).ToList();
         var nameValues = names?.Where(s => !string.IsNullOrEmpty(s)).ToList();
 
-        // No search query — use cached two-phase browse (mirrors the search cache pattern)
+        // No search query — use cached two-phase browse (unchanged)
         if (string.IsNullOrWhiteSpace(query))
         {
-            var browseCacheKey = BuildBrowseCacheKey(datasetNames, nameValues);
-
-            var browseEntry = _cache.GetOrCreate(browseCacheKey, cacheEntry =>
-            {
-                cacheEntry.SlidingExpiration = TimeSpan.FromMinutes(5);
-                Console.WriteLine("[BrowseCache] MISS — loading browse IDs");
-                var (ids, realTotal) = _dbService.GetBrowseDocumentIds(datasetNames, nameValues);
-                return new BrowseCacheEntry { Ids = ids, TotalCount = realTotal };
-            })!;
-
-            var browsePageIds = browseEntry.Ids.Skip(skip).Take(take).ToArray();
-            var browseReadAheadIds = browseEntry.Ids.Skip(skip + take).Take(ReadAhead).ToArray();
-            var browseAllNeeded = browsePageIds.Concat(browseReadAheadIds).ToArray();
-            var browseMissing = browseAllNeeded.Where(id => !browseEntry.Records.ContainsKey(id)).ToArray();
-
-            if (browseMissing.Length > 0)
-            {
-                var cacheHits = browseAllNeeded.Length - browseMissing.Length;
-                Console.WriteLine($"[BrowseCache] Hydrating {browseMissing.Length} records ({cacheHits} cache hits, {browseReadAheadIds.Length} read-ahead)");
-                var hydrated = _dbService.HydrateByIds(browseMissing);
-                foreach (var record in hydrated)
-                    browseEntry.Records[record.Id] = MapToDto(record);
-            }
-            else
-            {
-                Console.WriteLine($"[BrowseCache] Full cache hit — {browsePageIds.Length} records from memory");
-            }
-
-            var browseDtos = new List<SearchResultDto>(browsePageIds.Length);
-            foreach (var id in browsePageIds)
-            {
-                if (browseEntry.Records.TryGetValue(id, out var dto))
-                    browseDtos.Add(dto);
-            }
-
-            return Ok(new PagedSearchResult { Items = browseDtos, TotalCount = browseEntry.TotalCount });
+            return Ok(BrowsePaged(skip, take, datasetNames, nameValues));
         }
 
-        // Search query present — use cached two-phase approach
-        var cacheKey = BuildCacheKey(query, exactMatch, datasetNames, nameValues, filenameOnly);
+        // Filename-only mode — single tier, no fan-out needed
+        if (filenameOnly)
+        {
+            return Ok(FilenamePaged(query, skip, take, datasetNames, nameValues));
+        }
 
-        // Get or create the full cache entry (IDs + hydrated records)
+        // --- Tiered fan-out search ---
+        var queryHash = DbService.ComputeQueryHash(query, exactMatch, filenameOnly, datasetNames, nameValues);
+        var (_, isNew, existingStatus) = _dbService.GetOrCreateSearchQuery(
+            query, exactMatch, filenameOnly, datasetNames, nameValues);
+
+        if (isNew)
+        {
+            // Launch fan-out: all tiers in parallel, don't await all
+            LaunchFanOut(queryHash, query, exactMatch, datasetNames, nameValues);
+
+            // Wait for fast tiers (1+2) to finish, with timeout
+            var fastDeadline = Task.Delay(500);
+            while (!fastDeadline.IsCompleted)
+            {
+                var status = _dbService.GetSearchQueryStatus(queryHash);
+                if (status != null && status.AllFastDone)
+                {
+                    // At least one merge has happened — return what we have
+                    break;
+                }
+                await Task.Delay(20);
+            }
+
+            // Trigger first merge with whatever tiers are done
+            _dbService.ExecuteRrfMerge(queryHash, mergeVersion: 1);
+        }
+        else if (existingStatus != null && existingStatus.Enriching)
+        {
+            // Existing query still enriching — re-merge to pick up any newly completed tiers
+            var currentStatus = _dbService.GetSearchQueryStatus(queryHash);
+            if (currentStatus != null && currentStatus.Enriching)
+            {
+                int version = currentStatus.AllDone ? 3 : currentStatus.AllMediumDone ? 2 : 1;
+                _dbService.ExecuteRrfMerge(queryHash, mergeVersion: Math.Max(version, currentStatus.MergeCount));
+            }
+            else if (currentStatus is { AllDone: true, MergeCount: < 3 })
+            {
+                // All tiers just finished — do final merge
+                _dbService.ExecuteRrfMerge(queryHash, mergeVersion: 3);
+            }
+        }
+
+        // Read merged results for this page
+        var finalStatus = _dbService.GetSearchQueryStatus(queryHash);
+        var (mergedIds, totalCount) = _dbService.GetMergedResultIds(queryHash, skip, take);
+
+        // Hydrate the page
+        var hydrated = mergedIds.Length > 0
+            ? _dbService.HydrateByIds(mergedIds, query)
+            : new List<DocumentSearchResult>();
+
+        var dtos = hydrated.Select(MapToDto).ToList();
+
+        return Ok(new PagedSearchResult
+        {
+            Items = dtos,
+            TotalCount = totalCount,
+            Enriching = finalStatus?.Enriching ?? false,
+            MergeVersion = finalStatus?.MergeCount ?? 0,
+            CompletedTiers = finalStatus?.CompletedTierCount ?? 0
+        });
+    }
+
+    /// <summary>
+    /// Launches all tier searches in parallel. Fire-and-forget — results go to DB tier tables.
+    /// Merge checkpoints happen on the next poll from the client.
+    /// </summary>
+    private void LaunchFanOut(string queryHash, string query, bool exactMatch,
+        List<string>? datasetNames, List<string>? nameValues)
+    {
+        if (_inFlightSearches.ContainsKey(queryHash)) return;
+
+        var fanOutTask = Task.Run(async () =>
+        {
+            try
+            {
+                // Launch all tiers in parallel
+                var tier1 = Task.Run(() =>
+                {
+                    try { _dbService.ExecuteTier1_Filename(queryHash, query, datasetNames, nameValues); }
+                    catch (Exception ex) { Console.WriteLine($"[Tier1] Error: {ex.Message}"); }
+                });
+
+                var tier2 = Task.Run(() =>
+                {
+                    try { _dbService.ExecuteTier2_Metadata(queryHash, query, datasetNames, nameValues); }
+                    catch (Exception ex) { Console.WriteLine($"[Tier2] Error: {ex.Message}"); }
+                });
+
+                var tier3 = Task.Run(() =>
+                {
+                    try { _dbService.ExecuteTier3_FullText(queryHash, query, datasetNames, nameValues); }
+                    catch (Exception ex) { Console.WriteLine($"[Tier3] Error: {ex.Message}"); }
+                });
+
+                // Tier 4 only for non-exact-match (semantic search)
+                var tier4 = !exactMatch
+                    ? Task.Run(async () =>
+                    {
+                        try { await _dbService.ExecuteTier4_VectorAsync(queryHash, query, datasetNames, nameValues); }
+                        catch (Exception ex) { Console.WriteLine($"[Tier4] Error: {ex.Message}"); }
+                    })
+                    : Task.CompletedTask;
+
+                // Wait for all tiers
+                await Task.WhenAll(tier1, tier2, tier3, tier4);
+
+                // Final merge after all tiers complete
+                _dbService.ExecuteRrfMerge(queryHash, mergeVersion: 3);
+                Console.WriteLine($"[FanOut] All tiers complete for {queryHash[..8]}");
+            }
+            finally
+            {
+                _inFlightSearches.TryRemove(queryHash, out _);
+            }
+        });
+
+        _inFlightSearches.TryAdd(queryHash, fanOutTask);
+    }
+
+    /// <summary>
+    /// Status endpoint for polling — returns tier completion state without triggering new work.
+    /// </summary>
+    [HttpGet("status")]
+    public IActionResult GetSearchStatus(
+        [FromQuery] string? query = null,
+        [FromQuery] bool exactMatch = false,
+        [FromQuery] bool filenameOnly = false,
+        [FromQuery] List<string>? datasets = null,
+        [FromQuery] List<string>? names = null)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return Ok(new SearchQueryStatus { Tier1Done = true, Tier2Done = true, Tier3Done = true, Tier4Done = true, MergeCount = 3 });
+
+        var datasetNames = datasets?.Where(s => !string.IsNullOrEmpty(s)).ToList();
+        var nameValues = names?.Where(s => !string.IsNullOrEmpty(s)).ToList();
+        var queryHash = DbService.ComputeQueryHash(query, exactMatch, filenameOnly, datasetNames, nameValues);
+        var status = _dbService.GetSearchQueryStatus(queryHash);
+        return Ok(status ?? new SearchQueryStatus());
+    }
+
+    // -----------------------------------------------------------------------
+    // Browse (no query) — unchanged, uses existing ID cache
+    // -----------------------------------------------------------------------
+
+    private PagedSearchResult BrowsePaged(int skip, int take,
+        List<string>? datasetNames, List<string>? nameValues)
+    {
+        var browseCacheKey = BuildBrowseCacheKey(datasetNames, nameValues);
+
+        var browseEntry = _cache.GetOrCreate(browseCacheKey, cacheEntry =>
+        {
+            cacheEntry.SlidingExpiration = TimeSpan.FromMinutes(5);
+            Console.WriteLine("[BrowseCache] MISS — loading browse IDs");
+            var (ids, realTotal) = _dbService.GetBrowseDocumentIds(datasetNames, nameValues);
+            return new BrowseCacheEntry { Ids = ids, TotalCount = realTotal };
+        })!;
+
+        var browsePageIds = browseEntry.Ids.Skip(skip).Take(take).ToArray();
+        var browseReadAheadIds = browseEntry.Ids.Skip(skip + take).Take(ReadAhead).ToArray();
+        var browseAllNeeded = browsePageIds.Concat(browseReadAheadIds).ToArray();
+        var browseMissing = browseAllNeeded.Where(id => !browseEntry.Records.ContainsKey(id)).ToArray();
+
+        if (browseMissing.Length > 0)
+        {
+            var cacheHits = browseAllNeeded.Length - browseMissing.Length;
+            Console.WriteLine($"[BrowseCache] Hydrating {browseMissing.Length} records ({cacheHits} cache hits, {browseReadAheadIds.Length} read-ahead)");
+            var hydrated = _dbService.HydrateByIds(browseMissing);
+            foreach (var record in hydrated)
+                browseEntry.Records[record.Id] = MapToDto(record);
+        }
+        else
+        {
+            Console.WriteLine($"[BrowseCache] Full cache hit — {browsePageIds.Length} records from memory");
+        }
+
+        var browseDtos = new List<SearchResultDto>(browsePageIds.Length);
+        foreach (var id in browsePageIds)
+        {
+            if (browseEntry.Records.TryGetValue(id, out var dto))
+                browseDtos.Add(dto);
+        }
+
+        return new PagedSearchResult { Items = browseDtos, TotalCount = browseEntry.TotalCount };
+    }
+
+    // -----------------------------------------------------------------------
+    // Filename-only search — single tier, no fan-out
+    // -----------------------------------------------------------------------
+
+    private PagedSearchResult FilenamePaged(string query, int skip, int take,
+        List<string>? datasetNames, List<string>? nameValues)
+    {
+        var cacheKey = BuildCacheKey(query, false, datasetNames, nameValues, filenameOnly: true);
+
         var entry = _cache.GetOrCreate(cacheKey, cacheEntry =>
         {
             cacheEntry.SlidingExpiration = TimeSpan.FromMinutes(5);
-            Console.WriteLine($"[SearchCache] MISS — running {(filenameOnly ? "filename" : "CTE")} for: {query}");
-            var ids = filenameOnly
-                ? _dbService.SearchByFileNameIds(query, datasetNames, nameValues)
-                : _dbService.SearchMatchingIds(query, exactMatch, datasetNames, nameValues);
+            Console.WriteLine($"[SearchCache] MISS — filename search for: {query}");
+            var ids = _dbService.SearchByFileNameIds(query, datasetNames, nameValues);
             return new SearchCacheEntry { Ids = ids };
         })!;
 
-        // Determine the requested page IDs
         var pageIds = entry.Ids.Skip(skip).Take(take).ToArray();
-
-        // Read-ahead: also fetch extra IDs beyond the page for prefetch
         var readAheadIds = entry.Ids.Skip(skip + take).Take(ReadAhead).ToArray();
         var allNeededIds = pageIds.Concat(readAheadIds).ToArray();
-
-        // Check which IDs are NOT yet in the record cache
         var missingIds = allNeededIds.Where(id => !entry.Records.ContainsKey(id)).ToArray();
 
         if (missingIds.Length > 0)
         {
-            var cacheHits = allNeededIds.Length - missingIds.Length;
-            Console.WriteLine($"[SearchCache] Hydrating {missingIds.Length} records ({cacheHits} cache hits, {readAheadIds.Length} read-ahead)");
             var hydrated = _dbService.HydrateByIds(missingIds, query);
             foreach (var record in hydrated)
-            {
-                var dto = MapToDto(record);
-                entry.Records[record.Id] = dto;
-            }
-        }
-        else
-        {
-            Console.WriteLine($"[SearchCache] Full cache hit — {pageIds.Length} records from memory");
+                entry.Records[record.Id] = MapToDto(record);
         }
 
-        // Return only the requested page (not the read-ahead) from cache
         var dtos = new List<SearchResultDto>(pageIds.Length);
         foreach (var id in pageIds)
         {
@@ -160,22 +309,19 @@ public class SearchController : ControllerBase
                 dtos.Add(dto);
         }
 
-        return Ok(new PagedSearchResult { Items = dtos, TotalCount = entry.Ids.Length });
+        return new PagedSearchResult { Items = dtos, TotalCount = entry.Ids.Length };
     }
 
-    /// <summary>
-    /// Holds cached search state: the matching ID list + already-hydrated record DTOs.
-    /// </summary>
+    // -----------------------------------------------------------------------
+    // Cache entry types
+    // -----------------------------------------------------------------------
+
     private class SearchCacheEntry
     {
         public int[] Ids { get; set; } = Array.Empty<int>();
         public Dictionary<int, SearchResultDto> Records { get; } = new();
     }
 
-    /// <summary>
-    /// Holds cached browse state for no-query browsing: sorted ID list + hydrated DTOs.
-    /// Same pattern as SearchCacheEntry but for the "all documents by date" path.
-    /// </summary>
     private class BrowseCacheEntry
     {
         public int[] Ids { get; set; } = Array.Empty<int>();
@@ -310,4 +456,13 @@ public class PagedSearchResult
 {
     public List<SearchResultDto> Items { get; set; } = new();
     public int TotalCount { get; set; }
+
+    /// <summary>True if background tiers are still running and results may improve on next poll.</summary>
+    public bool Enriching { get; set; }
+
+    /// <summary>How many RRF merges have run (1=fast tiers, 2=medium, 3=all complete).</summary>
+    public int MergeVersion { get; set; }
+
+    /// <summary>How many of the 4 search tiers have completed.</summary>
+    public int CompletedTiers { get; set; }
 }

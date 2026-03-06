@@ -372,6 +372,15 @@ public class PagedSearchResult
 {
     public List<SearchResultDto> Items { get; set; } = new();
     public int TotalCount { get; set; }
+
+    /// <summary>True if background tiers are still running and results may improve on next poll.</summary>
+    public bool Enriching { get; set; }
+
+    /// <summary>How many RRF merges have run (1=fast tiers, 2=medium, 3=all complete).</summary>
+    public int MergeVersion { get; set; }
+
+    /// <summary>How many of the 4 search tiers have completed.</summary>
+    public int CompletedTiers { get; set; }
 }
 
 public class ImageDto

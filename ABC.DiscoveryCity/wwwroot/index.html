@@ -6,7 +6,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ABC.DiscoveryCity</title>
     <base href="/" />
-    <link rel="stylesheet" href="_content/Telerik.UI.for.Blazor/css/kendo-theme-default/all.css" />
+    <link id="telerik-theme" rel="stylesheet"
+          href="_content/Telerik.UI.for.Blazor/css/kendo-theme-default/all.css" />
 
     <link rel="stylesheet" href="lib/bootstrap/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="css/app.css" />
@@ -21,7 +22,7 @@
     <script src="js/daemask-viz.js"></script>
 </head>
 
-<body>
+<body class="k-body">
     <div id="app">
         <svg class="loading-progress">
             <circle r="40%" cx="50%" cy="50%" />
@@ -44,6 +45,36 @@
     <script src="js/pageState.js"></script>
     <script>navigator.serviceWorker.register('service-worker.js');</script>
     <script>
+        // --- Theme switcher ---
+        window.themeChanger = {
+            change: function (newUrl) {
+                var oldLink = document.getElementById("telerik-theme");
+                if (newUrl === oldLink.getAttribute("href")) return;
+
+                var newLink = document.createElement("link");
+                newLink.setAttribute("id", "telerik-theme");
+                newLink.setAttribute("rel", "stylesheet");
+                newLink.setAttribute("href", newUrl);
+                newLink.onload = function () {
+                    oldLink.parentElement.removeChild(oldLink);
+                };
+                document.getElementsByTagName("head")[0].appendChild(newLink);
+            },
+            getCurrent: function () {
+                var link = document.getElementById("telerik-theme");
+                return link ? link.getAttribute("href") : "";
+            }
+        };
+
+        // Apply saved theme on load (before Blazor starts)
+        (function () {
+            var saved = localStorage.getItem("dc-theme-url");
+            if (saved) {
+                window.themeChanger.change(saved);
+            }
+        })();
+
+        // --- Existing helpers ---
         window.scrollGridRowIntoView = (rowIndex, rowHeight) => {
             const container = document.querySelector('.k-grid-content');
             if (!container) return;

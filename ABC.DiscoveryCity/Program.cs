@@ -27,7 +27,8 @@ namespace ABC.DiscoveryCity
             builder.Services.AddScoped<UserListService>();
             builder.Services.AddScoped<TorrentService>();
             builder.Services.AddScoped<SearchService>();
-            
+            builder.Services.AddScoped<ThemeService>();
+
             await builder.Build().RunAsync();
         }
     }
