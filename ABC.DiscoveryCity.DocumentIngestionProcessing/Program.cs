@@ -44,7 +44,7 @@ for (int i = 0; i < args.Length; i++)
 // Resolve root folder: --folder arg > environment variable > default
 string rootFolder = folderArg
     ?? Environment.GetEnvironmentVariable("DISCOVERYCITY_ROOT_FOLDER")
-    ?? "/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/";
+    ?? @"S:\EpsteinFiles\DepartmentofJustice\DOJ_Disclosures";
 
 // Ensure trailing separator
 if (!rootFolder.EndsWith(Path.DirectorySeparatorChar) && !rootFolder.EndsWith(Path.AltDirectorySeparatorChar))
@@ -75,6 +75,69 @@ if (args.Any(a => a.Equals("--diag-image", StringComparison.OrdinalIgnoreCase)))
 if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.OrdinalIgnoreCase))
 {
     Console.WriteLine(TelerikBookCorpusIngestionTests.TestRedactionDetection(args[1]));
+    return;
+}
+
+if (args.Any(a => a.Equals("--inspect", StringComparison.OrdinalIgnoreCase)))
+{
+    Console.WriteLine("=== DATABASE INSPECTION ===\n");
+    var db = new DbService(null);
+    using var conn = new Npgsql.NpgsqlConnection("Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo");
+    conn.Open();
+
+    // Table counts
+    foreach (var tbl in new[] { "Sources", "DataSets", "ParentDocuments", "DocumentChunks", "DocumentImages" })
+    {
+        try {
+            using var cmd = new Npgsql.NpgsqlCommand($"SELECT count(*) FROM {tbl}", conn);
+            Console.WriteLine($"  {tbl}: {cmd.ExecuteScalar()} rows");
+        } catch { Console.WriteLine($"  {tbl}: (not found)"); }
+    }
+
+    // Column types for Sources (verify UUID)
+    Console.WriteLine("\n--- Sources schema ---");
+    using (var cmd = new Npgsql.NpgsqlCommand("SELECT column_name, data_type FROM information_schema.columns WHERE table_name='sources' ORDER BY ordinal_position", conn))
+    using (var r = cmd.ExecuteReader()) { while (r.Read()) Console.WriteLine($"  {r.GetString(0)}: {r.GetString(1)}"); }
+
+    // Sample documents
+    Console.WriteLine("\n--- Sample ParentDocuments (first 5) ---");
+    using (var cmd = new Npgsql.NpgsqlCommand("SELECT Id, FileName, DataSetId, jsonb_array_length(COALESCE(Sentences,'[]'::jsonb)) as sent_count, jsonb_array_length(COALESCE(SentenceIds,'[]'::jsonb)) as id_count FROM ParentDocuments ORDER BY ProcessedAt DESC LIMIT 5", conn))
+    using (var r = cmd.ExecuteReader()) {
+        while (r.Read()) {
+            var id = r.GetGuid(0);
+            var fn = r.GetString(1);
+            var dsId = r.IsDBNull(2) ? "null" : r.GetGuid(2).ToString()[..8];
+            var sentCount = r.GetInt32(3);
+            var idCount = r.GetInt32(4);
+            Console.WriteLine($"  {id.ToString()[..8]}.. {fn,-40} ds={dsId} sentences={sentCount} sentenceIds={idCount}");
+        }
+    }
+
+    // Sample sentence + ID pairing
+    Console.WriteLine("\n--- Sample sentence/ID pairs (from latest doc) ---");
+    using (var cmd = new Npgsql.NpgsqlCommand(@"
+        SELECT Sentences->0, Sentences->1, Sentences->2,
+               SentenceIds->0, SentenceIds->1, SentenceIds->2
+        FROM ParentDocuments WHERE SentenceIds IS NOT NULL AND jsonb_array_length(SentenceIds) > 0
+        ORDER BY ProcessedAt DESC LIMIT 1", conn))
+    using (var r = cmd.ExecuteReader()) {
+        if (r.Read()) {
+            for (int i = 0; i < 3; i++) {
+                var sent = r.IsDBNull(i) ? "(null)" : r.GetString(i);
+                var sid = r.IsDBNull(i+3) ? "(null)" : r.GetString(i+3);
+                if (sent.Length > 80) sent = sent[..80] + "...";
+                Console.WriteLine($"  [{i}] ID={sid}");
+                Console.WriteLine($"      Text={sent}");
+            }
+        } else Console.WriteLine("  (no documents with SentenceIds)");
+    }
+
+    // DataSet breakdown
+    Console.WriteLine("\n--- DataSets ---");
+    using (var cmd = new Npgsql.NpgsqlCommand("SELECT ds.Name, count(p.Id) FROM DataSets ds LEFT JOIN ParentDocuments p ON p.DataSetId = ds.Id GROUP BY ds.Name ORDER BY count DESC", conn))
+    using (var r = cmd.ExecuteReader()) { while (r.Read()) Console.WriteLine($"  {r.GetString(0)}: {r.GetInt64(1)} docs"); }
+
+    Console.WriteLine("\n=== DONE ===");
     return;
 }
 
@@ -136,7 +199,10 @@ try
 {
     if (resetDb)
     {
-        Console.WriteLine("WARNING: --reset-db flag is DISABLED for safety. Skipping.");
+        Console.WriteLine("⚠ --reset-db: Dropping all tables for UUID v7 schema migration...");
+        var resetService = new DbService(embeddingService);
+        resetService.DropAllTables();
+        Console.WriteLine("All tables dropped. Recreating with UUID schema...");
     }
 
     new DbService(embeddingService).InitDb();

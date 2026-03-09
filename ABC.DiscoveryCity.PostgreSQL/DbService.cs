@@ -79,7 +79,7 @@ public partial class DbService
     }
 
     // Default connection string for convenience, but allows override
-    private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=discovery_password";
+    private const string DefaultConnectionString = "Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
 
     // Static shared pool — built once, reused by all DbService instances (prevents connection leak)
     private static NpgsqlDataSource? _sharedDataSource;
@@ -153,6 +153,29 @@ public partial class DbService
             if (_pgvectorMapped) return;
             _pgvectorMapped = true;
         }
+    }
+
+    /// <summary>
+    /// Drops all application tables. Used for schema migration (e.g. int→UUID PKs).
+    /// Requires full reprocessing of all documents afterward.
+    /// </summary>
+    public void DropAllTables()
+    {
+        using var conn = _dataSource.OpenConnection();
+        using var cmd = new NpgsqlCommand(@"
+            DROP TABLE IF EXISTS DocumentImages CASCADE;
+            DROP TABLE IF EXISTS DocumentChunks CASCADE;
+            DROP TABLE IF EXISTS DocumentChunks_p0 CASCADE;
+            DROP TABLE IF EXISTS DocumentChunks_p1 CASCADE;
+            DROP TABLE IF EXISTS DocumentChunks_p2 CASCADE;
+            DROP TABLE IF EXISTS DocumentChunks_p3 CASCADE;
+            DROP TABLE IF EXISTS ParentDocuments CASCADE;
+            DROP TABLE IF EXISTS DataSets CASCADE;
+            DROP TABLE IF EXISTS Sources CASCADE;
+            DROP TABLE IF EXISTS filesources CASCADE;
+        ", conn);
+        cmd.ExecuteNonQuery();
+        Console.WriteLine("All tables dropped successfully.");
     }
 
     public void InitDb()
@@ -1589,6 +1612,39 @@ public partial class DbService
         using var reader = dataCmd.ExecuteReader();
         while (reader.Read()) results.Add(ReadSearchResult(reader));
         return (results, totalCount);
+    }
+
+    /// <summary>
+    /// Filename-only search — returns IDs of documents whose FileName matches the query.
+    /// </summary>
+    public Guid[] SearchByFileNameIds(string query,
+        List<string>? datasetNames = null, List<string>? nameValues = null)
+    {
+        using var conn = _dataSource.OpenConnection();
+        var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
+
+        var extraJoin = datasetFilter ? "JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
+        var extraWhere = new List<string>();
+        if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
+        if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+        var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
+
+        var sql = $@"
+            SELECT p.Id FROM ParentDocuments p
+            {extraJoin}
+            WHERE p.FileName ILIKE @pattern {extraWhereStr}
+            ORDER BY p.FileName;";
+
+        using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("pattern", $"%{query}%");
+        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+
+        var ids = new List<Guid>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) ids.Add(reader.GetGuid(0));
+        return ids.ToArray();
     }
 
     /// <summary>

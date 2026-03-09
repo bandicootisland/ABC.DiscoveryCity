@@ -13,7 +13,7 @@ public partial class DbService
 {
     private const double RrfK = 60.0;
     private const int MaxCachedResults = 50000;
-
+    private const int DbCommandTimeout = 120; // seconds
     // -----------------------------------------------------------------------
     // Schema creation (called from InitDb migration block)
     // -----------------------------------------------------------------------
@@ -143,7 +143,7 @@ public partial class DbService
         ";
 
         using var cmd = new NpgsqlCommand(ddl, conn);
-        cmd.CommandTimeout = DbCommandTimeout;
+        //cmd.CommandTimeout = DbCommandTimeout;
         cmd.ExecuteNonQuery();
         Console.WriteLine("Tiered search cache tables initialized.");
     }
@@ -623,7 +623,7 @@ public partial class DbService
     /// Read paged results from the merged cache table.
     /// Returns (IDs in rank order, totalMergedCount).
     /// </summary>
-    public (int[] Ids, int TotalCount) GetMergedResultIds(string queryHash, int skip = 0, int take = 50)
+    public (Guid[] Ids, int TotalCount) GetMergedResultIds(string queryHash, int skip = 0, int take = 50)
     {
         using var conn = _dataSource.OpenConnection();
 
@@ -643,9 +643,9 @@ public partial class DbService
         cmd.Parameters.AddWithValue("skip", skip);
         cmd.Parameters.AddWithValue("take", take);
 
-        var ids = new List<int>();
+        var ids = new List<Guid>();
         using var reader = cmd.ExecuteReader();
-        while (reader.Read()) ids.Add(reader.GetInt32(0));
+        while (reader.Read()) ids.Add(reader.GetGuid(0));
 
         return (ids.ToArray(), totalCount);
     }
