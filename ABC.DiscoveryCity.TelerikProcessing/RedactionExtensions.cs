@@ -1,64 +1,10 @@
 using System;
+using ABC.DiscoveryCity.DocumentProcessing.Shared;
 using TelerikPath = Telerik.Windows.Documents.Fixed.Model.Graphics.Path;
 using Telerik.Windows.Documents.Fixed.Model.Graphics;
 
 namespace ABC.DiscoveryCity.TelerikProcessing
 {
-    // =========================================================================
-    // ARTIFACT MARKER TYPES (Extensible)
-    // =========================================================================
-
-    /// <summary>
-    /// Types of visual artifacts detected in PDFs.
-    /// </summary>
-    public enum ArtifactType
-    {
-        Redaction,   // Black-filled rectangle covering text
-        Image,       // Embedded image
-        Signature,   // Signature block (future)
-        Stamp,       // Document stamp (future)
-        Highlight    // Highlighted text region (future)
-    }
-
-    /// <summary>
-    /// Represents a detected visual artifact in the PDF with its bounding box.
-    /// </summary>
-    public readonly struct ArtifactMarker
-    {
-        public readonly ArtifactType Type;
-        public readonly int PageIndex;
-        public readonly double X, Y, Width, Height;
-
-        public ArtifactMarker(ArtifactType type, int page, double x, double y, double w, double h)
-        {
-            Type = type;
-            PageIndex = page;
-            X = x; Y = y; Width = w; Height = h;
-        }
-
-        /// <summary>
-        /// Right edge of the artifact.
-        /// </summary>
-        public double Right => X + Width;
-
-        /// <summary>
-        /// Check if a horizontal range overlaps with this artifact.
-        /// </summary>
-        public bool OverlapsHorizontally(double startX, double endX, double tolerance = 2.0)
-        {
-            // Overlap exists if: artifact starts before range ends AND artifact ends after range starts
-            return (X - tolerance) < endX && (Right + tolerance) > startX;
-        }
-
-        /// <summary>
-        /// Check if a Y position is within the artifact's vertical range.
-        /// </summary>
-        public bool ContainsY(double y, double tolerance = 5.0)
-        {
-            return y >= (Y - tolerance) && y <= (Y + Height + tolerance);
-        }
-    }
-
     /// <summary>
     /// Extension methods for detecting and estimating redacted text in PDFs.
     /// Redactions appear as large horizontal gaps between text fragments.

@@ -1,17 +1,18 @@
-﻿using ABC.DiscoveryCity.DocumentIngestionProcessing.Tests;
-using ABC.DiscoveryCity.Words.Common;
-using ABC.DiscoveryCity.Words.Common.Domain;
-using ABC.DiscoveryCity.Words.Common.Processing;
 using ABC.DiscoveryCity.DocumentIngestionProcessing;
+using ABC.DiscoveryCity.DocumentIngestionProcessing.Tests;
+using ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline;
+using ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline.Steps;
 using ABC.DiscoveryCity.Embeddings;
 using ABC.DiscoveryCity.TelerikProcessing;
 using ABC.DiscoveryCity.PostgreSQL;
-using ABC.DiscoveryCity.Words;
-using Microsoft.Extensions.DependencyInjection;
-using Npgsql;
 using System.Text.RegularExpressions;
 using System.Text.Json;
-using System.Globalization;
+
+// CRITICAL: Register font provider for Telerik PDF processing.
+// Without this, Telerik cannot decode ToUnicode CMap tables on .NET Core,
+// resulting in garbled "cipher text" output from PDFs with embedded fonts.
+Telerik.Windows.Documents.Extensibility.FixedExtensibilityManager.FontsProvider =
+    new ABC.DiscoveryCity.TelerikProcessing.WindowsFontsProvider();
 
 // Parse command-line arguments
 bool resetDb = args.Any(a => a.Equals("--reset-db", StringComparison.OrdinalIgnoreCase));
@@ -80,7 +81,7 @@ if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.Ordina
 if (args.Any(a => a.Equals("--stats", StringComparison.OrdinalIgnoreCase)))
 {
     Console.WriteLine("Checking Database Stats...");
-    try 
+    try
     {
         var stats = new DbService(null).GetSystemStats();
         Console.WriteLine($"\n=== DATABASE STATE ===");
@@ -131,18 +132,18 @@ else
 
 // Initialize DB - MUST succeed before processing
 Console.WriteLine("Initializing Database...");
-try 
-{ 
+try
+{
     if (resetDb)
     {
         Console.WriteLine("WARNING: --reset-db flag is DISABLED for safety. Skipping.");
     }
-    
-    new DbService(embeddingService).InitDb(); 
+
+    new DbService(embeddingService).InitDb();
     Console.WriteLine("Database initialized successfully.");
-} 
-catch (Exception ex) 
-{ 
+}
+catch (Exception ex)
+{
     Console.WriteLine($"FATAL: Database initialization failed: {ex.Message}");
     Console.WriteLine("Cannot proceed without database. Exiting.");
     return;
@@ -168,9 +169,6 @@ else
     pdfImageExtractor = new PdfImageExtractor();
 }
 var dbService = new DbService(embeddingService);
-
-//await VerifyDocumentData.Run(dbService);
-//return;
 
 // VERIFICATION MODE - Check DB and Search
 bool RUN_VERIFICATION = false;
@@ -210,7 +208,6 @@ if (reprocessMode)
         {
             try
             {
-                // Reconstruct text from chunks for names extraction
                 string fullText = dbService.GetDocumentFullText(docId);
                 if (string.IsNullOrWhiteSpace(fullText))
                 {
@@ -218,28 +215,23 @@ if (reprocessMode)
                     continue;
                 }
 
-                // --- Reprocess steps (add future extractions here) ---
-                var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
+                var (extractedNames, extractedTerms) = MetadataExtractors.ExtractNamesAndTerms(fullText);
 
-                // Merge into existing metadata
                 var metadata = string.IsNullOrWhiteSpace(metadataJson)
                     ? new Dictionary<string, JsonElement>()
                     : JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(metadataJson)
                       ?? new Dictionary<string, JsonElement>();
 
-                // Update Names field
                 if (extractedNames.Count > 0)
                     metadata["Names"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedNames));
                 else
                     metadata.Remove("Names");
 
-                // Update Terms field
                 if (extractedTerms.Count > 0)
                     metadata["Terms"] = JsonSerializer.Deserialize<JsonElement>(JsonSerializer.Serialize(extractedTerms));
                 else
                     metadata.Remove("Terms");
 
-                // Write back updated metadata
                 string updatedJson = JsonSerializer.Serialize(metadata);
                 dbService.UpdateDocumentMetadata(docId, updatedJson);
                 totalUpdated++;
@@ -251,7 +243,7 @@ if (reprocessMode)
             {
                 totalErrors++;
                 if (totalErrors <= 10)
-                    Console.WriteLine($"    [ERROR] Doc {docId} ({System.IO.Path.GetFileName(filePath)}): {ex.Message}");
+                    Console.WriteLine($"    [ERROR] Doc {docId} ({Path.GetFileName(filePath)}): {ex.Message}");
             }
         }
 
@@ -289,7 +281,6 @@ if (embeddingsOnly)
 
         Console.WriteLine($"  Batch: {docs.Count} documents (total updated so far: {totalUpdated}/{totalMissing})");
 
-        // Process in parallel (5 concurrent)
         await Parallel.ForEachAsync(docs, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (doc, ct) =>
         {
             try
@@ -297,14 +288,14 @@ if (embeddingsOnly)
                 var embedding = await embeddingService.GetEmbeddingAsync(doc.SentencesText);
                 if (dbService.UpdateDocumentEmbedding(doc.DocId, embedding))
                 {
-                    int count = System.Threading.Interlocked.Increment(ref totalUpdated);
+                    int count = Interlocked.Increment(ref totalUpdated);
                     if (count % 100 == 0)
                         Console.WriteLine($"    [{count}/{totalMissing}] embeddings updated...");
                 }
             }
             catch (Exception ex)
             {
-                System.Threading.Interlocked.Increment(ref totalErrors);
+                Interlocked.Increment(ref totalErrors);
                 if (totalErrors <= 5)
                     Console.WriteLine($"    [WARN] Embedding error for doc {doc.DocId}: {ex.Message}");
             }
@@ -321,8 +312,7 @@ if (embeddingsOnly)
 if (imagesOnly)
 {
     Console.WriteLine("\n--- IMAGES-ONLY MODE ---");
-    
-    // Initialize thumbnail service
+
     ThumbnailService imgThumbnailService = new ThumbnailService();
     await imgThumbnailService.InitializeAsync(headless: headless, instancecount: 10);
     var imgDbService = new DbService(embeddingService);
@@ -335,11 +325,10 @@ if (imagesOnly)
     var imgPendingTasks = new System.Collections.Concurrent.ConcurrentBag<Task>();
 
     string imgRootFolder = rootFolder;
-    var imgSubDirs = System.IO.Directory.GetDirectories(imgRootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
+    var imgSubDirs = Directory.GetDirectories(imgRootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
     var imgTargetFolders = new List<string>();
     var imgAddedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-    // Add priority DataSets first
     foreach (var ds in priorityDataSets)
     {
         string dsAlt = ds.Replace(" ", "_");
@@ -358,8 +347,8 @@ if (imagesOnly)
     foreach (var folder in imgTargetFolders)
     {
         Console.WriteLine($"Scanning for images: {folder}");
-        var pdfFiles = System.IO.Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories)
-            .Where(f => !f.Contains(System.IO.Path.DirectorySeparatorChar + "Published" + System.IO.Path.DirectorySeparatorChar))
+        var pdfFiles = Directory.GetFiles(folder, "*.pdf", SearchOption.AllDirectories)
+            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "Published" + Path.DirectorySeparatorChar))
             .ToArray();
 
         foreach (var pdfPath in pdfFiles)
@@ -368,8 +357,7 @@ if (imagesOnly)
 
             string doneImages = pdfPath + ".done.images";
 
-            // Skip if images already generated (unless --force)
-            if (!forceReprocess && System.IO.File.Exists(doneImages))
+            if (!forceReprocess && File.Exists(doneImages))
             {
                 imgSkipped++;
                 continue;
@@ -378,9 +366,8 @@ if (imagesOnly)
             imgTotal++;
             int current = ++imgProcessed;
             if (current % 100 == 0 || current <= 5)
-                Console.WriteLine($"  [{current}] Image: {System.IO.Path.GetFileName(pdfPath)}");
+                Console.WriteLine($"  [{current}] Image: {Path.GetFileName(pdfPath)}");
 
-            // Fire image task
             var imageTask = Task.Run(async () =>
             {
                 try
@@ -412,14 +399,13 @@ if (imagesOnly)
                             imgDbService.UpsertDocumentImages(pdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH,
                                 previewData: previewData, thumbData: thumbData);
                         }
-                        // Mark images as done
-                        System.IO.File.Create(doneImages).Dispose();
+                        File.Create(doneImages).Dispose();
                     }
                 }
                 catch (Exception ex)
                 {
                     Interlocked.Increment(ref imgErrors);
-                    Console.WriteLine($"  [WARN] Image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
+                    Console.WriteLine($"  [WARN] Image error for {Path.GetFileName(pdfPath)}: {ex.Message}");
                 }
             });
             imgPendingTasks.Add(imageTask);
@@ -428,7 +414,6 @@ if (imagesOnly)
         if (MAX_IMG_FILES > 0 && imgProcessed >= MAX_IMG_FILES) break;
     }
 
-    // Wait for all image tasks
     if (imgPendingTasks.Count > 0)
     {
         Console.WriteLine($"Waiting for {imgPendingTasks.Count} image tasks to complete...");
@@ -440,23 +425,24 @@ if (imagesOnly)
     return;
 }
 
-// BATCH TEST LIMIT - set to 0 for unlimited, or a number to limit processing
+// ============================================================
+// MAIN INGESTION MODE — Step-based pipeline
+// ============================================================
 int MAX_FILES = limitFiles;
 int totalFiles = 0;
-int startedFiles = 0;   // Atomically claimed BEFORE work begins (for accurate limit enforcement)
-int processedFiles = 0;  // Incremented AFTER work completes
+int startedFiles = 0;
+int processedFiles = 0;
 int skippedFiles = 0;
-var pendingImageTasks = new System.Collections.Concurrent.ConcurrentBag<Task>();
-var imageThrottle = new SemaphoreSlim(10); // Cap concurrent image tasks to control memory
+var imageThrottle = new SemaphoreSlim(10);
 
 Console.WriteLine($"Root Folder: {rootFolder}");
 
 // Find DataSet folders
-var subDirs = System.IO.Directory.GetDirectories(rootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
+var subDirs = Directory.GetDirectories(rootFolder, "DataSet*", SearchOption.TopDirectoryOnly);
 var targetFolders = new List<string>();
 var addedFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-// Add priority DataSets in specified order (supports both "DataSet 9" and "DataSet_9" formats)
+// Add priority DataSets in specified order
 foreach (var priorityDataSet in priorityDataSets)
 {
     string priorityDataSetAlt = priorityDataSet.Replace(" ", "_");
@@ -471,37 +457,32 @@ foreach (var priorityDataSet in priorityDataSets)
     }
 }
 
-// Add remaining folders not already queued (natural numeric sort so DataSet 9 < DataSet 10)
+// Add remaining folders (natural numeric sort so DataSet 9 < DataSet 10)
 foreach (var dir in subDirs
-    .OrderBy(d => Regex.Replace(System.IO.Path.GetFileName(d) ?? "", @"\d+", m => m.Value.PadLeft(10, '0'))))
+    .OrderBy(d => Regex.Replace(Path.GetFileName(d) ?? "", @"\d+", m => m.Value.PadLeft(10, '0'))))
 {
     if (!addedFolders.Contains(dir)) targetFolders.Add(dir);
 }
 
-// Fallback to root if no subdirs
 if (targetFolders.Count == 0) targetFolders.Add(rootFolder);
 
-// Define Source from path (e.g., "DepartmentofJustice")
-string sourceName = System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(rootFolder.TrimEnd(System.IO.Path.DirectorySeparatorChar))) ?? "Unknown";
-string baseFilePath = System.IO.Path.GetDirectoryName(rootFolder.TrimEnd(System.IO.Path.DirectorySeparatorChar)) ?? "";
-int sourceId = dbService.GetOrCreateSource(sourceName, baseFilePath);
+// Define Source from path
+string sourceName = Path.GetFileName(Path.GetDirectoryName(rootFolder.TrimEnd(Path.DirectorySeparatorChar))) ?? "Unknown";
+string baseFilePath = Path.GetDirectoryName(rootFolder.TrimEnd(Path.DirectorySeparatorChar)) ?? "";
+Guid sourceId = dbService.GetOrCreateSource(sourceName, baseFilePath);
 Console.WriteLine($"Created/Found Source: {sourceName} (Id: {sourceId})");
 
 foreach (var folder in targetFolders)
 {
-    // Extract DataSet name from folder (e.g., "DataSet_9")
-    string dataSetName = System.IO.Path.GetFileName(folder) ?? "Default";
-    // Published folder: standardised output location for all processed files
-    // Relative path is "DataSet N/Published/" — identical on Windows and Linux
+    string dataSetName = Path.GetFileName(folder) ?? "Default";
     string publishedRelFolder = dataSetName + "/Published/";
-    string publishedDir = System.IO.Path.Combine(folder, "Published");
-    int dataSetId = dbService.GetOrCreateDataSet(sourceId, dataSetName, publishedRelFolder);
+    string publishedDir = Path.Combine(folder, "Published");
+    Guid dataSetId = dbService.GetOrCreateDataSet(sourceId, dataSetName, publishedRelFolder);
     Console.WriteLine($"Created/Found DataSet: {dataSetName} (Id: {dataSetId}) for Source: {sourceName}");
     Console.WriteLine($"  Published folder: {publishedDir}");
 
     Console.WriteLine($"Scanning folder: {folder}");
 
-    // Clean up generated files if --clean flag is set
     if (cleanFiles)
     {
         CleanGeneratedFiles(folder);
@@ -510,829 +491,96 @@ foreach (var folder in targetFolders)
     // Scan for all supported file types, excluding the Published output directory
     var supportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".pdf", ".xlsx", ".xls", ".csv", ".avi", ".mp4", ".vob", ".mov", ".mkv", ".wmv", ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac" };
-    var pdfFiles = System.IO.Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories)
-        .Where(f => !f.Contains(System.IO.Path.DirectorySeparatorChar + "Published" + System.IO.Path.DirectorySeparatorChar))
-        .Where(f => supportedExtensions.Contains(System.IO.Path.GetExtension(f)))
+    var allFiles = Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories)
+        .Where(f => !f.Contains(Path.DirectorySeparatorChar + "Published" + Path.DirectorySeparatorChar))
+        .Where(f => supportedExtensions.Contains(Path.GetExtension(f)))
         .ToArray();
 
-    // Use Parallel.ForEachAsync to process files concurrently
+    // Process files concurrently using pipeline
     int maxDegreeOfParallelism = 5;
     var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism };
-    await Parallel.ForEachAsync(pdfFiles, parallelOptions, async (pdfPath, ct) =>
+    await Parallel.ForEachAsync(allFiles, parallelOptions, async (filePath, ct) =>
     {
-        // Atomically claim a slot before doing any work — prevents over-processing
-        if (MAX_FILES > 0 && System.Threading.Interlocked.Increment(ref startedFiles) > MAX_FILES) return;
+        // Atomically claim a slot before doing any work
+        if (MAX_FILES > 0 && Interlocked.Increment(ref startedFiles) > MAX_FILES) return;
 
-        try 
+        try
         {
-            // Flag file paths
-            string doneFile = pdfPath + ".done";              // PDF parsed + text saved to DB
-            string doneEmbeddings = pdfPath + ".done.embeddings"; // Embeddings generated
-            string doneImages = pdfPath + ".done.images";        // Images generated
+            string doneFile = filePath + ".done";
+            string doneEmbeddings = filePath + ".done.embeddings";
+            string doneImages = filePath + ".done.images";
 
             // Skip if already fully processed (unless --force)
-            if (!forceReprocess && System.IO.File.Exists(doneFile))
+            if (!forceReprocess && File.Exists(doneFile))
             {
-                System.Threading.Interlocked.Increment(ref skippedFiles);
+                Interlocked.Increment(ref skippedFiles);
                 return;
             }
 
-            // Increment atomic counter
-            int currentCount = System.Threading.Interlocked.Increment(ref totalFiles);
-            Console.WriteLine($"[{currentCount}] Processing: {System.IO.Path.GetFileName(pdfPath)}");
-
-            var fileExt = System.IO.Path.GetExtension(pdfPath).ToLowerInvariant();
-            switch (fileExt)
+            // Skip if already in DB
+            if (!forceReprocess && dbService.DocumentExists(filePath))
             {
-                case ".xlsx" or ".xls" or ".csv":
-                    await ProcessSpreadsheet(pdfPath, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
-                    break;
-                case ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv"
-                  or ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac":
-                    await ProcessMediaFile(pdfPath, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
-                    break;
-                default:
-                    await ProcessPdf(pdfPath, thumbnailService, pdfImageExtractor, dataSetId, publishedDir: publishedDir, dataSetName: dataSetName, sourceFolderName: sourceName);
-                    break;
+                Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(filePath)}");
+                return;
             }
-            
-            // Mark text extraction as done
-            System.IO.File.Create(doneFile).Dispose();
 
-            // Mark embeddings done if embedding service was available and succeeded
+            int currentCount = Interlocked.Increment(ref totalFiles);
+            Console.WriteLine($"[{currentCount}] Processing: {Path.GetFileName(filePath)}");
+
+            // Build pipeline for this file
+            var pipeline = new IngestionPipeline()
+                .AddStep(new LoadDocumentStep())
+                .AddStep(new TelerikCorpusStep())
+                .AddStep(new DevExpressCorpusStep())
+                .AddStep(new AssembleDocumentStep())
+                .AddStep(new MetadataExtractionStep())
+                .AddStep(new SentenceIdStep())
+                .AddStep(new ThumbnailStep())
+                .AddStep(new PageImagesStep())
+                .AddStep(new HtmlViewerStep())
+                .AddStep(new XlsxBundleStep())
+                .AddStep(new StoreToPostgresStep());
+
+            var ctx = new IngestionContext
+            {
+                FilePath = filePath,
+                PublishedDir = publishedDir,
+                DataSetName = dataSetName,
+                SourceName = sourceName,
+                DataSetId = dataSetId,
+                NoImages = noImages,
+                NoEmbeddings = noEmbeddings,
+                ForceReprocess = forceReprocess,
+                DbService = dbService,
+                EmbeddingService = embeddingService,
+                ThumbnailService = thumbnailService,
+                PdfImageExtractor = pdfImageExtractor,
+                ImageThrottle = imageThrottle,
+            };
+
+            await pipeline.ExecuteAsync(ctx);
+
+            // Mark as done
+            File.Create(doneFile).Dispose();
             if (embeddingService != null)
-            {
-                System.IO.File.Create(doneEmbeddings).Dispose();
-            }
-
-            // Mark images done if images were generated
+                File.Create(doneEmbeddings).Dispose();
             if (!noImages)
-            {
-                System.IO.File.Create(doneImages).Dispose();
-            }
-            
-            int currentProcessed = System.Threading.Interlocked.Increment(ref processedFiles);
-            
+                File.Create(doneImages).Dispose();
+
+            int currentProcessed = Interlocked.Increment(ref processedFiles);
             if (MAX_FILES > 0 && currentProcessed >= MAX_FILES)
-            {
                 Console.WriteLine($"\n--- BATCH LIMIT REACHED ({MAX_FILES} files) ---");
-            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ERROR processing {pdfPath}: {ex.Message}");
+            Console.WriteLine($"ERROR processing {filePath}: {ex.Message}");
         }
     });
 
-    if (MAX_FILES > 0 && processedFiles >= MAX_FILES) break; // Break outer folder loop
+    if (MAX_FILES > 0 && processedFiles >= MAX_FILES) break;
 }
 
 Console.WriteLine($"\nDone! Processed {processedFiles}/{totalFiles} files. Skipped {skippedFiles} already-done.");
-
-// Wait for all background image tasks to complete
-if (pendingImageTasks.Count > 0)
-{
-    Console.WriteLine($"Waiting for {pendingImageTasks.Count} image tasks to complete...");
-    await Task.WhenAll(pendingImageTasks);
-    Console.WriteLine("All image tasks completed.");
-}
-
-async Task ProcessPdf(string pdfPath, ThumbnailService? thumbnailService, PdfImageExtractor? pdfImageExtractor, int? dataSetId = null, bool inspectMode = false, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
-{
-    // Skip if already processed (for distributed processing) — unless --force re-ingestion
-    if (!forceReprocess && dbService.DocumentExists(pdfPath))
-    {
-        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(pdfPath)}");
-        return;
-    }
-
-    // 1. Parse PDF
-    (var digitalBook, var telerikDoc) = TelerikBookCorpusIngestionTests.RunParseBook(pdfPath);
-    var simpleText = telerikDoc.ToSimpleTextDocument(TimeSpan.FromSeconds(5 * 60));
-    string fullText = simpleText.Text;
-    
-    // Fallback: if simpleText is empty, try constructing from words
-    if (string.IsNullOrWhiteSpace(fullText) && digitalBook.Words.Count > 0)
-    {
-         fullText = string.Join(" ", digitalBook.Words.Select(w => w.text));
-    }
-
-    // Ensure Published output directory exists
-    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
-        System.IO.Directory.CreateDirectory(publishedDir);
-
-    // NOTE: Do NOT clean fullText — raw OCR text is evidence and must be preserved exactly.
-    // MIME artifacts (= replacing characters) are handled as a matching problem in people extraction.
-
-    if (inspectMode)
-    {
-        Console.WriteLine("\n[INSPECT] Simple Text (First 500 chars):");
-        Console.WriteLine(fullText.Length > 500 ? fullText.Substring(0, 500) : fullText);
-    }
-
-    // 2. Extract Metadata & Deduce Date
-    var deducedDate = DeduceDateFromText(fullText);
-    var deducedTitle = DeduceTitleFromText(fullText, System.IO.Path.GetFileNameWithoutExtension(pdfPath));
-    var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
-
-    if (inspectMode)
-    {
-        Console.WriteLine($"\n[INSPECT] Deduced Date: {deducedDate:yyyy-MM-dd}");
-        Console.WriteLine($"[INSPECT] Deduced Title: {deducedTitle}");
-        Console.WriteLine($"[INSPECT] Names: {string.Join(", ", extractedNames)}");
-        Console.WriteLine($"[INSPECT] Terms: {string.Join(", ", extractedTerms)}");
-        return;
-    }
-
-    // Gather file-level info for enriched metadata
-    var fileInfo = new System.IO.FileInfo(pdfPath);
-    int wordCount = string.IsNullOrWhiteSpace(fullText) ? 0 : fullText.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries).Length;
-    // Source subfolder relative to root (e.g., "VOL00008/IMAGES/0001")
-    string? sourceSubFolder = null;
-    try
-    {
-        var pdfDir = System.IO.Path.GetDirectoryName(pdfPath);
-        if (pdfDir != null && publishedDir != null)
-        {
-            // Strip from the dataset folder down, exclude Published
-            var dataSetDir = System.IO.Path.GetDirectoryName(publishedDir.TrimEnd(System.IO.Path.DirectorySeparatorChar));
-            if (dataSetDir != null && pdfDir.StartsWith(dataSetDir))
-                sourceSubFolder = pdfDir.Substring(dataSetDir.Length).TrimStart(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
-        }
-    }
-    catch { }
-
-    var metadata = new PdfMetadata
-    {
-        FileName = System.IO.Path.GetFileName(pdfPath),
-        Title = deducedTitle,
-        PageCount = telerikDoc.Pages.Count,
-        DeducedDate = deducedDate ?? DateTime.MinValue,
-        Text = RunCleanUp(digitalBook.Sentences.Select(s => s.text).ToList()),
-        Names = extractedNames,
-        Terms = extractedTerms,
-        // Enriched metadata
-        DataSetName = dataSetName ?? "",
-        SourceName = sourceFolderName ?? "",
-        OriginalFilePath = pdfPath,
-        SourceFolder = sourceSubFolder ?? "",
-        IngestedAtUtc = DateTime.UtcNow,
-        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
-        WordCount = wordCount
-    };
-
-    List<string> RunCleanUp(List<string> input)
-    {
-        // Phase 1: Clean text (unicode fixes, EFTA splits)
-        var cleaned = new List<string>();
-        foreach (var line in input)
-        {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-
-            // 1. Remove/Replace Unicodes
-            string s = line.Replace("\u25A0", "-").Replace("\"", "'");
-
-            // NOTE: Do NOT clean MIME artifacts from sentences — raw text is evidence.
-
-            // 2. Fix OCR text artifacts: bracket spaces "( M"→"(M", URL spaces
-            s = SentencePostProcessor.CleanTextArtifacts(s);
-
-            // 3. Split on EFTA file IDs — they appear at page headers/footers
-            //    and the OCR runs them into the next text: "EFTA0033210Original message"
-            //    becomes separate entries: "EFTA0033210", "Original message"
-            if (Regex.IsMatch(s, @"EFTA\d{8,}"))
-            {
-                var parts = Regex.Split(s, @"(EFTA\d{8,})");
-                foreach (var part in parts)
-                {
-                    var p = part.Trim();
-                    if (!string.IsNullOrWhiteSpace(p))
-                        cleaned.Add(p);
-                }
-            }
-            else
-            {
-                cleaned.Add(s.Trim());
-            }
-        }
-
-        // Phase 1.5: Merge ellipsis fragments — consecutive "." strings combine with previous
-        cleaned = SentencePostProcessor.MergeEllipsisSentences(cleaned);
-
-        // Phase 2: Filter junk BEFORE numbering (no gaps in sequence)
-        cleaned = SentencePostProcessor.FilterJunkStrings(cleaned);
-
-        // Phase 3: Number sequentially — [1], [2], [3]... with no gaps
-        for (int i = 0; i < cleaned.Count; i++)
-        {
-            cleaned[i] = $"\n[{i + 1}] {cleaned[i]}";
-        }
-        return cleaned;
-    }
-
-    // 3. Serialize to JSON
-    string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
-    
-    // 4. Determine Output Filename & Published output location
-    string dateStr = metadata.DeducedDate != DateTime.MinValue ? metadata.DeducedDate.ToString("yyyy-MM-dd") : "UnknownDate";
-    string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(pdfPath)}_{dateStr}";
-    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(pdfPath) ?? "";
-    
-    // Copy source PDF to Published folder (if Published dir is set and different from source)
-    string publishedPdfPath = pdfPath; // default: original location
-    if (!string.IsNullOrEmpty(publishedDir))
-    {
-        publishedPdfPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(pdfPath));
-        if (!System.IO.File.Exists(publishedPdfPath))
-        {
-            System.IO.File.Copy(pdfPath, publishedPdfPath);
-            Console.WriteLine($"  Copied PDF → Published: {System.IO.Path.GetFileName(pdfPath)}");
-        }
-    }
-    
-    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
-    System.IO.File.WriteAllText(jsonPath, json);
-    Console.WriteLine($"Saved JSON: {jsonPath}");
-
-    // 5. Insert into Postgres — store the Published path (lock for thread-safety with parallel processing)
-    try
-    {
-        lock (dbService)
-        {
-            dbService.InsertDocument(publishedPdfPath, metadata, dataSetId);
-        }
-    }
-    catch(Exception ex)
-    {
-        Console.WriteLine($"DB Error: {ex.Message}");
-    }
-
-    // 6. Generate page images (thumb + full) - skip if --no-images flag is set
-    //    Images go to Published folder when set, otherwise alongside source PDF
-    if (!noImages)
-    {
-        var imageTask = Task.Run(async () =>
-        {
-            await imageThrottle.WaitAsync(); // Throttle: max 10 concurrent image tasks
-            try
-            {
-                string thumbPath = ""; int thumbW = 0, thumbH = 0;
-                string fullPath = ""; int fullW = 0, fullH = 0;
-                byte[] previewData = Array.Empty<byte>(); byte[] thumbData = Array.Empty<byte>();
-
-                if (pdfImageExtractor != null)
-                {
-                    // Use Telerik direct image extraction (no browser needed)
-                    // outputDir = publishedDir so images land in Published/
-                    var (fPath, tPath, w, h, pData, tData) = pdfImageExtractor.ExtractPageImage(pdfPath, outputDir: publishedDir);
-
-                    if (!string.IsNullOrEmpty(fPath))
-                    {
-                        (fullPath, fullW, fullH) = (fPath, w, h);
-                        previewData = pData;
-                    }
-                    if (!string.IsNullOrEmpty(tPath))
-                    {
-                        (thumbPath, thumbW, thumbH) = (tPath, 100, h > 0 && w > 0 ? (int)(100.0 * h / w) : 0);
-                        thumbData = tData;
-                    }
-                }
-                else if (thumbnailService != null)
-                {
-                    // Use Playwright browser rendering
-                    var pageImages = await thumbnailService.GeneratePageImagesAsync(pdfPath);
-
-                    foreach (var (filePath, width, height, imgData) in pageImages)
-                    {
-                        if (filePath.Contains("_thumb."))
-                        {
-                            (thumbPath, thumbW, thumbH) = (filePath, width, height);
-                            thumbData = imgData;
-                        }
-                        else
-                        {
-                            (fullPath, fullW, fullH) = (filePath, width, height);
-                            previewData = imgData;
-                        }
-                    }
-                }
-
-                // Single upsert call - only updates images with W>0 and H>0
-                if (!string.IsNullOrEmpty(thumbPath) || !string.IsNullOrEmpty(fullPath))
-                {
-                    lock (dbService)
-                    {
-                        dbService.UpsertDocumentImages(publishedPdfPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH,
-                            previewData: previewData, thumbData: thumbData);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"  [WARN] Page image error for {System.IO.Path.GetFileName(pdfPath)}: {ex.Message}");
-            }
-            finally
-            {
-                imageThrottle.Release();
-            }
-        });
-        pendingImageTasks.Add(imageTask);
-    }
-}
-
-async Task ProcessSpreadsheet(string filePath, int? dataSetId = null, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
-{
-    // Skip if already processed
-    if (!forceReprocess && dbService.DocumentExists(filePath))
-    {
-        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(filePath)}");
-        return;
-    }
-
-    // 1. Load spreadsheet
-    var result = SpreadsheetLoader.Load(filePath);
-    var sentences = SpreadsheetLoader.ToSentences(result);
-
-    // 2. Build combined text for name/term extraction
-    string fullText = string.Join(" ", result.Rows.Select(r => r.Text));
-    var (extractedNames, extractedTerms) = ExtractNamesAndTerms(fullText);
-
-    // Ensure Published output directory exists
-    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
-        System.IO.Directory.CreateDirectory(publishedDir);
-
-    // 3. Build metadata (reuse PdfMetadata for uniform DB storage)
-    var fileInfo = new System.IO.FileInfo(filePath);
-    int wordCount = string.IsNullOrWhiteSpace(fullText) ? 0 : fullText.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries).Length;
-
-    var metadata = new PdfMetadata
-    {
-        FileName = System.IO.Path.GetFileName(filePath),
-        Title = $"Spreadsheet: {result.FileName} ({result.SheetCount} sheet{(result.SheetCount != 1 ? "s" : "")}, {result.Rows.Count} rows)",
-        PageCount = result.SheetCount,
-        Text = sentences,
-        Names = extractedNames,
-        Terms = extractedTerms,
-        DataSetName = dataSetName ?? "",
-        SourceName = sourceFolderName ?? "",
-        OriginalFilePath = filePath,
-        IngestedAtUtc = DateTime.UtcNow,
-        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
-        WordCount = wordCount
-    };
-
-    // 4. Copy source file to Published folder
-    string publishedPath = filePath;
-    if (!string.IsNullOrEmpty(publishedDir))
-    {
-        publishedPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(filePath));
-        if (!System.IO.File.Exists(publishedPath))
-        {
-            System.IO.File.Copy(filePath, publishedPath);
-            Console.WriteLine($"  Copied → Published: {System.IO.Path.GetFileName(filePath)}");
-        }
-    }
-
-    // 5. Save JSON metadata
-    string dateStr = "UnknownDate";
-    string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}_{dateStr}";
-    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
-    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
-    string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
-    System.IO.File.WriteAllText(jsonPath, json);
-
-    // 6. Insert into Postgres
-    try
-    {
-        lock (dbService)
-        {
-            dbService.InsertDocument(publishedPath, metadata, dataSetId);
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"DB Error: {ex.Message}");
-    }
-
-    // 7. Generate spreadsheet thumbnail (real screenshot via Workbook→PDF→Skia, CSV falls back to heatmap)
-    if (!noImages && result.Rows.Count > 0)
-    {
-        try
-        {
-            string baseName = System.IO.Path.GetFileNameWithoutExtension(filePath);
-            var (fullPath, thumbPath, fullW, fullH, thumbW, thumbH, fullData, thumbData) =
-                result.Workbook != null
-                    ? SpreadsheetThumbnail.GenerateFromWorkbook(result.Workbook, outputDir, baseName)
-                    : SpreadsheetThumbnail.GenerateAndSave(result, outputDir, baseName);
-
-            if (!string.IsNullOrEmpty(fullPath))
-            {
-                lock (dbService)
-                {
-                    dbService.UpsertDocumentImages(publishedPath, fullPath, fullW, fullH, thumbPath, thumbW, thumbH,
-                        previewData: fullData, thumbData: thumbData);
-                }
-                Console.WriteLine($"  [THUMB] {baseName}: {fullW}x{fullH} preview, {thumbW}x{thumbH} thumb");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  [WARN] Spreadsheet thumbnail error: {ex.Message}");
-        }
-    }
-
-    Console.WriteLine($"  [SPREADSHEET] {result.FileName}: {result.SheetCount} sheets, {result.Rows.Count} rows, {sentences.Count} sentences");
-    await Task.CompletedTask;
-}
-
-async Task ProcessMediaFile(string filePath, int? dataSetId = null, string? publishedDir = null, string? dataSetName = null, string? sourceFolderName = null)
-{
-    // Skip if already processed
-    if (!forceReprocess && dbService.DocumentExists(filePath))
-    {
-        Console.WriteLine($"  [SKIP] Already in DB: {Path.GetFileName(filePath)}");
-        return;
-    }
-
-    // 1. Extract metadata
-    var mediaMeta = MediaFileProcessor.GetMetadata(filePath);
-    var sentences = MediaFileProcessor.ToSentences(mediaMeta);
-
-    // Ensure Published output directory exists
-    if (!string.IsNullOrEmpty(publishedDir) && !System.IO.Directory.Exists(publishedDir))
-        System.IO.Directory.CreateDirectory(publishedDir);
-
-    // 2. Build metadata (reuse PdfMetadata for uniform DB storage)
-    var fileInfo = new System.IO.FileInfo(filePath);
-
-    var metadata = new PdfMetadata
-    {
-        FileName = System.IO.Path.GetFileName(filePath),
-        Title = $"{mediaMeta.MediaType.ToUpperInvariant()}: {mediaMeta.FileName}",
-        PageCount = 0,
-        Text = sentences,
-        Names = new List<string>(),
-        DataSetName = dataSetName ?? "",
-        SourceName = sourceFolderName ?? "",
-        OriginalFilePath = filePath,
-        IngestedAtUtc = DateTime.UtcNow,
-        FileSizeBytes = fileInfo.Exists ? fileInfo.Length : 0,
-        WordCount = 0
-    };
-
-    // 3. Copy source file to Published folder
-    string publishedPath = filePath;
-    if (!string.IsNullOrEmpty(publishedDir))
-    {
-        publishedPath = System.IO.Path.Combine(publishedDir, System.IO.Path.GetFileName(filePath));
-        if (!System.IO.File.Exists(publishedPath))
-        {
-            System.IO.File.Copy(filePath, publishedPath);
-            Console.WriteLine($"  Copied → Published: {System.IO.Path.GetFileName(filePath)}");
-        }
-    }
-
-    // 4. Save JSON metadata
-    string dateStr = "UnknownDate";
-    string newFileNameBase = $"{System.IO.Path.GetFileNameWithoutExtension(filePath)}_{dateStr}";
-    string outputDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
-    string jsonPath = System.IO.Path.Combine(outputDir, newFileNameBase + ".json");
-    string json = JsonSerializer.Serialize(metadata, new JsonSerializerOptions { WriteIndented = true });
-    System.IO.File.WriteAllText(jsonPath, json);
-
-    // 5. Insert into Postgres
-    try
-    {
-        lock (dbService)
-        {
-            dbService.InsertDocument(publishedPath, metadata, dataSetId);
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"DB Error: {ex.Message}");
-    }
-
-    // 6. Capture thumbnail for video files (if ffmpeg is available)
-    if (MediaFileProcessor.IsVideoFile(filePath) && !noImages)
-    {
-        string thumbDir = publishedDir ?? System.IO.Path.GetDirectoryName(filePath) ?? "";
-        string baseName = System.IO.Path.GetFileNameWithoutExtension(filePath);
-        string? thumbPath = MediaFileProcessor.CaptureThumbnail(filePath, thumbDir, baseName);
-        if (thumbPath != null)
-        {
-            try
-            {
-                var thumbInfo = new System.IO.FileInfo(thumbPath);
-                lock (dbService)
-                {
-                    dbService.UpsertDocumentImages(publishedPath, "", 0, 0, thumbPath, 100, 0);
-                }
-                Console.WriteLine($"  [MEDIA] Thumbnail saved: {System.IO.Path.GetFileName(thumbPath)}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"  [MEDIA] Thumbnail DB error: {ex.Message}");
-            }
-        }
-    }
-
-    string durationStr = mediaMeta.Duration.HasValue ? $", {mediaMeta.Duration.Value:hh\\:mm\\:ss}" : "";
-    Console.WriteLine($"  [{mediaMeta.MediaType.ToUpperInvariant()}] {mediaMeta.FileName}{durationStr}");
-    await Task.CompletedTask;
-}
-
-DateTime? DeduceDateFromText(string text)
-{
-    if (string.IsNullOrWhiteSpace(text)) return null;
-
-    // Limit scope to first 4000 chars for header dates
-    string snippet = text.Length > 4000 ? text.Substring(0, 4000) : text;
-    
-    // 1. Standard Patterns (High Confidence)
-    var standardPatterns = new[] 
-    {
-        @"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b",
-        @"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b",
-        @"\b\d{4}-\d{2}-\d{2}\b"
-    };
-
-    foreach (var pattern in standardPatterns)
-    {
-        var match = Regex.Match(snippet, pattern, RegexOptions.IgnoreCase);
-        if (match.Success)
-        {
-            if (DateTime.TryParse(match.Value, out DateTime date)) return date;
-        }
-    }
-
-    // 2. Scrappy OCR Patterns (Medium Confidence)
-    // Matches "17-/_ 42-/" -> 17/??/42 -> 1942?
-    // Matches "DATE ___17-/_ 42-/"
-    // Regex looking for 3 groups of digits separated by "junk" (non-word, non-digit)
-    // Junk allowed: - / _ | \ space .
-    // e.g. 17 _/_ 05 - 1999
-    var scrappyPattern = @"\b(\d{1,2})[^\w\d]{1,5}(\d{1,2})[^\w\d]{1,5}(\d{2,4})\b";
-    
-    var matchScrappy = Regex.Match(snippet, scrappyPattern);
-    if (matchScrappy.Success)
-    {
-        // Try to parse components
-        int p1 = int.Parse(matchScrappy.Groups[1].Value);
-        int p2 = int.Parse(matchScrappy.Groups[2].Value);
-        int p3 = int.Parse(matchScrappy.Groups[3].Value);
-
-        // Heuristics for Day/Month/Year
-        int year = p3;
-        if (year < 100) year += (year > 30 ? 1900 : 2000); // e.g. 99 -> 1999, 15 -> 2015
-        
-        // Month/Day? Assume US format (Month/Day) usually, or check > 12
-        int month = p1;
-        int day = p2;
-
-        if (month > 12 && day <= 12) 
-        {
-            // Swap if p1 is definitely not month
-            month = p2;
-            day = p1;
-        }
-        
-        if (month <= 12 && day <= 31)
-        {
-            try { return new DateTime(year, month, day); } catch { }
-        }
-    }
-
-    // 3. Last Resort: Just Year (Low Confidence)
-    // "199X" or "20XX" isolated.
-    var yearMatch = Regex.Match(snippet, @"\b(19|20)\d{2}\b");
-    if (yearMatch.Success)
-    {
-        return new DateTime(int.Parse(yearMatch.Value), 1, 1);
-    }
-    
-    return null;
-}
-
-string DeduceTitleFromText(string text, string filename)
-{
-    if (string.IsNullOrWhiteSpace(text)) return filename;
-    string snippet = text.Length > 2000 ? text.Substring(0, 2000) : text;
-    
-    // Heuristic: Check for specific document types
-    var keywords = new Dictionary<string, string>
-    {
-        { "IMAGE", "Image" },
-        { "MEMORANDUM", "Memorandum" },
-        { "REPORT", "Report" },
-        { "EMAIL", "Email" },
-        { "LETTER", "Letter" },
-        { "COURT", "Court Document" },
-        { "ORDER", "Court Order" },
-        { "MOTION", "Motion" },
-        { "SUBPOENA", "Subpoena" },
-        { "CASE ID", "Case File" }, 
-        { "FBI", "FBI Document" },
-        { "TRANSCRIPT", "Transcript" },
-        { "AFFIDAVIT", "Affidavit" },
-        { "WARRANT", "Warrant" }
-    };
-
-    foreach (var kvp in keywords)
-    {
-        if (snippet.IndexOf(kvp.Key, StringComparison.OrdinalIgnoreCase) >= 0)
-        {
-             return $"{kvp.Value} - {filename}";
-        }
-    }
-    
-    return filename; // Default
-}
-
-/// <summary>
-/// Clean MIME quoted-printable artifacts from OCR'd email text.
-/// In these PDFs, the '=' character replaces exactly one letter due to MIME encoding
-/// that was baked into the document before printing/scanning. Examples:
-///   Ep=tein → Eptein (was Epstein, 's' replaced by '=')
-///   bo=tom → botom (was bottom, 't' replaced by '=')
-///   =ddressee → ddressee (was addressee, 'a' replaced by '=')
-///   recipie=t → recipiet (was recipient, 'n' replaced by '=')
-///   co=] → co] (was com], 'm' replaced by '=')
-/// 
-/// Also handles:
-///   =XX hex sequences (proper quoted-printable: =20 → space, =3D → '=', etc.)
-///   =\r\n or =\n soft line breaks (remove entirely)
-///   =0A, =0D line break codes
-/// </summary>
-string CleanMimeArtifacts(string text)
-{
-    if (string.IsNullOrEmpty(text)) return text;
-
-    // 1. Decode proper =XX hex sequences FIRST (e.g., =20 → space, =3D → '=')
-    text = Regex.Replace(text, @"=([0-9A-Fa-f]{2})", m =>
-    {
-        int charCode = Convert.ToInt32(m.Groups[1].Value, 16);
-        char decoded = (char)charCode;
-        // Only decode printable ASCII or common whitespace
-        if (charCode == 0x0D || charCode == 0x0A) return " "; // CR/LF → space
-        if (charCode >= 0x20 && charCode <= 0x7E) return decoded.ToString();
-        return ""; // Strip non-printable
-    });
-
-    // 2. Remove soft line breaks: = at end of line (MIME continuation)
-    text = Regex.Replace(text, @"=\r?\n", "");
-
-    // 3. Remove remaining '=' between letters (the "replacing a character" artifact)
-    //    Pattern: letter = letter  →  join them (the = ate one char, nothing to restore)
-    text = Regex.Replace(text, @"(?<=[a-zA-Z])=(?=[a-zA-Z])", "");
-
-    // 4. Remove '=' at start of a word (before letters, e.g., =ddressee)
-    text = Regex.Replace(text, @"(?<=\s|^)=(?=[a-zA-Z])", "");
-
-    // 5. Remove '=' before punctuation within words (e.g., co=] → co])
-    text = Regex.Replace(text, @"(?<=[a-zA-Z])=(?=[)\]}>.,;:!?/])", "");
-
-    return text;
-}
-
-/// <summary>
-/// Extract names and terms from document text using regex/heuristic patterns.
-/// Names: high-confidence person names from email headers, salutations, and contextual patterns.
-/// Terms: broader capitalized-word pairs that may be names, places, or notable phrases.
-/// </summary>
-(List<string> Names, List<string> Terms) ExtractNamesAndTerms(string text)
-{
-    var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    var terms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    if (string.IsNullOrWhiteSpace(text)) return (new List<string>(), new List<string>());
-
-    // Use first 8000 chars - most names appear in headers at the top
-    string snippet = text.Length > 8000 ? text.Substring(0, 8000) : text;
-
-    // --- 1. Email header patterns (From:, To:, Cc:, Sent by:) → Names ---
-    // NOTE: [a-z=] and [A-Z=] allow '=' as a wildcard for MIME-damaged characters
-    var headerPatterns = new[]
-    {
-        @"(?:From|To|Cc|Bcc|Sent\s*(?:by)?)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
-        @"(?:From|To|Cc|Bcc)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*<",
-        @"(?:To|Cc|Bcc)\s*:\s*(?:(?:[A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*;\s*)*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
-    };
-
-    foreach (var pattern in headerPatterns)
-    {
-        foreach (Match m in Regex.Matches(snippet, pattern))
-        {
-            var name = CleanExtractedName(m.Groups[1].Value);
-            if (IsValidPersonName(name)) names.Add(name);
-        }
-    }
-
-    // --- 2. "Dear X" / "Hi X" / "Hello X" patterns → Names ---
-    foreach (Match m in Regex.Matches(snippet, @"\b(?:Dear|Hi|Hello|Attn)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20})?)", RegexOptions.None))
-    {
-        var name = CleanExtractedName(m.Groups[1].Value);
-        if (IsValidPersonName(name)) names.Add(name);
-    }
-
-    // --- 3. Known-name-context patterns → Names ---
-    foreach (Match m in Regex.Matches(snippet, @"\b(?:w/|with|meeting\s+with|Appt\s+w/|LUNCH\s+w/)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20}))", RegexOptions.None))
-    {
-        var name = CleanExtractedName(m.Groups[1].Value);
-        if (IsValidPersonName(name)) names.Add(name);
-    }
-
-    // --- 4. Capitalized "Firstname Lastname" sequences → Terms (unless already a Name) ---
-    foreach (Match m in Regex.Matches(snippet, @"\b([A-Z=][a-z=]{2,15}\s+[A-Z=][a-z=]{2,20})\b"))
-    {
-        var candidate = CleanExtractedName(m.Groups[1].Value);
-        if (IsValidPersonName(candidate) && !IsCommonPhrase(candidate))
-        {
-            if (!names.Contains(candidate))
-                terms.Add(candidate);
-        }
-    }
-
-    return (names.OrderBy(p => p).ToList(), terms.OrderBy(t => t).ToList());
-}
-
-string CleanExtractedName(string name)
-{
-    if (string.IsNullOrWhiteSpace(name)) return "";
-    // Remove newlines - OCR artifacts
-    name = name.Replace("\n", " ").Replace("\r", " ");
-    // Remove trailing punctuation, digits, email artifacts
-    name = Regex.Replace(name, @"[\d<>\[\]@.,;:!?\-_/\\()]+$", "").Trim();
-    name = Regex.Replace(name, @"^[\d<>\[\]@.,;:!?\-_/\\()]+", "").Trim();
-    // Strip MIME '=' artifacts from the name (evidence is preserved in raw text;
-    // this only cleans the derived Names metadata field)
-    name = name.Replace("=", "");
-    // Collapse multiple spaces
-    name = Regex.Replace(name, @"\s{2,}", " ").Trim();
-    // Remove trailing words that are common email artifacts (e.g., "Jeffrey E. Sent" -> trim "Sent")
-    name = Regex.Replace(name, @"\s+(Sent|From|To|Cc|Subject|Date|Re|Fwd|Mon|Tue|Wed|Thu|Fri|Sat|Sun)$", "", RegexOptions.IgnoreCase).Trim();
-    return name;
-}
-
-bool IsValidPersonName(string name)
-{
-    if (string.IsNullOrWhiteSpace(name) || name.Length < 4) return false;
-    
-    // Must contain at least a space (first + last)
-    if (!name.Contains(' ')) return false;
-    
-    // Reject if contains digits, @, newlines, or common non-name chars
-    if (Regex.IsMatch(name, @"[\d@#$%^&*(){}|<>\n\r]")) return false;
-
-    // Reject single-char first or last names
-    var parts = name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-    if (parts.Length < 2) return false;
-    if (parts[0].Length < 2 || parts[^1].Length < 2) return false;
-
-    // Reject names starting with common non-name words
-    var rejectFirstWords = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        "Sent", "Hello", "Dear", "Hey", "The", "This", "That", "Your", "Our", "My",
-        "From", "Date", "Subject", "Reply", "Forward", "Original", "Attachment",
-        "Please", "Thanks", "Thank", "Best", "Kind", "Warm", "Good", "Look",
-        "Flight", "Stem", "Med", "Image", "File", "Case", "Help", "Earth",
-        "Click", "View", "Open", "Read", "Copy", "Save", "Print", "Delete",
-        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
-        "San", "New", "South", "North", "East", "West", "Los", "Santa", "Palm"
-    };
-    if (rejectFirstWords.Contains(parts[0])) return false;
-
-    return true;
-}
-
-bool IsCommonPhrase(string candidate)
-{
-    // Common two-word phrases that are NOT person names — frequently found in legal/email docs
-    var nonNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        "Sent from", "Sent From", "Original Message", "Court Order", "Court Document",
-        "New York", "Los Angeles", "San Francisco", "Santa Monica", "Palm Beach",
-        "United States", "South Florida", "Southern District", "Northern District",
-        "Dear Sir", "Dear Madam", "Good Morning", "Good Afternoon", "Good Evening",
-        "Best Regards", "Kind Regards", "Warm Regards", "Many Thanks",
-        "Please Note", "For Immediate", "Private Communication", "All Rights",
-        "Rights Reserved", "Jeffrey Epstein", // Often appears in disclaimers; keep if in From/To but filter as generic
-        "East Street", "West Street", "North Street", "South Street",
-        "Monday Morning", "Tuesday Morning", "Wednesday Morning", "Thursday Morning",
-        "Friday Morning", "Saturday Morning", "Sunday Morning",
-        "January February", "February March", "Unauthorized Use",
-        "Your Email", "This Email", "This Message", "Earth Link",
-        "Flash Player", "Internet Explorer", "Microsoft Office", "Google Chrome",
-        "Apple Inc", "Subject Line", "Read Receipt", "Return Receipt",
-        "Thank You", "Look Forward", "Property List", "Attachment Name",
-        "Cell Number", "Phone Number", "Office Number",
-        "Image Format", "File Size", "File Name", "Date Received",
-        "Help Save", "Feminine Care", "Gillette Blade",
-        "Building Entrance", "Front Door",
-        "Attorney Client", "Inside Information", "Strictly Prohibited",
-    };
-
-    return nonNames.Contains(candidate);
-}
 
 void CleanGeneratedFiles(string folder)
 {
@@ -1356,7 +604,6 @@ void CleanGeneratedFiles(string folder)
     Console.WriteLine($"  Cleaned {count} generated files (.jpg, .done*, .json, .html)");
 }
 
-// Helper extension
 public static class StringExtensions
 {
     public static string D = "";
@@ -1366,9 +613,3 @@ public static class StringExtensions
         return value.Length <= maxLength ? value : value.Substring(0, maxLength);
     }
 }
-
-
-
-
-
-

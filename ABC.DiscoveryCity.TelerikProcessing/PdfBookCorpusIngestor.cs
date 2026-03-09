@@ -1,3 +1,4 @@
+using ABC.DiscoveryCity.DocumentProcessing.Shared;
 using ABC.DiscoveryCity.TelerikProcessing;
 using ABC.DiscoveryCity.Words.Common;
 

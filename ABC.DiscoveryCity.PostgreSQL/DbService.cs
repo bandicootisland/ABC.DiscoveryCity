@@ -78,13 +78,8 @@ public partial class DbService
         return IsWindows ? path.Replace('/', '\\') : path.Replace('\\', '/');
     }
 
-    /// <summary>
-    /// Common command timeout in seconds for all database operations.
-    /// </summary>
-    private const int DbCommandTimeout = 120;
-
     // Default connection string for convenience, but allows override
-    private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
+    private const string DefaultConnectionString = "Host=localhost;Port=5435;Database=discoverycity;Username=discovery_user;Password=discovery_password";
 
     // Static shared pool — built once, reused by all DbService instances (prevents connection leak)
     private static NpgsqlDataSource? _sharedDataSource;
@@ -238,8 +233,8 @@ public partial class DbService
                 using (var cmd = new NpgsqlCommand("ALTER TABLE Sources ALTER COLUMN BaseFilePath DROP NOT NULL;", conn))
                     try { cmd.ExecuteNonQuery(); } catch { /* already nullable */ }
 
-                // Tiered search cache tables
-                InitTieredSearchTables();
+                // Ensure SentenceIds column on ParentDocuments (UUIDv8)
+                using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS SentenceIds JSONB;", conn)) cmd.ExecuteNonQuery();
 
                 Console.WriteLine("Schema migrations complete.");
                 return;
@@ -249,7 +244,7 @@ public partial class DbService
             Console.WriteLine("Creating Sources table...");
             string createSourcesTableSql = @"
                 CREATE TABLE IF NOT EXISTS Sources (
-                    Id SERIAL PRIMARY KEY,
+                    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     Name TEXT NOT NULL UNIQUE,
                     Url TEXT,
                     BaseFilePath TEXT,
@@ -271,8 +266,8 @@ public partial class DbService
             Console.WriteLine("Creating DataSets table...");
             string createDataSetsTableSql = @"
                 CREATE TABLE IF NOT EXISTS DataSets (
-                    Id SERIAL PRIMARY KEY,
-                    SourceId INT REFERENCES Sources(Id) ON DELETE CASCADE,
+                    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    SourceId UUID REFERENCES Sources(Id) ON DELETE CASCADE,
                     Name TEXT NOT NULL,
                     PdfFolder TEXT,
                     ImageFolder TEXT,
@@ -289,8 +284,8 @@ public partial class DbService
             Console.WriteLine("Creating ParentDocuments table...");
             string createParentTableSql = @"
                 CREATE TABLE IF NOT EXISTS ParentDocuments (
-                    Id SERIAL PRIMARY KEY,
-                    DataSetId INT REFERENCES DataSets(Id),
+                    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    DataSetId UUID REFERENCES DataSets(Id),
                     FileName TEXT NOT NULL,
                     FilePath TEXT,
                     Metadata JSONB,
@@ -302,10 +297,11 @@ public partial class DbService
             using (var cmd = new NpgsqlCommand(createParentTableSql, conn)) cmd.ExecuteNonQuery();
 
             // Add DataSetId column if table already exists without it
-            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS DataSetId INT REFERENCES DataSets(Id);", conn)) cmd.ExecuteNonQuery();
+            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS DataSetId UUID REFERENCES DataSets(Id);", conn)) cmd.ExecuteNonQuery();
 
             // Option B: Add Sentences JSONB + Embedding columns to ParentDocuments
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Sentences JSONB;", conn)) cmd.ExecuteNonQuery();
+            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS SentenceIds JSONB;", conn)) cmd.ExecuteNonQuery();
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Embedding vector(384);", conn)) cmd.ExecuteNonQuery();
 
             // 5. Create DocumentChunks Table with HASH Partitioning (4 partitions for parallel vector search)
@@ -323,8 +319,8 @@ public partial class DbService
                 // Create partitioned table
                 string createChunksTableSql = @"
                     CREATE TABLE DocumentChunks (
-                        Id SERIAL,
-                        ParentId INT NOT NULL,
+                        Id UUID DEFAULT gen_random_uuid(),
+                        ParentId UUID NOT NULL,
                         ChunkIndex INT,
                         TextContent TEXT,
                         Embedding vector(384),
@@ -359,8 +355,8 @@ public partial class DbService
             Console.WriteLine("Creating DocumentImages table...");
             string createImagesTableSql = @"
                 CREATE TABLE IF NOT EXISTS DocumentImages (
-                    Id SERIAL PRIMARY KEY,
-                    ParentId INT REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
+                    Id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    ParentId UUID REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
                     ImageType TEXT NOT NULL,
                     ImageSize TEXT NOT NULL,
                     FilePath TEXT,
@@ -409,14 +405,14 @@ public partial class DbService
                     CREATE INDEX IF NOT EXISTS idx_parent_sentences_fts ON ParentDocuments 
                     USING GIN (jsonb_to_tsvector('english', COALESCE(Sentences, '[]'::jsonb), '[""string""]'));", conn))
                 {
-                    cmd.CommandTimeout = DbCommandTimeout;
+                    cmd.CommandTimeout = 300;
                     cmd.ExecuteNonQuery();
                 }
                 Console.WriteLine("  Sentences full-text search index created.");
                 using (var cmd = new NpgsqlCommand(@"
                     CREATE INDEX IF NOT EXISTS idx_chunks_text_trgm ON DocumentChunks USING GIN (TextContent gin_trgm_ops);", conn))
                 {
-                    cmd.CommandTimeout = DbCommandTimeout;
+                    cmd.CommandTimeout = 300;
                     cmd.ExecuteNonQuery();
                 }
                 Console.WriteLine("  Chunk text trigram index created.");
@@ -426,7 +422,7 @@ public partial class DbService
                     CREATE INDEX IF NOT EXISTS idx_parent_names_trgm ON ParentDocuments USING GIN ((Metadata->>'Names') gin_trgm_ops);
                     CREATE INDEX IF NOT EXISTS idx_parent_filename_trgm ON ParentDocuments USING GIN (FileName gin_trgm_ops);", conn))
                 {
-                    cmd.CommandTimeout = DbCommandTimeout;
+                    cmd.CommandTimeout = 300;
                     cmd.ExecuteNonQuery();
                 }
                 Console.WriteLine("  Metadata trigram indexes created.");
@@ -483,7 +479,7 @@ public partial class DbService
                                 USING hnsw (Embedding vector_cosine_ops)
                                 WITH (m = 24, ef_construction = 128);", conn))
                             {
-                                cmd.CommandTimeout = DbCommandTimeout;
+                                cmd.CommandTimeout = 300;
                                 cmd.ExecuteNonQuery();
                             }
                             Console.WriteLine("  HNSW vector index created (optimized for 1M+ chunks).");
@@ -514,7 +510,7 @@ public partial class DbService
                         USING hnsw (Embedding vector_cosine_ops)
                         WITH (m = 16, ef_construction = 64);", conn))
                     {
-                        cmd.CommandTimeout = DbCommandTimeout;
+                        cmd.CommandTimeout = 300;
                         cmd.ExecuteNonQuery();
                     }
                     Console.WriteLine("  Parent document HNSW vector index created.");
@@ -581,42 +577,44 @@ public partial class DbService
     /// Get or create a Source by name. Returns the Source Id.
     /// Stores OS-specific base path in the appropriate column.
     /// </summary>
-    public int GetOrCreateSource(string name, string baseFilePath, string? url = null)
+    public Guid GetOrCreateSource(string name, string baseFilePath, string? url = null)
     {
         using var conn = _dataSource.OpenConnection();
         string sql = @"
-            INSERT INTO Sources (Name, BaseFilePath, Url)
-            VALUES (@name, @basePath, @url)
-            ON CONFLICT (Name) DO UPDATE SET 
+            INSERT INTO Sources (Id, Name, BaseFilePath, Url)
+            VALUES (@id, @name, @basePath, @url)
+            ON CONFLICT (Name) DO UPDATE SET
                 BaseFilePath = COALESCE(EXCLUDED.BaseFilePath, Sources.BaseFilePath)
             RETURNING Id;
         ";
         using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", Guid.CreateVersion7());
         cmd.Parameters.AddWithValue("name", name);
         cmd.Parameters.AddWithValue("basePath", (object?)baseFilePath ?? DBNull.Value);
         cmd.Parameters.AddWithValue("url", (object?)url ?? DBNull.Value);
-        return (int)(cmd.ExecuteScalar() ?? 0);
+        return (Guid)(cmd.ExecuteScalar() ?? Guid.Empty);
     }
 
     /// <summary>
     /// Get or create a DataSet by name for a given Source. Returns the DataSet Id.
     /// </summary>
-    public int GetOrCreateDataSet(int sourceId, string name, string? pdfFolder = null)
+    public Guid GetOrCreateDataSet(Guid sourceId, string name, string? pdfFolder = null)
     {
         using var conn = _dataSource.OpenConnection();
         string sql = @"
-            INSERT INTO DataSets (SourceId, Name, PdfFolder, ImageFolder)
-            VALUES (@sourceId, @name, @pdfFolder, @pdfFolder)
-            ON CONFLICT (SourceId, Name) DO UPDATE SET 
+            INSERT INTO DataSets (Id, SourceId, Name, PdfFolder, ImageFolder)
+            VALUES (@id, @sourceId, @name, @pdfFolder, @pdfFolder)
+            ON CONFLICT (SourceId, Name) DO UPDATE SET
                 PdfFolder = COALESCE(EXCLUDED.PdfFolder, DataSets.PdfFolder),
                 ImageFolder = COALESCE(EXCLUDED.ImageFolder, DataSets.ImageFolder)
             RETURNING Id;
         ";
         using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", Guid.CreateVersion7());
         cmd.Parameters.AddWithValue("sourceId", sourceId);
         cmd.Parameters.AddWithValue("name", name);
         cmd.Parameters.AddWithValue("pdfFolder", (object?)pdfFolder ?? DBNull.Value);
-        return (int)(cmd.ExecuteScalar() ?? 0);
+        return (Guid)(cmd.ExecuteScalar() ?? Guid.Empty);
     }
 
     /// <summary>
@@ -624,7 +622,7 @@ public partial class DbService
     /// Falls back to legacy FilePath check for compatibility.
     /// Returns the ParentDocument Id if found, or null if not.
     /// </summary>
-    public int? DocumentExists(string filePath, int? dataSetId = null)
+    public Guid? DocumentExists(string filePath, Guid? dataSetId = null)
     {
         try
         {
@@ -639,7 +637,7 @@ public partial class DbService
                 cmd.Parameters.AddWithValue("dsId", dataSetId.Value);
                 cmd.Parameters.AddWithValue("fn", fileName);
                 var result = cmd.ExecuteScalar();
-                if (result != null) return (int)result;
+                if (result != null) return (Guid)result;
             }
 
             // Fallback: by FileName alone (may return first match)
@@ -648,7 +646,7 @@ public partial class DbService
             {
                 cmd.Parameters.AddWithValue("fn", fileName);
                 var result = cmd.ExecuteScalar();
-                if (result != null) return (int)result;
+                if (result != null) return (Guid)result;
             }
 
             // Legacy fallback: exact FilePath match
@@ -657,7 +655,7 @@ public partial class DbService
             {
                 cmd.Parameters.AddWithValue("fp", filePath);
                 var result = cmd.ExecuteScalar();
-                return result != null ? (int)result : null;
+                return result != null ? (Guid)result : null;
             }
         }
         catch (Exception ex)
@@ -667,7 +665,7 @@ public partial class DbService
         }
     }
 
-    public void InsertDocument(string filePath, PdfMetadata metadata, int? dataSetId = null)
+    public void InsertDocument(string filePath, PdfMetadata metadata, Guid? dataSetId = null, List<Guid>? sentenceIds = null)
     {
         try
         {
@@ -678,7 +676,7 @@ public partial class DbService
             {
                 string json = JsonSerializer.Serialize(metadata.ToStorageDto());
                 string fileName = ExtractFileName(filePath);
-                int parentId = 0;
+                Guid parentId = Guid.Empty;
                 bool isUpdate = false;
 
                 // 1. Check for existing document
@@ -690,7 +688,7 @@ public partial class DbService
                         checkCmd.Parameters.AddWithValue("dsId", dataSetId.Value);
                         checkCmd.Parameters.AddWithValue("fn", fileName);
                         var existing = checkCmd.ExecuteScalar();
-                        if (existing != null) { parentId = (int)existing; isUpdate = true; }
+                        if (existing != null) { parentId = (Guid)existing; isUpdate = true; }
                     }
                 }
 
@@ -700,26 +698,29 @@ public partial class DbService
                     {
                         checkCmd.Parameters.AddWithValue("fn", fileName);
                         var existing = checkCmd.ExecuteScalar();
-                        if (existing != null) { parentId = (int)existing; isUpdate = true; }
+                        if (existing != null) { parentId = (Guid)existing; isUpdate = true; }
                     }
                 }
 
                 var sentences = metadata.Text ?? new List<string>();
                 var cleanSentences = sentences.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
                 string sentencesJson = JsonSerializer.Serialize(cleanSentences);
+                string? sentenceIdsJson = sentenceIds != null && sentenceIds.Count > 0
+                    ? JsonSerializer.Serialize(sentenceIds) : null;
 
                 if (isUpdate)
                 {
                     // 2a. UPDATE Parent
                     using (var cmd = new NpgsqlCommand(@"
                         UPDATE ParentDocuments SET Metadata = @meta::jsonb, DataSetId = COALESCE(@dataSetId, DataSetId),
-                        FilePath = @fp, Sentences = @sentences::jsonb, ProcessedAt = NOW()
+                        FilePath = @fp, Sentences = @sentences::jsonb, SentenceIds = @sids::jsonb, ProcessedAt = NOW()
                         WHERE Id = @id;", conn, trans))
                     {
                         cmd.Parameters.AddWithValue("id", parentId);
                         cmd.Parameters.AddWithValue("meta", json);
                         cmd.Parameters.AddWithValue("fp", filePath);
                         cmd.Parameters.AddWithValue("sentences", sentencesJson);
+                        cmd.Parameters.AddWithValue("sids", (object?)sentenceIdsJson ?? DBNull.Value);
                         cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
                         cmd.ExecuteNonQuery();
                     }
@@ -733,16 +734,19 @@ public partial class DbService
                 else
                 {
                     // 2b. INSERT Parent
+                    parentId = Guid.CreateVersion7();
                     using (var cmd = new NpgsqlCommand(@"
-                        INSERT INTO ParentDocuments (FileName, FilePath, Metadata, DataSetId, Sentences, ProcessedAt)
-                        VALUES (@fn, @fp, @meta::jsonb, @dataSetId, @sentences::jsonb, NOW()) RETURNING Id;", conn, trans))
+                        INSERT INTO ParentDocuments (Id, FileName, FilePath, Metadata, DataSetId, Sentences, SentenceIds, ProcessedAt)
+                        VALUES (@id, @fn, @fp, @meta::jsonb, @dataSetId, @sentences::jsonb, @sids::jsonb, NOW());", conn, trans))
                     {
+                        cmd.Parameters.AddWithValue("id", parentId);
                         cmd.Parameters.AddWithValue("fn", fileName);
                         cmd.Parameters.AddWithValue("fp", filePath);
                         cmd.Parameters.AddWithValue("meta", json);
                         cmd.Parameters.AddWithValue("sentences", sentencesJson);
+                        cmd.Parameters.AddWithValue("sids", (object?)sentenceIdsJson ?? DBNull.Value);
                         cmd.Parameters.AddWithValue("dataSetId", (object?)dataSetId ?? DBNull.Value);
-                        parentId = (int)cmd.ExecuteScalar()!;
+                        cmd.ExecuteNonQuery();
                     }
                 }
 
@@ -824,14 +828,14 @@ public partial class DbService
 
             // Look up parent by FileName (OS-independent)
             string fileName = ExtractFileName(parentFilePath);
-            var parentIds = new List<int>();
+            var parentIds = new List<Guid>();
             using (var cmd = new NpgsqlCommand(
                 "SELECT Id FROM ParentDocuments WHERE FileName = @fn;", conn))
             {
                 cmd.Parameters.AddWithValue("fn", fileName);
                 using var reader = cmd.ExecuteReader();
                 while (reader.Read())
-                    parentIds.Add(reader.GetInt32(0));
+                    parentIds.Add(reader.GetGuid(0));
             }
             if (parentIds.Count == 0) return;
 
@@ -1061,22 +1065,23 @@ public partial class DbService
         if (namesFilter) extraWhere.Add(NamesAndClause("p"));
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
-        // Full-text search across DocumentChunks (index-backed) AND metadata (ILIKE)
-        // Uses COUNT(*) ranking instead of ts_rank to avoid detoasting all chunk text
+        // Full-text search across Sentences JSONB AND metadata
+        // Option A: Search DocumentChunks for text matches
         string sql = $@"
             WITH text_matches AS (
-                SELECT c.ParentId, COUNT(*) as score
+                SELECT c.ParentId,
+                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score,
+                       (ARRAY_AGG(c.TextContent ORDER BY ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query)) DESC))[1] as best_chunk
                 FROM DocumentChunks c
-                {(datasetFilter ? "JOIN ParentDocuments p2 ON c.ParentId = p2.Id" : "")}
+                JOIN ParentDocuments p2 ON c.ParentId = p2.Id
                 {extraJoin}
-                WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                   OR c.TextContent ILIKE @pattern)
                 {extraWhereStr}
                 GROUP BY c.ParentId
-                ORDER BY score DESC
-                LIMIT 500
             ),
             metadata_matches AS (
-                SELECT p.Id as ParentId, 0.5::bigint as score
+                SELECT p.Id as ParentId, 0.5 as score, '' as best_chunk
                 FROM ParentDocuments p
                 {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
@@ -1088,11 +1093,11 @@ public partial class DbService
                 {(namesFilter ? "AND " + NamesAndClause("p") : "")}
             ),
             matching_docs AS (
-                SELECT ParentId, MAX(score) as score
+                SELECT ParentId, MAX(score) as score, MAX(best_chunk) as best_chunk
                 FROM (
-                    SELECT ParentId, score FROM text_matches
+                    SELECT ParentId, score, best_chunk FROM text_matches
                     UNION ALL
-                    SELECT ParentId, score FROM metadata_matches
+                    SELECT ParentId, score, best_chunk FROM metadata_matches
                 ) combined
                 GROUP BY ParentId
                 ORDER BY score DESC
@@ -1102,9 +1107,7 @@ public partial class DbService
                    p.FilePath,
                    d.pdffolder as PdfFolder,
                    COALESCE(d.imagefolder, d.pdffolder) as ImageFolder,
-                   (SELECT c.TextContent FROM DocumentChunks c WHERE c.ParentId = p.Id
-                    AND to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
-                    LIMIT 1) as FullText,
+                   COALESCE(NULLIF(md.best_chunk, ''), (SELECT string_agg(elem, ' ') FROM jsonb_array_elements_text(p.Sentences) elem)) as FullText,
                    md.score,
                    (p.Metadata->>'DeducedDate')::timestamp as DocDate,
                    (p.Metadata->>'PageCount')::int as PageCount,
@@ -1124,7 +1127,6 @@ public partial class DbService
         ";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = DbCommandTimeout;
         cmd.Parameters.AddWithValue("query", query);
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (limit > 0) cmd.Parameters.AddWithValue("limit", limit);
@@ -1356,7 +1358,7 @@ public partial class DbService
         var countSql = $@"SELECT COUNT(*) FROM ParentDocuments p
             LEFT JOIN DataSets d ON p.DataSetId = d.Id {whereClause}";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = DbCommandTimeout;
+        countCmd.CommandTimeout = 120;
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
@@ -1387,7 +1389,7 @@ public partial class DbService
             OFFSET @skip LIMIT @take;";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = DbCommandTimeout;
+        cmd.CommandTimeout = 120;
         cmd.Parameters.AddWithValue("skip", skip);
         cmd.Parameters.AddWithValue("take", take);
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
@@ -1414,19 +1416,20 @@ public partial class DbService
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
         // CTE that finds all matching doc IDs with scores
-        // Uses COUNT(*) ranking instead of ts_rank to avoid detoasting all chunk text
         var matchesCte = $@"
             WITH text_matches AS (
-                SELECT c.ParentId, COUNT(*) as score
+                SELECT c.ParentId,
+                       MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
                 FROM DocumentChunks c
-                {(datasetFilter ? "JOIN ParentDocuments p ON c.ParentId = p.Id" : "")}
+                JOIN ParentDocuments p ON c.ParentId = p.Id
                 {extraJoin}
-                WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                   OR c.TextContent ILIKE @pattern)
                 {extraWhereStr}
                 GROUP BY c.ParentId
             ),
             metadata_matches AS (
-                SELECT p.Id as ParentId, 0.5::bigint as score
+                SELECT p.Id as ParentId, 0.5 as score
                 FROM ParentDocuments p
                 {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                 WHERE (p.Metadata->>'Title' ILIKE @pattern
@@ -1450,7 +1453,7 @@ public partial class DbService
         // Count query
         var countSql = matchesCte + " SELECT COUNT(*) FROM matching_docs;";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = DbCommandTimeout;
+        countCmd.CommandTimeout = 120;
         countCmd.Parameters.AddWithValue("query", query);
         countCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
@@ -1483,7 +1486,7 @@ public partial class DbService
             OFFSET @skip LIMIT @take;";
 
         using var dataCmd = new NpgsqlCommand(dataSql, conn);
-        dataCmd.CommandTimeout = DbCommandTimeout;
+        dataCmd.CommandTimeout = 120;
         dataCmd.Parameters.AddWithValue("query", query);
         dataCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         dataCmd.Parameters.AddWithValue("skip", skip);
@@ -1543,7 +1546,7 @@ public partial class DbService
         // Count
         var countSql = matchesCte + " SELECT COUNT(*) FROM matching_docs;";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = DbCommandTimeout;
+        countCmd.CommandTimeout = 120;
         countCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
@@ -1575,7 +1578,7 @@ public partial class DbService
             OFFSET @skip LIMIT @take;";
 
         using var dataCmd = new NpgsqlCommand(dataSql, conn);
-        dataCmd.CommandTimeout = DbCommandTimeout;
+        dataCmd.CommandTimeout = 120;
         dataCmd.Parameters.AddWithValue("pattern", $"%{query}%");
         dataCmd.Parameters.AddWithValue("skip", skip);
         dataCmd.Parameters.AddWithValue("take", take);
@@ -1592,7 +1595,7 @@ public partial class DbService
     /// Lightweight search that returns only matching document IDs (no joins, no Sentences aggregation).
     /// Used by the caching layer — run once, cache the IDs, hydrate pages from cache.
     /// </summary>
-    public int[] SearchMatchingIds(string query, bool exactMatch,
+    public Guid[] SearchMatchingIds(string query, bool exactMatch,
         List<string>? datasetNames = null, List<string>? nameValues = null)
     {
         using var conn = _dataSource.OpenConnection();
@@ -1645,15 +1648,15 @@ public partial class DbService
             cmd.Parameters.AddWithValue("pattern", $"%{query}%");
             if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
             if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
-            var ids = new List<int>();
+            var ids = new List<Guid>();
             using var reader = cmd.ExecuteReader();
-            while (reader.Read()) ids.Add(reader.GetInt32(0));
+            while (reader.Read()) ids.Add(reader.GetGuid(0));
             return ids.ToArray();
         }
         else
         {
             // HYBRID RRF for Paged IDs
-            var vectorIds = new List<int>();
+            var vectorIds = new List<Guid>();
             if (_embeddingService != null)
             {
                 try
@@ -1676,26 +1679,26 @@ public partial class DbService
                     using var reader = cmd.ExecuteReader();
                     while (reader.Read())
                     {
-                        var id = reader.GetInt32(0);
+                        var id = reader.GetGuid(0);
                         if (!vectorIds.Contains(id)) vectorIds.Add(id);
                     }
                 }
                 catch (Exception ex) { Console.WriteLine($"Vector match ids failed: {ex.Message}"); }
             }
 
-            var textIds = new List<int>();
+            var textIds = new List<Guid>();
             var textSql = $@"
                 WITH text_matches AS (
-                    SELECT c.ParentId, COUNT(*) as score
+                    SELECT c.ParentId, MAX(ts_rank(to_tsvector('english', c.TextContent), plainto_tsquery('english', @query))) as score
                     FROM DocumentChunks c
-                    {(datasetFilter ? "JOIN ParentDocuments p ON c.ParentId = p.Id" : "")}
+                    JOIN ParentDocuments p ON c.ParentId = p.Id
                     {extraJoin}
-                    WHERE to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query)
+                    WHERE (to_tsvector('english', c.TextContent) @@ plainto_tsquery('english', @query) OR c.TextContent ILIKE @pattern)
                     {extraWhereStr}
                     GROUP BY c.ParentId
                 ),
                 metadata_matches AS (
-                    SELECT p.Id as ParentId, 0.5::bigint as score
+                    SELECT p.Id as ParentId, 0.5 as score
                     FROM ParentDocuments p
                     {(datasetFilter ? "JOIN DataSets dd2 ON p.DataSetId = dd2.Id" : "")}
                     WHERE (p.Metadata->>'Title' ILIKE @pattern OR p.Metadata->>'Names' ILIKE @pattern OR p.Metadata->>'FileName' ILIKE @pattern OR p.FileName ILIKE @pattern)
@@ -1717,11 +1720,11 @@ public partial class DbService
                 if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
                 if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
                 using var reader = cmd.ExecuteReader();
-                while (reader.Read()) textIds.Add(reader.GetInt32(0));
+                while (reader.Read()) textIds.Add(reader.GetGuid(0));
             }
 
             // Combine IDs using RRF
-            var rrfScores = new Dictionary<int, double>();
+            var rrfScores = new Dictionary<Guid, double>();
             const double k = 60.0;
             for (int i = 0; i < vectorIds.Count; i++) rrfScores[vectorIds[i]] = 1.0 / (k + i + 1);
             for (int i = 0; i < textIds.Count; i++)
@@ -1735,48 +1738,11 @@ public partial class DbService
     }
 
     /// <summary>
-    /// Lightweight filename-only search that returns matching document IDs.
-    /// Searches only the ParentDocuments.FileName column — skips text content, vector, and metadata.
-    /// Used when the "Filename" toggle is enabled in the search toolbar.
-    /// </summary>
-    public int[] SearchByFileNameIds(string query,
-        List<string>? datasetNames = null, List<string>? nameValues = null)
-    {
-        using var conn = _dataSource.OpenConnection();
-        var datasetFilter = datasetNames is { Count: > 0 };
-        var namesFilter = nameValues is { Count: > 0 };
-
-        var whereClauses = new List<string> { "p.FileName ILIKE @pattern" };
-        if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
-        if (namesFilter) whereClauses.Add(NamesAndClause("p"));
-        var whereClause = "WHERE " + string.Join(" AND ", whereClauses);
-
-        var sql = $@"
-            SELECT p.Id
-            FROM ParentDocuments p
-            LEFT JOIN DataSets d ON p.DataSetId = d.Id
-            {whereClause}
-            ORDER BY p.ProcessedAt DESC
-            LIMIT 50000;";
-
-        using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = DbCommandTimeout;
-        cmd.Parameters.AddWithValue("pattern", $"%{query}%");
-        if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
-        if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
-
-        var ids = new List<int>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read()) ids.Add(reader.GetInt32(0));
-        return ids.ToArray();
-    }
-
-    /// <summary>
     /// Lightweight query returning document IDs ordered by ProcessedAt DESC (no search predicates).
     /// Returns both the IDs (capped at 50K for cache) and the real total count for UI display.
     /// Used by the browse cache — run once, cache the IDs, hydrate pages via HydrateByIds.
     /// </summary>
-    public (int[] Ids, int TotalCount) GetBrowseDocumentIds(
+    public (Guid[] Ids, int TotalCount) GetBrowseDocumentIds(
         List<string>? datasetNames = null, List<string>? nameValues = null)
     {
         using var conn = _dataSource.OpenConnection();
@@ -1794,7 +1760,7 @@ public partial class DbService
         var countSql = $@"SELECT COUNT(*) FROM ParentDocuments p
             LEFT JOIN DataSets d ON p.DataSetId = d.Id {whereClause}";
         using var countCmd = new NpgsqlCommand(countSql, conn);
-        countCmd.CommandTimeout = DbCommandTimeout;
+        countCmd.CommandTimeout = 120;
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
@@ -1809,13 +1775,13 @@ public partial class DbService
             LIMIT 50000;";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = DbCommandTimeout;
+        cmd.CommandTimeout = 120;
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
 
-        var ids = new List<int>();
+        var ids = new List<Guid>();
         using var reader = cmd.ExecuteReader();
-        while (reader.Read()) ids.Add(reader.GetInt32(0));
+        while (reader.Read()) ids.Add(reader.GetGuid(0));
         return (ids.ToArray(), totalCount);
     }
 
@@ -1823,7 +1789,7 @@ public partial class DbService
     /// Hydrate full DocumentSearchResult rows for a page of IDs.
     /// Uses WHERE p.Id = ANY(@ids) + array_position to preserve the search-ranked order.
     /// </summary>
-    public List<DocumentSearchResult> HydrateByIds(int[] ids, string? query = null)
+    public List<DocumentSearchResult> HydrateByIds(Guid[] ids, string? query = null)
     {
         if (ids.Length == 0) return new List<DocumentSearchResult>();
 
@@ -1857,7 +1823,7 @@ public partial class DbService
             ORDER BY array_position(@ids, p.Id);";
 
         using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.CommandTimeout = DbCommandTimeout;
+        cmd.CommandTimeout = 120;
         cmd.Parameters.AddWithValue("ids", ids);
         if (!string.IsNullOrWhiteSpace(query)) cmd.Parameters.AddWithValue("query", query);
 
@@ -1866,7 +1832,7 @@ public partial class DbService
         while (reader.Read())
         {
             var result = ReadSearchResult(reader, idOffset: 1);
-            result.Id = reader.GetInt32(0);
+            result.Id = reader.GetGuid(0);
             results.Add(result);
         }
         return results;
@@ -1895,7 +1861,7 @@ public partial class DbService
 
             // Option B: Count total sentences across all documents
             using var cmdSentences = new NpgsqlCommand("SELECT COALESCE(SUM(jsonb_array_length(Sentences)), 0) FROM ParentDocuments WHERE Sentences IS NOT NULL", conn);
-            cmdSentences.CommandTimeout = DbCommandTimeout;
+            cmdSentences.CommandTimeout = 120;
             long sentences = (long)(cmdSentences.ExecuteScalar() ?? 0L);
 
             return (docs, images, sentences);
@@ -1966,7 +1932,7 @@ public partial class DbService
             ";
 
             using var cmd = new NpgsqlCommand(sql, conn);
-            cmd.CommandTimeout = DbCommandTimeout;
+            cmd.CommandTimeout = 120;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
@@ -2095,7 +2061,7 @@ public class DataSetStats
 /// </summary>
 public class DocumentSearchResult
 {
-    public int Id { get; set; }
+    public Guid Id { get; set; }
     public string FileName { get; set; } = "";
     public string? FilePath { get; set; }           // Legacy full path
     public string? PdfFolder { get; set; }          // Relative folder from datasets
@@ -2151,26 +2117,26 @@ public partial class DbService
     /// <summary>
     /// Get a batch of documents (Id, FilePath, Metadata JSON) for reprocessing.
     /// </summary>
-    public List<(int Id, string FilePath, string MetadataJson)> GetDocumentsForReprocessing(int limit = 500, int offset = 0)
+    public List<(Guid Id, string FilePath, string MetadataJson)> GetDocumentsForReprocessing(int limit = 500, int offset = 0)
     {
-        var results = new List<(int, string, string)>();
+        var results = new List<(Guid, string, string)>();
         try
         {
             using var conn = _dataSource.OpenConnection();
             using var cmd = new NpgsqlCommand(@"
-                SELECT Id, COALESCE(FileName, FilePath, ''), Metadata::text 
+                SELECT Id, COALESCE(FileName, FilePath, ''), Metadata::text
                 FROM ParentDocuments p
                 ORDER BY Id
                 LIMIT @limit OFFSET @offset;", conn);
             cmd.Parameters.AddWithValue("limit", limit);
             cmd.Parameters.AddWithValue("offset", offset);
-            cmd.CommandTimeout = DbCommandTimeout;
+            cmd.CommandTimeout = 120;
 
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
                 results.Add((
-                    reader.GetInt32(0),
+                    reader.GetGuid(0),
                     reader.GetString(1),
                     reader.IsDBNull(2) ? "" : reader.GetString(2)
                 ));
@@ -2186,7 +2152,7 @@ public partial class DbService
     /// <summary>
     /// Get the full text of a document by joining its Sentences JSONB array.
     /// </summary>
-    public string GetDocumentFullText(int parentId)
+    public string GetDocumentFullText(Guid parentId)
     {
         try
         {
@@ -2197,7 +2163,7 @@ public partial class DbService
                     (SELECT Sentences FROM ParentDocuments WHERE Id = @pid)
                 ) AS elem;", conn);
             cmd.Parameters.AddWithValue("pid", parentId);
-            cmd.CommandTimeout = DbCommandTimeout;
+            cmd.CommandTimeout = 30;
 
             var result = cmd.ExecuteScalar();
             return result as string ?? "";
@@ -2212,7 +2178,7 @@ public partial class DbService
     /// <summary>
     /// Update only the metadata JSONB for a document (no chunk changes).
     /// </summary>
-    public void UpdateDocumentMetadata(int parentId, string metadataJson)
+    public void UpdateDocumentMetadata(Guid parentId, string metadataJson)
     {
         try
         {
@@ -2236,9 +2202,9 @@ public partial class DbService
     /// Option B: Reads Sentences JSONB from ParentDocuments, concatenates for embedding text.
     /// Returns (DocId, SentencesText, FilePath).
     /// </summary>
-    public List<(int DocId, string SentencesText, string FilePath)> GetDocsWithoutEmbeddings(int limit = 1000)
+    public List<(Guid DocId, string SentencesText, string FilePath)> GetDocsWithoutEmbeddings(int limit = 1000)
     {
-        var results = new List<(int, string, string)>();
+        var results = new List<(Guid, string, string)>();
         try
         {
             using var conn = _dataSource.OpenConnection();
@@ -2253,12 +2219,12 @@ public partial class DbService
             ";
             using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("limit", limit);
-            cmd.CommandTimeout = DbCommandTimeout;
+            cmd.CommandTimeout = 120;
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
                 results.Add((
-                    reader.GetInt32(0),
+                    reader.GetGuid(0),
                     reader.IsDBNull(1) ? "" : reader.GetString(1),
                     reader.GetString(2)
                 ));
@@ -2274,7 +2240,7 @@ public partial class DbService
     /// <summary>
     /// Update the embedding vector for a document by Id.
     /// </summary>
-    public bool UpdateDocumentEmbedding(int docId, float[] embedding)
+    public bool UpdateDocumentEmbedding(Guid docId, float[] embedding)
     {
         try
         {
@@ -2305,7 +2271,7 @@ public partial class DbService
         {
             using var conn = _dataSource.OpenConnection();
             using var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM ParentDocuments WHERE Embedding IS NULL AND Sentences IS NOT NULL AND jsonb_array_length(Sentences) > 0;", conn);
-            cmd.CommandTimeout = DbCommandTimeout;
+            cmd.CommandTimeout = 120;
             return (long)(cmd.ExecuteScalar() ?? 0L);
         }
         catch (Exception ex)

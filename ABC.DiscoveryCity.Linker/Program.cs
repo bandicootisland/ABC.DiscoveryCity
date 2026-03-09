@@ -145,7 +145,7 @@ Console.WriteLine("Database initialized.");
 
 string sourceName = "DepartmentofJustice";
 string baseFilePath = System.IO.Path.GetDirectoryName(rootFolder.TrimEnd(System.IO.Path.DirectorySeparatorChar)) ?? "";
-int sourceId = dbService.GetOrCreateSource(sourceName, baseFilePath);
+Guid sourceId = dbService.GetOrCreateSource(sourceName, baseFilePath);
 
 // Create pipeline (fallback disabled when --extract-only)
 await using var pipeline = new PdfThumbnailPipeline(
@@ -158,7 +158,7 @@ int totalDone = 0, totalErr = 0;
 
 foreach (var (folderPath, dataSetName) in targetFolders)
 {
-    int dataSetId = dbService.GetOrCreateDataSet(sourceId, dataSetName);
+    Guid dataSetId = dbService.GetOrCreateDataSet(sourceId, dataSetName);
     Console.WriteLine($"\n--- Processing: {dataSetName} (Id: {dataSetId}) ---");
 
     var pdfFiles = Directory.GetFiles(folderPath, "*.pdf", SearchOption.AllDirectories);

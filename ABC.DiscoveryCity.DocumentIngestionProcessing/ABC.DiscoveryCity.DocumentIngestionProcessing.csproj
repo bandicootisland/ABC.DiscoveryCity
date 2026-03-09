@@ -13,6 +13,7 @@
 
 
   <ItemGroup>
+    <ProjectReference Include="..\ABC.DiscoveryCity.DevExpressProcessing\ABC.DiscoveryCity.DevExpressProcessing.csproj" />
     <ProjectReference Include="..\ABC.DiscoveryCity.TelerikProcessing\ABC.DiscoveryCity.TelerikProcessing.csproj" />
     <ProjectReference Include="..\ABC.DiscoveryCity.Words\ABC.DiscoveryCity.Words.csproj" />
     <ProjectReference Include="..\ABC.DiscoveryCity.Embeddings\ABC.DiscoveryCity.Embeddings.csproj" />
@@ -20,6 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="DocumentFormat.OpenXml" Version="3.4.1" />
     <PackageReference Include="Npgsql" Version="10.0.1" />
     <PackageReference Include="Pgvector" Version="0.3.2" />
   </ItemGroup>

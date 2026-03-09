@@ -1,4 +1,5 @@
-﻿using ABC.DiscoveryCity.Services;
+﻿using ABC.DiscoveryCity.DocumentProcessing.Shared;
+using ABC.DiscoveryCity.Services;
 using ABC.DiscoveryCity.TelerikProcessing;
 using ABC.DiscoveryCity.Words.Common;
 using System;

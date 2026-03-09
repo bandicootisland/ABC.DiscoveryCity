@@ -318,15 +318,15 @@ public class SearchController : ControllerBase
 
     private class SearchCacheEntry
     {
-        public int[] Ids { get; set; } = Array.Empty<int>();
-        public Dictionary<int, SearchResultDto> Records { get; } = new();
+        public Guid[] Ids { get; set; } = Array.Empty<Guid>();
+        public Dictionary<Guid, SearchResultDto> Records { get; } = new();
     }
 
     private class BrowseCacheEntry
     {
-        public int[] Ids { get; set; } = Array.Empty<int>();
+        public Guid[] Ids { get; set; } = Array.Empty<Guid>();
         public int TotalCount { get; set; }
-        public Dictionary<int, SearchResultDto> Records { get; } = new();
+        public Dictionary<Guid, SearchResultDto> Records { get; } = new();
     }
 
     private static string BuildCacheKey(string query, bool exactMatch,

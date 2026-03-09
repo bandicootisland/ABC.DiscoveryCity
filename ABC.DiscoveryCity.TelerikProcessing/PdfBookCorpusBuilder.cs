@@ -1,3 +1,4 @@
+using ABC.DiscoveryCity.DocumentProcessing.Shared;
 using ABC.WordCity.Words.Common;
 using ABC.WordCity.Words.Common.Layers;
 using System;
@@ -15,51 +16,6 @@ using Telerik.Windows.Documents.Fixed.Model.Text;
 
 namespace ABC.DiscoveryCity.TelerikProcessing
 {
-    // =========================================================================
-    // 1. DATA STRUCTURES
-    // =========================================================================
-
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    public readonly struct LayoutToken
-    {
-        public readonly int TextOffset;
-        public readonly int TextLength;
-        public readonly int PageIndex;
-        public readonly double X;
-        public readonly double Y;
-        public readonly double Width;
-        public readonly double FontSize;
-
-        public LayoutToken(int offset, int len, int page, double x, double y, double w, double fs)
-        {
-            TextOffset = offset; TextLength = len; PageIndex = page;
-            X = x; Y = y; Width = w; FontSize = fs;
-        }
-    }
-
-    public class BookCorpus
-    {
-        public char[] Content { get; }
-        public LayoutToken[] Layout { get; }
-        public WordLayers Layers { get; }
-        public ArtifactMarker[] Artifacts { get; }
-
-        public BookCorpus(BookRawBuffer buffer, WordLayers layers)
-        {
-            Content = buffer.Content ?? Array.Empty<char>();
-            Layout = buffer.Layout ?? Array.Empty<LayoutToken>();
-            Artifacts = buffer.Artifacts ?? Array.Empty<ArtifactMarker>();
-            Layers = layers ?? WordLayers.Empty;
-        }
-    }
-
-    public class BookRawBuffer
-    {
-        public char[] Content { get; set; } = Array.Empty<char>();
-        public LayoutToken[] Layout { get; set; } = Array.Empty<LayoutToken>();
-        public ArtifactMarker[] Artifacts { get; set; } = Array.Empty<ArtifactMarker>();
-    }
-
     public class CorpusBuilder
     {
         private WordLayers _layers = new WordLayers();
