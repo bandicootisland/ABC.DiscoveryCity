@@ -59,7 +59,8 @@ for (int i = 0; i < args.Length; i++)
     if (!args[i].StartsWith("--") && !int.TryParse(args[i], out _))
         positionalArgs.Add(args[i]);
 }
-string[] priorityDataSets = positionalArgs.Count > 0 ? positionalArgs.ToArray() : new[] { "DataSet 11" };
+bool explicitDataSets = positionalArgs.Count > 0;
+string[] priorityDataSets = explicitDataSets ? positionalArgs.ToArray() : new[] { "DataSet 12" };
 
 // Quick diagnostic: dump ImageSource internals for a PDF
 if (args.Any(a => a.Equals("--diag-image", StringComparison.OrdinalIgnoreCase)))
@@ -78,6 +79,134 @@ if (args.Length >= 2 && args[0].Equals("test-redaction", StringComparison.Ordina
     return;
 }
 
+if (args.Any(a => a.Equals("--alter-vectors", StringComparison.OrdinalIgnoreCase)))
+{
+    Console.WriteLine("=== ALTER VECTOR COLUMNS: 384 → 1024 ===\n");
+    using var conn = new Npgsql.NpgsqlConnection("Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo");
+    conn.Open();
+
+    // Step 1: Null out existing embeddings (can't ALTER with mismatched dimension data)
+    string[] clearSql = [
+        "UPDATE ParentDocuments SET Embedding = NULL WHERE Embedding IS NOT NULL",
+        "UPDATE DocumentChunks SET Embedding = NULL WHERE Embedding IS NOT NULL",
+    ];
+    foreach (var sql in clearSql)
+    {
+        using var cmd = new Npgsql.NpgsqlCommand(sql, conn);
+        cmd.CommandTimeout = 300;
+        int rows = cmd.ExecuteNonQuery();
+        Console.WriteLine($"  Cleared {rows} rows: {sql.Split(' ')[1]}");
+    }
+
+    // Step 2: Drop vector indexes (they reference the old dimension)
+    string[] dropIndexSql = [
+        "DROP INDEX IF EXISTS idx_documentchunks_embedding",
+        "DROP INDEX IF EXISTS idx_parentdocuments_embedding",
+        "DROP INDEX IF EXISTS idx_chunks_embedding_hnsw",
+        "DROP INDEX IF EXISTS idx_parent_embedding_hnsw",
+    ];
+    foreach (var sql in dropIndexSql)
+    {
+        using var cmd = new Npgsql.NpgsqlCommand(sql, conn);
+        cmd.ExecuteNonQuery();
+        Console.WriteLine($"  OK: {sql}");
+    }
+
+    // Step 3: ALTER parent tables only (partitions inherit automatically)
+    string[] alterSql = [
+        "ALTER TABLE ParentDocuments ALTER COLUMN Embedding TYPE vector(1024)",
+        "ALTER TABLE DocumentChunks ALTER COLUMN Embedding TYPE vector(1024)",
+    ];
+    foreach (var sql in alterSql)
+    {
+        try
+        {
+            using var cmd = new Npgsql.NpgsqlCommand(sql, conn);
+            cmd.CommandTimeout = 300;
+            cmd.ExecuteNonQuery();
+            Console.WriteLine($"  OK: {sql}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {sql} — {ex.Message}");
+        }
+    }
+
+    Console.WriteLine("\nDone. Run --embeddings-only to re-embed with mxbai-embed-large (1024-dim).");
+    return;
+}
+
+if (args.Any(a => a.Equals("--import-dictionary", StringComparison.OrdinalIgnoreCase)))
+{
+    Console.WriteLine("=== IMPORT DICTIONARY FROM BOOKCITY ===\n");
+
+    // BookCity DB
+    string[] bookCityCandidates = [
+        "Host=192.168.1.100;Port=5432;Database=bookcity;Username=bookcity;Password=bookcity_dev",
+    ];
+    string discoveryCityConn = "Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
+
+    string dictName = "oed_cd_v4";
+
+    // Read from BookCity — try each connection candidate
+    Console.WriteLine($"  Reading '{dictName}' from BookCity...");
+    byte[]? xlsxData = null;
+    foreach (var bookCityConn in bookCityCandidates)
+    {
+        try
+        {
+            using var srcConn = new Npgsql.NpgsqlConnection(bookCityConn);
+            srcConn.Open();
+            using var cmd = new Npgsql.NpgsqlCommand("SELECT package_data FROM dictionary_packages WHERE dictionary_name = @name;", srcConn);
+            cmd.Parameters.AddWithValue("name", dictName);
+            var result = cmd.ExecuteScalar();
+            if (result is byte[] data)
+            {
+                xlsxData = data;
+                Console.WriteLine($"  Connected via: {bookCityConn.Split(';')[1]}");
+                break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Tried {bookCityConn.Split(';')[1]} — {ex.Message.Split('\n')[0]}");
+        }
+    }
+
+    if (xlsxData == null)
+    {
+        Console.WriteLine($"  ERROR: Dictionary '{dictName}' not found in any BookCity database.");
+        Console.WriteLine("  Make sure BookCity has the OED loaded. Check: SELECT dictionary_name FROM dictionary_packages;");
+        return;
+    }
+
+    Console.WriteLine($"  Loaded {xlsxData.Length / 1024.0 / 1024.0:F2} MB from BookCity");
+
+    // Ensure DiscoveryCity has the table
+    var db = new DbService(null);
+    db.InitDb();
+
+    // Write to DiscoveryCity
+    Console.WriteLine($"  Writing to DiscoveryCity...");
+    using (var dstConn = new Npgsql.NpgsqlConnection(discoveryCityConn))
+    {
+        dstConn.Open();
+        using var cmd = new Npgsql.NpgsqlCommand(@"
+            INSERT INTO dictionary_packages (id, dictionary_name, package_data)
+            VALUES (@id, @name, @data)
+            ON CONFLICT (dictionary_name) DO UPDATE SET
+                package_data = EXCLUDED.package_data,
+                updated_at = NOW();", dstConn);
+        cmd.Parameters.AddWithValue("id", Guid.CreateVersion7());
+        cmd.Parameters.AddWithValue("name", dictName);
+        cmd.Parameters.AddWithValue("data", xlsxData);
+        cmd.ExecuteNonQuery();
+    }
+
+    Console.WriteLine($"  Dictionary '{dictName}' imported successfully ({xlsxData.Length / 1024.0 / 1024.0:F2} MB).");
+    return;
+}
+
 if (args.Any(a => a.Equals("--inspect", StringComparison.OrdinalIgnoreCase)))
 {
     Console.WriteLine("=== DATABASE INSPECTION ===\n");
@@ -93,6 +222,15 @@ if (args.Any(a => a.Equals("--inspect", StringComparison.OrdinalIgnoreCase)))
             Console.WriteLine($"  {tbl}: {cmd.ExecuteScalar()} rows");
         } catch { Console.WriteLine($"  {tbl}: (not found)"); }
     }
+
+    // Embedding counts
+    Console.WriteLine("\n--- Embeddings ---");
+    using (var cmd = new Npgsql.NpgsqlCommand(@"
+        SELECT 'ParentDocs with embedding' as metric, count(*) FROM ParentDocuments WHERE Embedding IS NOT NULL
+        UNION ALL SELECT 'ParentDocs without embedding', count(*) FROM ParentDocuments WHERE Embedding IS NULL
+        UNION ALL SELECT 'Chunks with embedding', count(*) FROM DocumentChunks WHERE Embedding IS NOT NULL
+        UNION ALL SELECT 'Chunks without embedding', count(*) FROM DocumentChunks WHERE Embedding IS NULL", conn))
+    using (var r = cmd.ExecuteReader()) { while (r.Read()) Console.WriteLine($"  {r.GetString(0)}: {r.GetInt64(1)}"); }
 
     // Column types for Sources (verify UUID)
     Console.WriteLine("\n--- Sources schema ---");
@@ -130,6 +268,35 @@ if (args.Any(a => a.Equals("--inspect", StringComparison.OrdinalIgnoreCase)))
                 Console.WriteLine($"      Text={sent}");
             }
         } else Console.WriteLine("  (no documents with SentenceIds)");
+    }
+
+    // Vector column dimensions
+    Console.WriteLine("\n--- Vector columns ---");
+    using (var cmd = new Npgsql.NpgsqlCommand(@"
+        SELECT table_name, column_name, udt_name,
+               CASE WHEN udt_name = 'vector' THEN
+                 (SELECT atttypmod FROM pg_attribute a JOIN pg_class c ON a.attrelid=c.oid
+                  WHERE c.relname=columns.table_name AND a.attname=columns.column_name)
+               END as dim
+        FROM information_schema.columns
+        WHERE table_schema='public' AND udt_name='vector'
+        ORDER BY table_name", conn))
+    using (var r = cmd.ExecuteReader()) {
+        while (r.Read()) {
+            var dim = r.IsDBNull(3) ? "?" : r.GetInt32(3).ToString();
+            Console.WriteLine($"  {r.GetString(0)}.{r.GetString(1)}: vector({dim})");
+        }
+    }
+
+    // Dictionary packages
+    Console.WriteLine("\n--- Dictionary Packages ---");
+    using (var cmd = new Npgsql.NpgsqlCommand("SELECT dictionary_name, entry_count, pg_size_pretty(length(package_data)::bigint) as size, created_at FROM dictionary_packages ORDER BY dictionary_name", conn))
+    using (var r = cmd.ExecuteReader()) {
+        if (!r.HasRows) Console.WriteLine("  (none — run --import-dictionary to load OED from BookCity)");
+        while (r.Read()) {
+            var entries = r.IsDBNull(1) ? "?" : r.GetInt32(1).ToString("N0");
+            Console.WriteLine($"  {r.GetString(0)}: {entries} entries, {r.GetString(2)}, imported {r.GetDateTime(3):yyyy-MM-dd HH:mm}");
+        }
     }
 
     // DataSet breakdown
@@ -523,11 +690,14 @@ foreach (var priorityDataSet in priorityDataSets)
     }
 }
 
-// Add remaining folders (natural numeric sort so DataSet 9 < DataSet 10)
-foreach (var dir in subDirs
-    .OrderBy(d => Regex.Replace(Path.GetFileName(d) ?? "", @"\d+", m => m.Value.PadLeft(10, '0'))))
+// Add remaining folders only when no explicit datasets were specified on the command line
+if (!explicitDataSets)
 {
-    if (!addedFolders.Contains(dir)) targetFolders.Add(dir);
+    foreach (var dir in subDirs
+        .OrderBy(d => Regex.Replace(Path.GetFileName(d) ?? "", @"\d+", m => m.Value.PadLeft(10, '0'))))
+    {
+        if (!addedFolders.Contains(dir)) targetFolders.Add(dir);
+    }
 }
 
 if (targetFolders.Count == 0) targetFolders.Add(rootFolder);
@@ -563,7 +733,7 @@ foreach (var folder in targetFolders)
         .ToArray();
 
     // Process files concurrently using pipeline
-    int maxDegreeOfParallelism = 5;
+    int maxDegreeOfParallelism = 1;
     var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism };
     await Parallel.ForEachAsync(allFiles, parallelOptions, async (filePath, ct) =>
     {
@@ -598,7 +768,9 @@ foreach (var folder in targetFolders)
                 .AddStep(new LoadDocumentStep())
                 .AddStep(new TelerikCorpusStep())
                 .AddStep(new DevExpressCorpusStep())
+                .AddStep(new WordSplitStep())
                 .AddStep(new AssembleDocumentStep())
+                .AddStep(new TextEnhanceStep())
                 .AddStep(new MetadataExtractionStep())
                 .AddStep(new SentenceIdStep())
                 .AddStep(new ThumbnailStep())

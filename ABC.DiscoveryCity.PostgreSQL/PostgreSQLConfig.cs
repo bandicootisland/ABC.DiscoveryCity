@@ -11,9 +11,9 @@ public class PostgreSQLConfig
     public string ConnectionString { get; set; } = string.Empty;
 
     /// <summary>
-    /// Dimension of vector embeddings (default 384 for MiniLM).
+    /// Dimension of vector embeddings (default 1024 for mxbai-embed-large).
     /// </summary>
-    public int VectorDimension { get; set; } = 384;
+    public int VectorDimension { get; set; } = 1024;
 
     /// <summary>
     /// Command timeout in seconds for long-running operations.

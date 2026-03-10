@@ -60,9 +60,9 @@ namespace ABC.DiscoveryCity.TelerikProcessing
                 var imgMeta = _tokenLayers.GetImage(i);
                 if (!imgMeta.IsEmpty)
                 {
-                    // Use the token text which contains DSL format [image.(w,h)] from SmartFragmentBuilder
+                    // Use the token text which contains DSL format [image.sz(...)] from SmartFragmentBuilder
                     string imageMarker = new string(allText.Slice(curr.TextOffset, curr.TextLength).Span);
-                    if (string.IsNullOrEmpty(imageMarker)) imageMarker = "[image.(0,0)]";
+                    if (string.IsNullOrEmpty(imageMarker)) imageMarker = "[image.sz(0,0,0,0,?,0KB,p0)]";
                     AddWord(imageMarker);
                     if (ResultWords.Count > 0)
                     {

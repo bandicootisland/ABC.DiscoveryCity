@@ -13,7 +13,7 @@ public class OllamaEmbeddingService : IEmbeddingService
     private readonly string _modelName;
 
     /// <summary>
-    /// Dimension of embeddings (384 for all-minilm, 768 for nomic-embed-text).
+    /// Dimension of embeddings (1024 for mxbai-embed-large, 384 for all-minilm).
     /// </summary>
     public int Dimension { get; }
 
@@ -22,13 +22,13 @@ public class OllamaEmbeddingService : IEmbeddingService
     /// </summary>
     /// <param name="httpClient">HttpClient (optional, creates one if null)</param>
     /// <param name="baseUrl">Ollama base URL (default: http://localhost:11434)</param>
-    /// <param name="modelName">Model name (default: all-minilm)</param>
-    /// <param name="dimension">Expected dimension (default: 384)</param>
+    /// <param name="modelName">Model name (default: mxbai-embed-large)</param>
+    /// <param name="dimension">Expected dimension (default: 1024)</param>
     public OllamaEmbeddingService(
-        HttpClient? httpClient = null, 
+        HttpClient? httpClient = null,
         string baseUrl = "http://localhost:11434",
-        string modelName = "all-minilm:latest", 
-        int dimension = 384)
+        string modelName = "mxbai-embed-large:latest",
+        int dimension = 1024)
     {
         _httpClient = httpClient ?? new HttpClient { BaseAddress = new Uri(baseUrl) };
         if (_httpClient.BaseAddress == null)
@@ -42,8 +42,8 @@ public class OllamaEmbeddingService : IEmbeddingService
     /// <inheritdoc/>
     public async Task<float[]> GetEmbeddingAsync(string text)
     {
-        // MiniLM has limited context window (~256 tokens), truncate to ~500 chars
-        string truncatedText = text.Length > 500 ? text.Substring(0, 500) : text;
+        // mxbai-embed-large supports 512 tokens, truncate to ~2000 chars
+        string truncatedText = text.Length > 2000 ? text.Substring(0, 2000) : text;
         
         var requestObj = new { model = _modelName, prompt = truncatedText };
         var jsonContent = new StringContent(

@@ -26,11 +26,23 @@ public class MetadataExtractionStep : IIngestionStep
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Returns the best available text for metadata extraction:
+    /// enhanced (MIME-cleaned) if available, otherwise raw FullText.
+    /// </summary>
+    private static string GetTextForAnalysis(IngestionContext ctx)
+    {
+        if (ctx.EnhancedSentences != null && ctx.EnhancedSentences.Count > 0)
+            return string.Join(" ", ctx.EnhancedSentences);
+        return ctx.FullText;
+    }
+
     private void BuildPdfMetadata(IngestionContext ctx)
     {
-        var deducedDate = MetadataExtractors.DeduceDateFromText(ctx.FullText);
-        var deducedTitle = MetadataExtractors.DeduceTitleFromText(ctx.FullText, Path.GetFileNameWithoutExtension(ctx.FilePath));
-        var (extractedNames, extractedTerms) = MetadataExtractors.ExtractNamesAndTerms(ctx.FullText);
+        var analysisText = GetTextForAnalysis(ctx);
+        var deducedDate = MetadataExtractors.DeduceDateFromText(analysisText);
+        var deducedTitle = MetadataExtractors.DeduceTitleFromText(analysisText, Path.GetFileNameWithoutExtension(ctx.FilePath));
+        var (extractedNames, extractedTerms) = MetadataExtractors.ExtractNamesAndTerms(analysisText);
 
         var fileInfo = new FileInfo(ctx.FilePath);
         int wordCount = string.IsNullOrWhiteSpace(ctx.FullText)
@@ -73,7 +85,8 @@ public class MetadataExtractionStep : IIngestionStep
     private void BuildSpreadsheetMetadata(IngestionContext ctx)
     {
         var result = ctx.SpreadsheetResult!;
-        var (extractedNames, extractedTerms) = MetadataExtractors.ExtractNamesAndTerms(ctx.FullText);
+        var analysisText = GetTextForAnalysis(ctx);
+        var (extractedNames, extractedTerms) = MetadataExtractors.ExtractNamesAndTerms(analysisText);
         var fileInfo = new FileInfo(ctx.FilePath);
         int wordCount = string.IsNullOrWhiteSpace(ctx.FullText)
             ? 0

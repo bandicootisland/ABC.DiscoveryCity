@@ -26,6 +26,12 @@ public partial class DbService
     /// </summary>
     public static string ExtractFileName(string filePath) => System.IO.Path.GetFileName(filePath);
 
+    /// <summary>
+    /// Creates a new NpgsqlConnection for use by pipeline steps that need direct DB access.
+    /// Caller is responsible for opening and disposing the connection.
+    /// </summary>
+    public NpgsqlConnection CreateConnection() => _dataSource.CreateConnection();
+
     // Cached basepaths from filesources table (loaded once at startup)
     private static string? _windowsBasePath;
     private static string? _linuxBasePath;
@@ -259,6 +265,19 @@ public partial class DbService
                 // Ensure SentenceIds column on ParentDocuments (UUIDv8)
                 using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS SentenceIds JSONB;", conn)) cmd.ExecuteNonQuery();
 
+                // Ensure dictionary_packages table exists (for word splitting)
+                using (var cmd = new NpgsqlCommand(@"
+                    CREATE TABLE IF NOT EXISTS dictionary_packages (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        dictionary_name TEXT NOT NULL UNIQUE,
+                        version TEXT,
+                        entry_count INTEGER,
+                        package_data BYTEA NOT NULL,
+                        source_format TEXT DEFAULT 'xlsx',
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    );", conn)) cmd.ExecuteNonQuery();
+
                 Console.WriteLine("Schema migrations complete.");
                 return;
             }
@@ -325,7 +344,7 @@ public partial class DbService
             // Option B: Add Sentences JSONB + Embedding columns to ParentDocuments
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Sentences JSONB;", conn)) cmd.ExecuteNonQuery();
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS SentenceIds JSONB;", conn)) cmd.ExecuteNonQuery();
-            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Embedding vector(384);", conn)) cmd.ExecuteNonQuery();
+            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Embedding vector(1024);", conn)) cmd.ExecuteNonQuery();
 
             // 5. Create DocumentChunks Table with HASH Partitioning (4 partitions for parallel vector search)
             Console.WriteLine("Creating DocumentChunks partitioned table...");
@@ -346,7 +365,7 @@ public partial class DbService
                         ParentId UUID NOT NULL,
                         ChunkIndex INT,
                         TextContent TEXT,
-                        Embedding vector(384),
+                        Embedding vector(1024),
                         CreatedAt TIMESTAMPTZ DEFAULT NOW(),
                         PRIMARY KEY (Id, ParentId)
                     ) PARTITION BY HASH (ParentId);
@@ -386,6 +405,7 @@ public partial class DbService
                     FileName TEXT,
                     Width INT,
                     Height INT,
+                    ImageData BYTEA,
                     CreatedAt TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE(ParentId, ImageSize)
                 );
@@ -400,7 +420,21 @@ public partial class DbService
                     END IF;
                 END $$;", conn)) cmd.ExecuteNonQuery();
 
-            // 7. Create Indexes (skip if already exist)
+            // 7. Create Dictionary Packages Table (for word splitting)
+            Console.WriteLine("Creating dictionary_packages table...");
+            using (var cmd = new NpgsqlCommand(@"
+                CREATE TABLE IF NOT EXISTS dictionary_packages (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    dictionary_name TEXT NOT NULL UNIQUE,
+                    version TEXT,
+                    entry_count INTEGER,
+                    package_data BYTEA NOT NULL,
+                    source_format TEXT DEFAULT 'xlsx',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );", conn)) cmd.ExecuteNonQuery();
+
+            // 8. Create Indexes (skip if already exist)
             int indexCount = 0;
             using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM pg_indexes WHERE indexname LIKE 'idx_chunks_%' OR indexname LIKE 'idx_parent_%';", conn))
             {
@@ -776,15 +810,14 @@ public partial class DbService
                 // 3. Populate Chunks (Option A)
                 if (cleanSentences.Count > 0)
                 {
-                    var chunks = GroupSentencesIntoChunks(cleanSentences, targetLength: 1000);
+                    var chunks = GroupSentencesIntoChunks(cleanSentences, targetLength: 2000);
                     int chunkIdx = 0;
                     foreach (var chunkText in chunks)
                     {
                         float[]? chunkEmbedding = null;
                         if (_embeddingService != null)
                         {
-                            try { chunkEmbedding = _embeddingService.GetEmbeddingAsync(chunkText).GetAwaiter().GetResult(); }
-                            catch { /* embedding error - skip vector info for this chunk */ }
+                            chunkEmbedding = GetEmbeddingWithRetry(chunkText, maxRetries: 3);
                         }
 
                         using (var cmd = new NpgsqlCommand(@"
@@ -830,6 +863,42 @@ public partial class DbService
         }
         if (currentChunk.Length > 0) chunks.Add(currentChunk.ToString().Trim());
         return chunks;
+    }
+
+    /// <summary>
+    /// Gets an embedding with exponential backoff retry.
+    /// Falls back to truncated text if the full chunk exceeds the model's token limit.
+    /// </summary>
+    private float[]? GetEmbeddingWithRetry(string text, int maxRetries = 3)
+    {
+        if (_embeddingService == null) return null;
+
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                return _embeddingService.GetEmbeddingAsync(text).GetAwaiter().GetResult();
+            }
+            catch (Exception ex) when (attempt < maxRetries)
+            {
+                int delayMs = 500 * (1 << attempt); // 500ms, 1s, 2s
+                Console.WriteLine($"  [Embedding] Retry {attempt + 1}/{maxRetries} in {delayMs}ms: {ex.Message.Split('\n')[0]}");
+                Thread.Sleep(delayMs);
+
+                // On second retry, try truncating — model may have a token limit
+                if (attempt == 1 && text.Length > 1500)
+                {
+                    text = text[..1500];
+                    Console.WriteLine($"  [Embedding] Truncated to {text.Length} chars for retry");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [Embedding] Failed after {maxRetries} retries: {ex.Message.Split('\n')[0]}");
+                return null;
+            }
+        }
+        return null;
     }
 
     /// <summary>
