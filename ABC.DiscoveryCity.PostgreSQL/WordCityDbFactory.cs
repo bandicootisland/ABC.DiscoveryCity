@@ -29,7 +29,7 @@ public static class WordCityDbFactory
         {
             ConnectionString = configuration.GetConnectionString("WordCity")
                 ?? throw new InvalidOperationException("ConnectionStrings:WordCity not found in configuration"),
-            VectorDimension = configuration.GetValue("PostgreSQL:VectorDimension", 384),
+            VectorDimension = configuration.GetValue("PostgreSQL:VectorDimension", 1024),
             CommandTimeout = configuration.GetValue("PostgreSQL:CommandTimeout", 300),
             MaxPoolSize = configuration.GetValue("PostgreSQL:MaxPoolSize", 20)
         };
@@ -40,7 +40,7 @@ public static class WordCityDbFactory
     /// <summary>
     /// Create a WordCityDb instance from an explicit connection string.
     /// </summary>
-    public static WordCityDb Create(string connectionString, int vectorDimension = 384)
+    public static WordCityDb Create(string connectionString, int vectorDimension = 1024)
     {
         var config = new PostgreSQLConfig
         {

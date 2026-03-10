@@ -3,7 +3,7 @@ CREATE TABLE smart_paragraphs (
     book_id INT NOT NULL,
     ordinal INT NOT NULL,
     dsl_text JSONB NOT NULL,
-    embedding vector(384),
+    embedding vector(1024),
     PRIMARY KEY (book_id, id)
 ) PARTITION BY LIST (book_id);
 

@@ -15,6 +15,10 @@ public static class MetadataExtractors
         var standardPatterns = new[]
         {
             @"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b",
+            // Email header: "07 Jul 2011", "28 Oct 2016", "3 Jan 2015"
+            @"\b\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4}\b",
+            // Email header reversed: "Jul 07, 2011", "Oct 28, 2016"
+            @"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2},?\s+\d{4}\b",
             @"\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b",
             @"\b\d{4}-\d{2}-\d{2}\b"
         };

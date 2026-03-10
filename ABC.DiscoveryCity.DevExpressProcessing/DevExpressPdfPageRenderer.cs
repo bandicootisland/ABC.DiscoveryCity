@@ -43,18 +43,31 @@ public class DevExpressPdfPageRenderer
 
     public byte[]? RenderFirstPage(byte[] pdfBytes, float imageScaleFactor = 0.5f)
     {
+        return RenderSinglePage(pdfBytes, 1, imageScaleFactor);
+    }
+
+    public byte[]? RenderSinglePage(byte[] pdfBytes, int pageNumber, float imageScaleFactor = 0.5f)
+    {
         using var msPdf = new MemoryStream(pdfBytes);
         using var processor = new PdfDocumentProcessor();
         processor.LoadDocument(msPdf);
 
-        if (processor.Document.Pages.Count == 0) return null;
+        if (pageNumber < 1 || pageNumber > processor.Document.Pages.Count) return null;
 
         int dpi = (int)Math.Max(72, Math.Round(96.0 * imageScaleFactor));
         var renderParams = PdfPageRenderingParameters.CreateWithResolution(dpi);
 
-        using var bitmap = processor.CreateDXBitmap(1, renderParams);
+        using var bitmap = processor.CreateDXBitmap(pageNumber, renderParams);
         using var ms = new MemoryStream();
         bitmap.Save(ms, DevExpress.Drawing.DXImageFormat.Png);
         return ms.ToArray();
+    }
+
+    public int GetPageCount(byte[] pdfBytes)
+    {
+        using var msPdf = new MemoryStream(pdfBytes);
+        using var processor = new PdfDocumentProcessor();
+        processor.LoadDocument(msPdf);
+        return processor.Document.Pages.Count;
     }
 }

@@ -24,8 +24,14 @@ public class XlsxBundleStep : IIngestionStep
         if (File.Exists(htmlPath))
             htmlContent = File.ReadAllText(htmlPath);
 
+        // Small PDFs: embed source PDF (no page images were rendered).
+        // Large PDFs: page images were rendered by PageImagesStep — embed those instead.
+        byte[]? pdfForBundle = ctx.RenderedPages.Count == 0
+            ? (ctx.PdfBytes ?? File.ReadAllBytes(ctx.FilePath))
+            : null;
+
         XlsxBundleWriter.Write(xlsxPath, ctx.Metadata, ctx.DisplaySentences, ctx.RenderedPages, htmlContent,
-            ctx.SentenceIds.Count > 0 ? ctx.SentenceIds : null);
+            ctx.SentenceIds.Count > 0 ? ctx.SentenceIds : null, pdfForBundle);
         Console.WriteLine($"  XLSX bundle: {baseName}.xlsx");
 
         return Task.CompletedTask;

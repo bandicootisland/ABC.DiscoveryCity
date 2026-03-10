@@ -1,4 +1,7 @@
+using ABC.DiscoveryCity.DevExpressProcessing;
 using ABC.DiscoveryCity.TelerikProcessing;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Processing;
 
 namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline.Steps;
 
@@ -32,51 +35,57 @@ public class ThumbnailStep : IIngestionStep
 
         try
         {
-            if (ctx.PdfImageExtractor != null)
-            {
-                var (fPath, tPath, w, h, pData, tData) =
-                    ctx.PdfImageExtractor.ExtractPageImage(ctx.FilePath, outputDir: ctx.PublishedDir);
-
-                if (!string.IsNullOrEmpty(fPath))
-                {
-                    ctx.FullImagePath = fPath;
-                    ctx.FullImageWidth = w;
-                    ctx.FullImageHeight = h;
-                    ctx.FullImageData = pData;
-                }
-                if (!string.IsNullOrEmpty(tPath))
-                {
-                    ctx.ThumbImagePath = tPath;
-                    ctx.ThumbImageWidth = 100;
-                    ctx.ThumbImageHeight = h > 0 && w > 0 ? (int)(100.0 * h / w) : 0;
-                    ctx.ThumbImageData = tData;
-                }
-            }
-            else if (ctx.ThumbnailService != null)
-            {
-                var pageImages = await ctx.ThumbnailService.GeneratePageImagesAsync(ctx.FilePath);
-                foreach (var (filePath, width, height, imgData) in pageImages)
-                {
-                    if (filePath.Contains("_thumb."))
-                    {
-                        ctx.ThumbImagePath = filePath;
-                        ctx.ThumbImageWidth = width;
-                        ctx.ThumbImageHeight = height;
-                        ctx.ThumbImageData = imgData;
-                    }
-                    else
-                    {
-                        ctx.FullImagePath = filePath;
-                        ctx.FullImageWidth = width;
-                        ctx.FullImageHeight = height;
-                        ctx.FullImageData = imgData;
-                    }
-                }
-            }
+            // Single DevExpress render of page 1 → preview + thumbnail
+            RenderPreviewAndThumb(ctx);
         }
         finally
         {
             ctx.ImageThrottle?.Release();
+        }
+    }
+
+    private void RenderPreviewAndThumb(IngestionContext ctx)
+    {
+        try
+        {
+            byte[] pdfBytes = ctx.PdfBytes ?? File.ReadAllBytes(ctx.FilePath);
+            var renderer = new DevExpressPdfPageRenderer();
+            byte[]? pageData = renderer.RenderFirstPage(pdfBytes, imageScaleFactor: 0.5f);
+            if (pageData == null || pageData.Length == 0) return;
+
+            using var img = Image.Load(pageData);
+            int w = img.Width;
+            int h = img.Height;
+
+            // Save full preview
+            string baseName = Path.GetFileNameWithoutExtension(ctx.FilePath);
+            string fullPath = Path.Combine(ctx.OutputDir, $"{baseName}_page1.png");
+            File.WriteAllBytes(fullPath, pageData);
+            ctx.FullImagePath = fullPath;
+            ctx.FullImageWidth = w;
+            ctx.FullImageHeight = h;
+            ctx.FullImageData = pageData;
+
+            // Generate thumb by resizing from the same render
+            int thumbW = 100;
+            int thumbH = w > 0 ? (int)(100.0 * h / w) : 0;
+            using var thumbImg = img.Clone(x => x.Resize(thumbW, thumbH));
+            using var thumbMs = new MemoryStream();
+            thumbImg.SaveAsPng(thumbMs);
+            byte[] thumbData = thumbMs.ToArray();
+
+            string thumbPath = Path.Combine(ctx.OutputDir, $"{baseName}_page1_thumb.png");
+            File.WriteAllBytes(thumbPath, thumbData);
+            ctx.ThumbImagePath = thumbPath;
+            ctx.ThumbImageWidth = thumbW;
+            ctx.ThumbImageHeight = thumbH;
+            ctx.ThumbImageData = thumbData;
+
+            Console.WriteLine($"  [THUMB] {w}x{h} → {thumbW}x{thumbH}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [WARN] Thumbnail render failed: {ex.Message}");
         }
     }
 

@@ -2,7 +2,8 @@
 @using Telerik.Blazor
 @using Telerik.Blazor.Components
 
-<TelerikWindow @bind-Visible="@Visible"
+<TelerikWindow Visible="@Visible"
+               VisibleChanged="@OnWindowVisibleChanged"
                Width="550px"
                Height="auto"
                Draggable="true"
@@ -99,10 +100,14 @@
 
     private AdvancedFindCriteria _criteria = new();
 
+    private async Task OnWindowVisibleChanged(bool visible)
+    {
+        await VisibleChanged.InvokeAsync(visible);
+    }
+
     private async Task OnApply()
     {
         await OnApplyCriteria.InvokeAsync(_criteria);
-        Visible = false;
         await VisibleChanged.InvokeAsync(false);
     }
 

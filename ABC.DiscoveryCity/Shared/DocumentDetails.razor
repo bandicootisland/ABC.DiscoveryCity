@@ -18,6 +18,12 @@
                         <img src="@($"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(Document.FullImagePath ?? Document.ThumbnailPath)}")"
                              style="width: 100%; height: auto; border: 1px solid var(--kendo-component-border, #ddd); box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;" />
                     }
+                    else if (Document?.Id != Guid.Empty)
+                    {
+                        <img src="@SearchService.GetThumbnailUrl(Document.Id, "full")"
+                             style="width: 100%; height: auto; border: 1px solid var(--kendo-component-border, #ddd); box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 600px; object-fit: contain;"
+                             loading="lazy" />
+                    }
                     else
                     {
                         <div class="text-center p-5 bg-light text-muted border" style="height: 300px; display: flex; align-items: center; justify-content: center; flex-direction: column;">
@@ -127,6 +133,7 @@
                 </div>
             }
         }
+
         else
         {
             <div style="height: 800px; overflow-y: auto; padding: 20px; background-color: var(--kendo-base-bg, #f9f9f9); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
@@ -154,6 +161,27 @@
                 }
             </div>
         }
+    </TabStripTab>
+    <TabStripTab Title="Images" Visible="@(Category == FileCategory.Pdf && _imagePages.Count > 0)">
+        <div class="p-3">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <TelerikButton OnClick="@PrevImagePage" Icon="@SvgIcon.ChevronLeft"
+                                   Enabled="@(_imagePageIndex > 0)" Title="Previous image" />
+                    <span style="font-weight: 600;">Image @(_imagePageIndex + 1) of @_imagePages.Count</span>
+                    <TelerikButton OnClick="@NextImagePage" Icon="@SvgIcon.ChevronRight"
+                                   Enabled="@(_imagePageIndex < _imagePages.Count - 1)" Title="Next image" />
+                </div>
+                <span style="color: var(--kendo-subtle-text, #888); font-size: 0.9em;">
+                    Page @(_imagePages.Count > 0 ? _imagePages[_imagePageIndex].Page : 0) &bull; @(_imagePages.Count > 0 ? _imagePages[_imagePageIndex].Info : "")
+                </span>
+            </div>
+            @if (_imagePages.Count > 0 && Document?.Id != Guid.Empty)
+            {
+                <img src="@SearchService.GetPageImageUrl(Document!.Id, _imagePages[_imagePageIndex].Page)"
+                     style="width: 100%; height: auto; border: 1px solid var(--kendo-component-border, #ddd); box-shadow: 2px 2px 5px rgba(0,0,0,0.1); max-height: 700px; object-fit: contain;" />
+            }
+        </div>
     </TabStripTab>
     <TabStripTab Title="Metadata">
         <div class="p-3">
@@ -212,6 +240,49 @@
     private byte[]? ViewerData { get; set; }
     private bool IsLoadingViewer { get; set; }
     private string? LoadedViewerPath { get; set; }
+
+    // Image tab state
+    private record ImagePageInfo(int Page, string Info);
+    private List<ImagePageInfo> _imagePages = new();
+    private int _imagePageIndex;
+    private Guid _lastImageDocId;
+
+    private void ParseImagePages()
+    {
+        _imagePages.Clear();
+        _imagePageIndex = 0;
+        if (Document?.Text == null) return;
+
+        // Parse [image.sz(...,pN)] markers from document text
+        var regex = new System.Text.RegularExpressions.Regex(@"\[image\.sz\(([^)]+)\)\]");
+        foreach (System.Text.RegularExpressions.Match m in regex.Matches(Document.Text))
+        {
+            var parts = m.Groups[1].Value;
+            // Last part is pN (page number)
+            var pageMatch = System.Text.RegularExpressions.Regex.Match(parts, @"p(\d+)");
+            if (pageMatch.Success && int.TryParse(pageMatch.Groups[1].Value, out int page))
+            {
+                // Build info string from the marker parts
+                var info = parts.Replace($",{pageMatch.Value}", "").Replace($"{pageMatch.Value},", "");
+                _imagePages.Add(new ImagePageInfo(page, info));
+            }
+        }
+
+        // Deduplicate by page number, keep first
+        _imagePages = _imagePages.GroupBy(p => p.Page).Select(g => g.First()).OrderBy(p => p.Page).ToList();
+    }
+
+    private void NextImagePage()
+    {
+        if (_imagePageIndex < _imagePages.Count - 1)
+            _imagePageIndex++;
+    }
+
+    private void PrevImagePage()
+    {
+        if (_imagePageIndex > 0)
+            _imagePageIndex--;
+    }
 
     private string RemoteUrl => Document?.SourceUrl ?? "";
 
@@ -319,6 +390,14 @@
         {
             ViewerData = null;
             LoadedViewerPath = null;
+
+            // Parse image pages when document changes
+            if (Document?.Id != _lastImageDocId)
+            {
+                _lastImageDocId = Document?.Id ?? Guid.Empty;
+                ParseImagePages();
+            }
+
             // Keep current tab — parent controls ActiveTabIndex
             // If already on Viewer tab, auto-load the new document
             if (ActiveTabIndex == 1 && HasNativeViewer)

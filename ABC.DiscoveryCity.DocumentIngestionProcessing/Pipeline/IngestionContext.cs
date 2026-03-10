@@ -53,6 +53,13 @@ public class IngestionContext
     /// </summary>
     public List<string> DisplaySentences { get; set; } = new();
 
+    /// <summary>
+    /// Enhanced text (MIME cleaned, whitespace normalized).
+    /// Derived from DisplaySentences — raw OCR is preserved separately.
+    /// Null until TextEnhanceStep runs; if null, DisplaySentences is used for embeddings/search.
+    /// </summary>
+    public List<string>? EnhancedSentences { get; set; }
+
     public List<Guid> SentenceIds { get; set; } = new();
     public PdfMetadata? Metadata { get; set; }
     public string PublishedFilePath { get; set; } = "";

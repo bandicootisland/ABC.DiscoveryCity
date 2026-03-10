@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using Telerik.Windows.Documents.Fixed.Model.Objects;
 using Telerik.Windows.Documents.Fixed.Model.Text;
@@ -183,12 +184,49 @@ namespace ABC.DiscoveryCity.TelerikProcessing
         public void AddImage(Image img)
         {
             Flush(isLineBreak: true);
-            // DSL format: [image.(width,height)]
+
+            // Document-unit dimensions (layout size on page)
             int w = (int)Math.Round(img.Width);
             int h = (int)Math.Round(img.Height);
+
+            // Extract pixel dimensions and byte size from ImageSource
+            int pw = 0, ph = 0;
+            long dataBytes = 0;
+            string fmt = "?";
+            try
+            {
+                if (img.ImageSource != null)
+                {
+                    pw = (int)img.ImageSource.Width;
+                    ph = (int)img.ImageSource.Height;
+                    var encoded = img.ImageSource.GetEncodedImageData();
+                    if (encoded?.Data != null)
+                    {
+                        dataBytes = encoded.Data.Length;
+                        var filter = encoded.Filters?.FirstOrDefault();
+                        fmt = filter switch
+                        {
+                            "DCTDecode" => "jpeg",
+                            "FlateDecode" => "png",
+                            "CCITTFaxDecode" => "tiff",
+                            "JBIG2Decode" => "jbig2",
+                            "JPXDecode" => "jp2",
+                            _ => filter ?? "raw"
+                        };
+                    }
+                }
+            }
+            catch { /* ImageSource may not be available in all builds */ }
+
+            // DSL: [image.sz(docW,docH,pixW,pixH,format,sizeKB,page)]
+            string sizeLabel = dataBytes >= 1024 * 1024
+                ? $"{dataBytes / 1024 / 1024}MB"
+                : $"{Math.Max(1, dataBytes / 1024)}KB";
+            int page = _pageIndex + 1; // 1-based for display
+
             _targetList.Add(new ExtractedFragment
             {
-                Text = $"[image.({w},{h})]",
+                Text = $"[image.sz({w},{h},{pw},{ph},{fmt},{sizeLabel},p{page})]",
                 IsImage = true,
                 X = img.Position.Matrix.OffsetX,
                 Y = img.Position.Matrix.OffsetY,

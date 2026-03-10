@@ -15,14 +15,16 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline;
 ///   - Sheet "Metadata": document-level properties
 ///   - Sheet "Text": one sentence per row
 ///   - OPC parts:
-///     /images/pages/page_NNNN.png — rendered page images
+///     /data/source.pdf — original PDF (small docs only; large PDFs use page images instead)
+///     /images/pages/page_NNNN.png — rendered page images (large docs only)
 ///     /data/viewer.html — standalone HTML viewer
 /// </summary>
 public static class XlsxBundleWriter
 {
     public static void Write(string outputPath, PdfMetadata metadata,
         List<string> sentences, Dictionary<int, byte[]> renderedPages,
-        string? htmlContent = null, List<Guid>? sentenceIds = null)
+        string? htmlContent = null, List<Guid>? sentenceIds = null,
+        byte[]? pdfBytes = null)
     {
         // Phase 1: Write XLSX spreadsheet
         using (var doc = SpreadsheetDocument.Create(outputPath, SpreadsheetDocumentType.Workbook))
@@ -38,15 +40,31 @@ public static class XlsxBundleWriter
             workbookPart.Workbook.Save();
         }
 
-        // Phase 2: Embed images and HTML as OPC parts
+        // Phase 2: Embed PDF/images and HTML as OPC parts
         using (var package = Package.Open(outputPath, FileMode.Open, FileAccess.ReadWrite))
         {
-            int pageCount = EmbedPageImages(package, renderedPages);
+            int pdfSize = 0;
+            int pageCount = 0;
+
+            if (pdfBytes is { Length: > 0 })
+            {
+                // Small PDF: embed source PDF directly (cheaper than page images)
+                pdfSize = EmbedPdf(package, pdfBytes);
+            }
+            else
+            {
+                // Large PDF: embed rendered page images instead
+                pageCount = EmbedPageImages(package, renderedPages);
+            }
+
             int htmlBytes = 0;
             if (!string.IsNullOrEmpty(htmlContent))
                 htmlBytes = EmbedHtml(package, htmlContent);
 
-            Console.WriteLine($"  [XlsxBundle] {pageCount} page images, {htmlBytes:N0} bytes HTML");
+            if (pdfSize > 0)
+                Console.WriteLine($"  [XlsxBundle] source PDF ({pdfSize / 1024}KB), {htmlBytes:N0} bytes HTML");
+            else
+                Console.WriteLine($"  [XlsxBundle] {pageCount} page images, {htmlBytes:N0} bytes HTML");
         }
     }
 
@@ -121,6 +139,15 @@ public static class XlsxBundleWriter
             count++;
         }
         return count;
+    }
+
+    private static int EmbedPdf(Package package, byte[] pdfBytes)
+    {
+        var uri = PackUriHelper.CreatePartUri(new Uri("data/source.pdf", UriKind.Relative));
+        var part = package.CreatePart(uri, "application/pdf", CompressionOption.Maximum);
+        using var stream = part.GetStream(FileMode.Create);
+        stream.Write(pdfBytes, 0, pdfBytes.Length);
+        return pdfBytes.Length;
     }
 
     private static int EmbedHtml(Package package, string htmlContent)

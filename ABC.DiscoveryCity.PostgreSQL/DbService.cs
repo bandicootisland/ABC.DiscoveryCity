@@ -26,6 +26,12 @@ public partial class DbService
     /// </summary>
     public static string ExtractFileName(string filePath) => System.IO.Path.GetFileName(filePath);
 
+    /// <summary>
+    /// Creates a new NpgsqlConnection for use by pipeline steps that need direct DB access.
+    /// Caller is responsible for opening and disposing the connection.
+    /// </summary>
+    public NpgsqlConnection CreateConnection() => _dataSource.CreateConnection();
+
     // Cached basepaths from filesources table (loaded once at startup)
     private static string? _windowsBasePath;
     private static string? _linuxBasePath;
@@ -259,6 +265,19 @@ public partial class DbService
                 // Ensure SentenceIds column on ParentDocuments (UUIDv8)
                 using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS SentenceIds JSONB;", conn)) cmd.ExecuteNonQuery();
 
+                // Ensure dictionary_packages table exists (for word splitting)
+                using (var cmd = new NpgsqlCommand(@"
+                    CREATE TABLE IF NOT EXISTS dictionary_packages (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        dictionary_name TEXT NOT NULL UNIQUE,
+                        version TEXT,
+                        entry_count INTEGER,
+                        package_data BYTEA NOT NULL,
+                        source_format TEXT DEFAULT 'xlsx',
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    );", conn)) cmd.ExecuteNonQuery();
+
                 Console.WriteLine("Schema migrations complete.");
                 return;
             }
@@ -325,7 +344,7 @@ public partial class DbService
             // Option B: Add Sentences JSONB + Embedding columns to ParentDocuments
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Sentences JSONB;", conn)) cmd.ExecuteNonQuery();
             using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS SentenceIds JSONB;", conn)) cmd.ExecuteNonQuery();
-            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Embedding vector(384);", conn)) cmd.ExecuteNonQuery();
+            using (var cmd = new NpgsqlCommand("ALTER TABLE ParentDocuments ADD COLUMN IF NOT EXISTS Embedding vector(1024);", conn)) cmd.ExecuteNonQuery();
 
             // 5. Create DocumentChunks Table with HASH Partitioning (4 partitions for parallel vector search)
             Console.WriteLine("Creating DocumentChunks partitioned table...");
@@ -346,7 +365,7 @@ public partial class DbService
                         ParentId UUID NOT NULL,
                         ChunkIndex INT,
                         TextContent TEXT,
-                        Embedding vector(384),
+                        Embedding vector(1024),
                         CreatedAt TIMESTAMPTZ DEFAULT NOW(),
                         PRIMARY KEY (Id, ParentId)
                     ) PARTITION BY HASH (ParentId);
@@ -386,6 +405,7 @@ public partial class DbService
                     FileName TEXT,
                     Width INT,
                     Height INT,
+                    ImageData BYTEA,
                     CreatedAt TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE(ParentId, ImageSize)
                 );
@@ -400,7 +420,21 @@ public partial class DbService
                     END IF;
                 END $$;", conn)) cmd.ExecuteNonQuery();
 
-            // 7. Create Indexes (skip if already exist)
+            // 7. Create Dictionary Packages Table (for word splitting)
+            Console.WriteLine("Creating dictionary_packages table...");
+            using (var cmd = new NpgsqlCommand(@"
+                CREATE TABLE IF NOT EXISTS dictionary_packages (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    dictionary_name TEXT NOT NULL UNIQUE,
+                    version TEXT,
+                    entry_count INTEGER,
+                    package_data BYTEA NOT NULL,
+                    source_format TEXT DEFAULT 'xlsx',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );", conn)) cmd.ExecuteNonQuery();
+
+            // 8. Create Indexes (skip if already exist)
             int indexCount = 0;
             using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM pg_indexes WHERE indexname LIKE 'idx_chunks_%' OR indexname LIKE 'idx_parent_%';", conn))
             {
@@ -776,15 +810,14 @@ public partial class DbService
                 // 3. Populate Chunks (Option A)
                 if (cleanSentences.Count > 0)
                 {
-                    var chunks = GroupSentencesIntoChunks(cleanSentences, targetLength: 1000);
+                    var chunks = GroupSentencesIntoChunks(cleanSentences, targetLength: 2000);
                     int chunkIdx = 0;
                     foreach (var chunkText in chunks)
                     {
                         float[]? chunkEmbedding = null;
                         if (_embeddingService != null)
                         {
-                            try { chunkEmbedding = _embeddingService.GetEmbeddingAsync(chunkText).GetAwaiter().GetResult(); }
-                            catch { /* embedding error - skip vector info for this chunk */ }
+                            chunkEmbedding = GetEmbeddingWithRetry(EmbeddingText.WordsOnly(chunkText), maxRetries: 3);
                         }
 
                         using (var cmd = new NpgsqlCommand(@"
@@ -833,6 +866,63 @@ public partial class DbService
     }
 
     /// <summary>
+    /// Adaptive character limit for embeddings. Converges on the model's true token limit
+    /// by tracking a moving average — drops on failure, climbs back on success.
+    /// </summary>
+    private int _embeddingLimit = 2000;
+    private const int EmbeddingLimitMax = 2000;
+    private const int EmbeddingLimitMin = 200;
+
+    /// <summary>
+    /// Gets an embedding with exponential backoff retry.
+    /// Adaptive limit: on failure, drops to 2/3 of current text length.
+    /// On success, nudges the limit back up (halfway to max) so future chunks
+    /// can try longer text — a single failure doesn't penalise all subsequent docs.
+    /// </summary>
+    private float[]? GetEmbeddingWithRetry(string text, int maxRetries = 3)
+    {
+        if (_embeddingService == null) return null;
+
+        // Pre-truncate to the current adaptive limit
+        if (text.Length > _embeddingLimit)
+            text = text[.._embeddingLimit];
+
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                var result = _embeddingService.GetEmbeddingAsync(text).GetAwaiter().GetResult();
+                // Success — nudge limit back up (halfway toward max) for next chunk
+                if (_embeddingLimit < EmbeddingLimitMax)
+                {
+                    _embeddingLimit = (_embeddingLimit + EmbeddingLimitMax) / 2;
+                }
+                return result;
+            }
+            catch (Exception ex) when (attempt < maxRetries && ex.Message.Contains("context length", StringComparison.OrdinalIgnoreCase))
+            {
+                // Drop to 2/3 of what just failed
+                int truncateTo = Math.Max(text.Length * 2 / 3, EmbeddingLimitMin);
+                _embeddingLimit = truncateTo;
+                text = text.Length > truncateTo ? text[..truncateTo] : text;
+                Console.WriteLine($"  [Embedding] Context too large, limit now {truncateTo} chars (retry {attempt + 1}/{maxRetries})");
+                Thread.Sleep(500 * (1 << attempt));
+            }
+            catch (Exception ex) when (attempt < maxRetries)
+            {
+                Console.WriteLine($"  [Embedding] Retry {attempt + 1}/{maxRetries} in {500 * (1 << attempt)}ms: {ex.Message.Split('\n')[0]}");
+                Thread.Sleep(500 * (1 << attempt));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [Embedding] Failed after {maxRetries} retries: {ex.Message.Split('\n')[0]}");
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Upsert full and thumb image records for a document in a single transaction.
     /// Looks up by FileName (OS-independent key). Stores paths in OS-specific columns.
     /// Only updates an image if width > 0 and height > 0 (preserves existing if not provided).
@@ -843,7 +933,12 @@ public partial class DbService
         byte[]? previewData = null, byte[]? thumbData = null)
     {
         // Skip if nothing to update
-        if (fullWidth <= 0 && fullHeight <= 0 && thumbWidth <= 0 && thumbHeight <= 0) return;
+        if (fullWidth <= 0 && fullHeight <= 0 && thumbWidth <= 0 && thumbHeight <= 0)
+        {
+            Console.WriteLine($"  [WARN] UpsertDocumentImages: all dimensions zero, skipping");
+            return;
+        }
+        Console.WriteLine($"  [IMG-DB] Storing images: full={fullWidth}x{fullHeight}, thumb={thumbWidth}x{thumbHeight}");
 
         try
         {
@@ -860,7 +955,11 @@ public partial class DbService
                 while (reader.Read())
                     parentIds.Add(reader.GetGuid(0));
             }
-            if (parentIds.Count == 0) return;
+            if (parentIds.Count == 0)
+            {
+                Console.WriteLine($"  [WARN] UpsertDocumentImages: no ParentDocument found for '{fileName}'");
+                return;
+            }
 
             string upsertSql = @"
                 INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, FilePath, FileName, Width, Height, ImageData)
@@ -955,7 +1054,7 @@ public partial class DbService
             {
                 try
                 {
-                    var queryEmbedding = await _embeddingService.GetEmbeddingAsync(query);
+                    var queryEmbedding = await _embeddingService.GetEmbeddingAsync(EmbeddingText.WordsOnly(query));
                     vectorResults = await SearchByVectorAsync(conn, queryEmbedding, Math.Max(limit, 100), datasetNames, nameValues);
                 }
                 catch (Exception embEx) { Console.WriteLine($"Vector search failed (hybrid): {embEx.Message}"); }
@@ -1336,7 +1435,7 @@ public partial class DbService
     /// </summary>
     public async Task<(List<DocumentSearchResult> Items, int TotalCount)> SearchPagedAsync(
         string? query, int skip, int take, bool exactMatch = false,
-        List<string>? datasetNames = null, List<string>? nameValues = null)
+        List<string>? datasetNames = null, List<string>? nameValues = null, AdvancedFilters? advanced = null)
     {
         try
         {
@@ -1348,17 +1447,19 @@ public partial class DbService
             var whereClauses = new List<string>();
             if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
             if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+            var advFragment = advanced?.BuildWhereFragment("p");
+            if (!string.IsNullOrEmpty(advFragment)) whereClauses.Add(advFragment);
             var whereClause = whereClauses.Count > 0 ? "WHERE " + string.Join(" AND ", whereClauses) : "";
 
             if (string.IsNullOrWhiteSpace(query))
             {
                 // No search query — return recent documents, paged
-                return GetRecentDocumentsPaged(conn, skip, take, whereClause, datasetFilter, namesFilter, datasetNames, nameValues);
+                return GetRecentDocumentsPaged(conn, skip, take, whereClause, datasetFilter, namesFilter, datasetNames, nameValues, advanced);
             }
 
             if (exactMatch)
             {
-                return SearchExactMatchPaged(conn, query, skip, take, datasetNames, nameValues);
+                return SearchExactMatchPaged(conn, query, skip, take, datasetNames, nameValues, advanced);
             }
 
             // Text search (fulltext) — paged
@@ -1375,7 +1476,7 @@ public partial class DbService
     private (List<DocumentSearchResult> Items, int TotalCount) GetRecentDocumentsPaged(
         NpgsqlConnection conn, int skip, int take, string whereClause,
         bool datasetFilter, bool namesFilter,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
         // Count total matching documents
         var countSql = $@"SELECT COUNT(*) FROM ParentDocuments p
@@ -1384,6 +1485,7 @@ public partial class DbService
         countCmd.CommandTimeout = 120;
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(countCmd);
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
 
         // Fetch the page
@@ -1417,6 +1519,7 @@ public partial class DbService
         cmd.Parameters.AddWithValue("take", take);
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(cmd);
 
         var results = new List<DocumentSearchResult>();
         using var reader = cmd.ExecuteReader();
@@ -1525,7 +1628,7 @@ public partial class DbService
 
     private (List<DocumentSearchResult> Items, int TotalCount) SearchExactMatchPaged(
         NpgsqlConnection conn, string query, int skip, int take,
-        List<string>? datasetNames = null, List<string>? nameValues = null)
+        List<string>? datasetNames = null, List<string>? nameValues = null, AdvancedFilters? advanced = null)
     {
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
@@ -1575,7 +1678,10 @@ public partial class DbService
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
 
-        // Data
+        // Data — apply advanced filters in the outer join (after CTE resolves matching_docs)
+        var advOuterWhere = advanced?.BuildWhereFragment("p");
+        var advWhereStr = !string.IsNullOrEmpty(advOuterWhere) ? $"WHERE {advOuterWhere}" : "";
+
         var dataSql = matchesCte + $@"
             SELECT p.FileName,
                    p.FilePath,
@@ -1597,6 +1703,7 @@ public partial class DbService
             JOIN ParentDocuments p ON md.ParentId = p.Id
             LEFT JOIN DataSets d ON p.DataSetId = d.Id
             LEFT JOIN Sources s ON d.SourceId = s.Id
+            {advWhereStr}
             ORDER BY p.ProcessedAt DESC
             OFFSET @skip LIMIT @take;";
 
@@ -1607,6 +1714,7 @@ public partial class DbService
         dataCmd.Parameters.AddWithValue("take", take);
         if (datasetFilter) dataCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) dataCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(dataCmd);
 
         var results = new List<DocumentSearchResult>();
         using var reader = dataCmd.ExecuteReader();
@@ -1618,7 +1726,7 @@ public partial class DbService
     /// Filename-only search — returns IDs of documents whose FileName matches the query.
     /// </summary>
     public Guid[] SearchByFileNameIds(string query,
-        List<string>? datasetNames = null, List<string>? nameValues = null)
+        List<string>? datasetNames = null, List<string>? nameValues = null, AdvancedFilters? advanced = null)
     {
         using var conn = _dataSource.OpenConnection();
         var datasetFilter = datasetNames is { Count: > 0 };
@@ -1628,6 +1736,8 @@ public partial class DbService
         var extraWhere = new List<string>();
         if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
         if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+        var advFragment = advanced?.BuildWhereFragment("p");
+        if (!string.IsNullOrEmpty(advFragment)) extraWhere.Add(advFragment);
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
         var sql = $@"
@@ -1640,6 +1750,7 @@ public partial class DbService
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(cmd);
 
         var ids = new List<Guid>();
         using var reader = cmd.ExecuteReader();
@@ -1717,7 +1828,7 @@ public partial class DbService
             {
                 try
                 {
-                    var queryEmbedding = _embeddingService.GetEmbeddingAsync(query).GetAwaiter().GetResult();
+                    var queryEmbedding = _embeddingService.GetEmbeddingAsync(EmbeddingText.WordsOnly(query)).GetAwaiter().GetResult();
                     var vectorSql = $@"
                         SELECT c.ParentId
                         FROM DocumentChunks c
@@ -1799,7 +1910,7 @@ public partial class DbService
     /// Used by the browse cache — run once, cache the IDs, hydrate pages via HydrateByIds.
     /// </summary>
     public (Guid[] Ids, int TotalCount) GetBrowseDocumentIds(
-        List<string>? datasetNames = null, List<string>? nameValues = null)
+        List<string>? datasetNames = null, List<string>? nameValues = null, AdvancedFilters? advanced = null)
     {
         using var conn = _dataSource.OpenConnection();
         var datasetFilter = datasetNames is { Count: > 0 };
@@ -1808,6 +1919,8 @@ public partial class DbService
         var whereClauses = new List<string>();
         if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
         if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+        var advFragment = advanced?.BuildWhereFragment("p");
+        if (!string.IsNullOrEmpty(advFragment)) whereClauses.Add(advFragment);
         var whereClause = whereClauses.Count > 0
             ? "WHERE " + string.Join(" AND ", whereClauses)
             : "";
@@ -1819,6 +1932,7 @@ public partial class DbService
         countCmd.CommandTimeout = 120;
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(countCmd);
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
 
         // IDs capped at 50K for cache-based paging
@@ -1834,6 +1948,7 @@ public partial class DbService
         cmd.CommandTimeout = 120;
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(cmd);
 
         var ids = new List<Guid>();
         using var reader = cmd.ExecuteReader();
@@ -1904,7 +2019,7 @@ public partial class DbService
         catch { return 1; }
     }
 
-    public (long Docs, long Images, long Sentences) GetCounts()
+    public (long Docs, long Images, long Chunks) GetCounts()
     {
         try
         {
@@ -1915,12 +2030,10 @@ public partial class DbService
             using var cmdImages = new NpgsqlCommand("SELECT count(*) FROM DocumentImages", conn);
             long images = (long)(cmdImages.ExecuteScalar() ?? 0L);
 
-            // Option B: Count total sentences across all documents
-            using var cmdSentences = new NpgsqlCommand("SELECT COALESCE(SUM(jsonb_array_length(Sentences)), 0) FROM ParentDocuments WHERE Sentences IS NOT NULL", conn);
-            cmdSentences.CommandTimeout = 120;
-            long sentences = (long)(cmdSentences.ExecuteScalar() ?? 0L);
+            using var cmdChunks = new NpgsqlCommand("SELECT count(*) FROM DocumentChunks", conn);
+            long chunks = (long)(cmdChunks.ExecuteScalar() ?? 0L);
 
-            return (docs, images, sentences);
+            return (docs, images, chunks);
         }
         catch (Exception ex)
         {
@@ -1968,7 +2081,6 @@ public partial class DbService
         try
         {
             using var conn = _dataSource.OpenConnection();
-            // Option B: No more DocumentChunks join — sentence count from JSONB
             string sql = @"
                 SELECT
                     COALESCE(s.Name, 'Unknown') as SourceName,
@@ -1976,13 +2088,15 @@ public partial class DbService
                     COUNT(DISTINCT p.Id) as DocumentCount,
                     COALESCE(SUM((p.Metadata->>'PageCount')::int), 0) as TotalPages,
                     COUNT(DISTINCT i.Id) as ImageCount,
-                    COALESCE(SUM(jsonb_array_length(p.Sentences)), 0) as SentenceCount,
+                    COUNT(DISTINCT c.Id) as ChunkCount,
+                    COUNT(DISTINCT CASE WHEN c.Embedding IS NOT NULL THEN c.Id END) as EmbeddingCount,
                     MIN(p.ProcessedAt) as FirstProcessed,
                     MAX(p.ProcessedAt) as LastProcessed
                 FROM ParentDocuments p
                 LEFT JOIN DataSets d ON p.DataSetId = d.Id
                 LEFT JOIN Sources s ON d.SourceId = s.Id
                 LEFT JOIN DocumentImages i ON i.ParentId = p.Id
+                LEFT JOIN DocumentChunks c ON c.ParentId = p.Id
                 GROUP BY s.Name, d.Name
                 ORDER BY s.Name, d.Name;
             ";
@@ -1999,9 +2113,10 @@ public partial class DbService
                     DocumentCount = Convert.ToInt64(reader.GetValue(2)),
                     TotalPages = Convert.ToInt64(reader.GetValue(3)),
                     ImageCount = Convert.ToInt64(reader.GetValue(4)),
-                    SentenceCount = Convert.ToInt64(reader.GetValue(5)),
-                    FirstProcessed = reader.IsDBNull(6) ? null : reader.GetDateTime(6),
-                    LastProcessed = reader.IsDBNull(7) ? null : reader.GetDateTime(7)
+                    ChunkCount = Convert.ToInt64(reader.GetValue(5)),
+                    EmbeddingCount = Convert.ToInt64(reader.GetValue(6)),
+                    FirstProcessed = reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                    LastProcessed = reader.IsDBNull(8) ? null : reader.GetDateTime(8)
                 });
             }
         }
@@ -2023,10 +2138,10 @@ public partial class DbService
             using var conn = _dataSource.OpenConnection();
 
             // Basic counts
-            var (docs, images, sentences) = GetCounts();
+            var (docs, images, chunks) = GetCounts();
             stats.TotalDocuments = docs;
             stats.TotalImages = images;
-            stats.TotalSentences = sentences;
+            stats.TotalChunks = chunks;
 
             // Total pages
             using (var cmd = new NpgsqlCommand("SELECT COALESCE(SUM((Metadata->>'PageCount')::int), 0) FROM ParentDocuments;", conn))
@@ -2046,10 +2161,10 @@ public partial class DbService
                 stats.DataSetCount = (long)(cmd.ExecuteScalar() ?? 0L);
             }
 
-            // Documents with embeddings (Option B: on ParentDocuments directly)
-            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM ParentDocuments WHERE Embedding IS NOT NULL;", conn))
+            // Chunks with embeddings
+            using (var cmd = new NpgsqlCommand("SELECT COUNT(*) FROM DocumentChunks WHERE Embedding IS NOT NULL;", conn))
             {
-                stats.DocumentsWithEmbeddings = (long)(cmd.ExecuteScalar() ?? 0L);
+                stats.ChunksWithEmbeddings = (long)(cmd.ExecuteScalar() ?? 0L);
             }
 
             // Average pages per document
@@ -2106,7 +2221,8 @@ public class DataSetStats
     public long DocumentCount { get; set; }
     public long TotalPages { get; set; }
     public long ImageCount { get; set; }
-    public long SentenceCount { get; set; }
+    public long ChunkCount { get; set; }
+    public long EmbeddingCount { get; set; }
     public DateTime? FirstProcessed { get; set; }
     public DateTime? LastProcessed { get; set; }
 }
@@ -2142,12 +2258,18 @@ public class DocumentSearchResult
         DbService.BuildPath(PdfFolder, FileName) 
         ?? (FilePath != null ? DbService.ResolveFilePathForCurrentOs(FilePath) : null);
 
+    /// <summary>Non-null when a thumbnail blob exists in DocumentImages.</summary>
+    public bool HasThumbnail => ThumbnailFileName != null;
+
+    /// <summary>Non-null when a full preview blob exists in DocumentImages.</summary>
+    public bool HasFullImage => FullImageFileName != null;
+
     /// <summary>Resolve the thumbnail path for the current OS.</summary>
-    public string? ResolvedThumbnailPath => 
+    public string? ResolvedThumbnailPath =>
         DbService.BuildPath(ImageFolder ?? PdfFolder, ThumbnailFileName);
 
     /// <summary>Resolve the full image path for the current OS.</summary>
-    public string? ResolvedFullImagePath => 
+    public string? ResolvedFullImagePath =>
         DbService.BuildPath(ImageFolder ?? PdfFolder, FullImageFileName);
 }
 
@@ -2156,10 +2278,10 @@ public class SystemStats
     public long TotalDocuments { get; set; }
     public long TotalPages { get; set; }
     public long TotalImages { get; set; }
-    public long TotalSentences { get; set; }
+    public long TotalChunks { get; set; }
     public long SourceCount { get; set; }
     public long DataSetCount { get; set; }
-    public long DocumentsWithEmbeddings { get; set; }
+    public long ChunksWithEmbeddings { get; set; }
     public double AvgPagesPerDocument { get; set; }
     public DateTime? LastProcessedAt { get; set; }
 }
@@ -2389,7 +2511,7 @@ public partial class DbService
 
             // Try matching by FileName in documentimages
             string sql = @"
-                SELECT ImageData FROM DocumentImages 
+                SELECT ImageData FROM DocumentImages
                 WHERE FileName = @fn AND ImageData IS NOT NULL
                 LIMIT 1;
             ";
@@ -2403,6 +2525,79 @@ public partial class DbService
         catch (Exception ex)
         {
             Console.WriteLine($"Error getting image data: {ex.Message}");
+            return Array.Empty<byte>();
+        }
+    }
+
+    /// <summary>
+    /// Get the resolved file path for a document by its Id.
+    /// </summary>
+    public string? GetFilePathByParentId(Guid parentId)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(
+                "SELECT filepath FROM parentdocuments WHERE id = @pid LIMIT 1;", conn);
+            cmd.Parameters.AddWithValue("pid", parentId);
+            var result = cmd.ExecuteScalar();
+            if (result is string path)
+                return ResolveFilePathForCurrentOs(path);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting file path by ParentId: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Insert a rendered page image into DocumentImages.
+    /// </summary>
+    public void InsertPageImage(Guid parentId, string imageSize, byte[] imageData, int width, int height)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                INSERT INTO documentimages (id, parentid, imagetype, imagesize, width, height, imagedata, createdat)
+                VALUES (@id, @pid, 'png', @size, @w, @h, @data, NOW())
+                ON CONFLICT (parentid, imagesize) DO UPDATE SET imagedata = @data, width = @w, height = @h;",
+                conn);
+            cmd.Parameters.AddWithValue("id", Guid.CreateVersion7());
+            cmd.Parameters.AddWithValue("pid", parentId);
+            cmd.Parameters.AddWithValue("size", imageSize);
+            cmd.Parameters.AddWithValue("w", width);
+            cmd.Parameters.AddWithValue("h", height);
+            cmd.Parameters.AddWithValue("data", imageData);
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error inserting page image: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Get image blob by parent document Id and size (thumb/full/page_N).
+    /// </summary>
+    public byte[] GetImageDataByParentId(Guid parentId, string imageSize)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(
+                "SELECT ImageData FROM DocumentImages WHERE ParentId = @pid AND ImageSize = @size AND ImageData IS NOT NULL LIMIT 1;",
+                conn);
+            cmd.Parameters.AddWithValue("pid", parentId);
+            cmd.Parameters.AddWithValue("size", imageSize);
+            var result = cmd.ExecuteScalar();
+            return result as byte[] ?? Array.Empty<byte>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting image data by ParentId: {ex.Message}");
             return Array.Empty<byte>();
         }
     }

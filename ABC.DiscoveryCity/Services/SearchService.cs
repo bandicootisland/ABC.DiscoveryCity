@@ -18,6 +18,14 @@ public class SearchService
     /// <summary>API base URL (without trailing slash) for building image src URLs etc.</summary>
     public string ApiBaseUrl => _httpClient.BaseAddress!.ToString().TrimEnd('/');
 
+    /// <summary>URL for lazy on-demand thumbnail rendering.</summary>
+    public string GetThumbnailUrl(Guid parentId, string size = "thumb")
+        => $"{ApiBaseUrl}/api/images/thumbnail?parentId={parentId}&size={size}";
+
+    /// <summary>URL for lazy on-demand page rendering.</summary>
+    public string GetPageImageUrl(Guid parentId, int page, float scale = 0.5f)
+        => $"{ApiBaseUrl}/api/images/page?parentId={parentId}&page={page}&scale={scale}";
+
     public async Task<List<SearchResultDto>> SearchAsync(string query, int limit = 20, bool exactMatch = false, List<string>? datasets = null, List<string>? names = null)
     {
         try
@@ -65,11 +73,13 @@ public class SearchService
     public async Task<PagedSearchResult> SearchPagedAsync(
         string? query, int skip, int take, bool exactMatch = false,
         List<string>? datasets = null, List<string>? names = null,
-        CancellationToken cancellationToken = default, bool filenameOnly = false)
+        CancellationToken cancellationToken = default, bool filenameOnly = false,
+        List<string>? extensions = null, DateTime? dateFrom = null, DateTime? dateTo = null,
+        int? minPages = null, int? maxPages = null)
     {
         try
         {
-            var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly);
+            var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly, extensions, dateFrom, dateTo, minPages, maxPages);
             if (fingerprint != _activeCacheFingerprint)
             {
                 _pageCache.Clear();
@@ -80,19 +90,19 @@ public class SearchService
             if (_pageCache.TryGetPage(skip, out var cachedItems, out var cachedTotal))
             {
                 Console.WriteLine($"[ClientCache] HIT skip={skip}");
-                _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names, filenameOnly);
+                _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names, filenameOnly, extensions, dateFrom, dateTo, minPages, maxPages);
                 return new PagedSearchResult { Items = cachedItems, TotalCount = cachedTotal };
             }
 
             // Cache MISS — fetch from API
-            var url = BuildPagedUrl(query, skip, take, exactMatch, datasets, names, filenameOnly);
+            var url = BuildPagedUrl(query, skip, take, exactMatch, datasets, names, filenameOnly, extensions, dateFrom, dateTo, minPages, maxPages);
             var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url, cancellationToken);
             var result = response ?? new PagedSearchResult();
 
             _pageCache.StorePage(skip, result.Items, result.TotalCount, skip);
             Console.WriteLine($"[ClientCache] MISS skip={skip}, stored ({result.Items.Count} items, total={result.TotalCount})");
 
-            _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names, filenameOnly);
+            _ = PrefetchAdjacentPagesAsync(skip, take, query, exactMatch, datasets, names, filenameOnly, extensions, dateFrom, dateTo, minPages, maxPages);
             return result;
         }
         catch (Exception ex)
@@ -108,9 +118,11 @@ public class SearchService
     /// </summary>
     public PagedSearchResult? TryGetCachedPage(
         string? query, int skip, bool exactMatch,
-        List<string>? datasets, List<string>? names, bool filenameOnly = false)
+        List<string>? datasets, List<string>? names, bool filenameOnly = false,
+        List<string>? extensions = null, DateTime? dateFrom = null, DateTime? dateTo = null,
+        int? minPages = null, int? maxPages = null)
     {
-        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly);
+        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly, extensions, dateFrom, dateTo, minPages, maxPages);
         if (fingerprint != _activeCacheFingerprint) return null;
         if (_pageCache.TryGetPage(skip, out var items, out var total))
             return new PagedSearchResult { Items = items, TotalCount = total };
@@ -127,7 +139,9 @@ public class SearchService
     }
 
     private static string BuildPagedUrl(string? query, int skip, int take,
-        bool exactMatch, List<string>? datasets, List<string>? names, bool filenameOnly = false)
+        bool exactMatch, List<string>? datasets, List<string>? names, bool filenameOnly = false,
+        List<string>? extensions = null, DateTime? dateFrom = null, DateTime? dateTo = null,
+        int? minPages = null, int? maxPages = null)
     {
         var url = $"api/search/paged?skip={skip}&take={take}&exactMatch={exactMatch.ToString().ToLowerInvariant()}";
         if (!string.IsNullOrWhiteSpace(query))
@@ -138,11 +152,23 @@ public class SearchService
             url += "&" + string.Join("&", datasets.Select(d => $"datasets={Uri.EscapeDataString(d)}"));
         if (names is { Count: > 0 })
             url += "&" + string.Join("&", names.Select(p => $"names={Uri.EscapeDataString(p)}"));
+        if (extensions is { Count: > 0 })
+            url += "&" + string.Join("&", extensions.Select(e => $"ext={Uri.EscapeDataString(e)}"));
+        if (dateFrom.HasValue)
+            url += $"&dateFrom={dateFrom.Value:yyyy-MM-dd}";
+        if (dateTo.HasValue)
+            url += $"&dateTo={dateTo.Value:yyyy-MM-dd}";
+        if (minPages.HasValue)
+            url += $"&minPages={minPages.Value}";
+        if (maxPages.HasValue)
+            url += $"&maxPages={maxPages.Value}";
         return url;
     }
 
     private static string BuildCacheFingerprint(string? query, bool exactMatch,
-        List<string>? datasets, List<string>? names, bool filenameOnly = false)
+        List<string>? datasets, List<string>? names, bool filenameOnly = false,
+        List<string>? extensions = null, DateTime? dateFrom = null, DateTime? dateTo = null,
+        int? minPages = null, int? maxPages = null)
     {
         var parts = new List<string>();
         parts.Add(query ?? "");
@@ -152,6 +178,12 @@ public class SearchService
             parts.Add("ds=" + string.Join(",", datasets.OrderBy(d => d)));
         if (names is { Count: > 0 })
             parts.Add("nm=" + string.Join(",", names.OrderBy(n => n)));
+        if (extensions is { Count: > 0 })
+            parts.Add("ext=" + string.Join(",", extensions.OrderBy(e => e)));
+        if (dateFrom.HasValue) parts.Add("from=" + dateFrom.Value.ToString("yyyy-MM-dd"));
+        if (dateTo.HasValue)   parts.Add("to=" + dateTo.Value.ToString("yyyy-MM-dd"));
+        if (minPages.HasValue) parts.Add("minpg=" + minPages.Value);
+        if (maxPages.HasValue) parts.Add("maxpg=" + maxPages.Value);
         return string.Join("|", parts);
     }
 
@@ -161,7 +193,8 @@ public class SearchService
     /// </summary>
     private async Task PrefetchAdjacentPagesAsync(int currentSkip, int take,
         string? query, bool exactMatch, List<string>? datasets, List<string>? names,
-        bool filenameOnly = false)
+        bool filenameOnly = false, List<string>? extensions = null, DateTime? dateFrom = null,
+        DateTime? dateTo = null, int? minPages = null, int? maxPages = null)
     {
         var adjacentSkips = new List<int>();
         var prevSkip = currentSkip - take;
@@ -174,7 +207,7 @@ public class SearchService
 
         if (adjacentSkips.Count == 0) return;
 
-        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly);
+        var fingerprint = BuildCacheFingerprint(query, exactMatch, datasets, names, filenameOnly, extensions, dateFrom, dateTo, minPages, maxPages);
 
         foreach (var adjSkip in adjacentSkips)
         {
@@ -183,7 +216,7 @@ public class SearchService
                 // Guard: if filters changed while prefetching, discard
                 if (fingerprint != _activeCacheFingerprint) return;
 
-                var url = BuildPagedUrl(query, adjSkip, take, exactMatch, datasets, names, filenameOnly);
+                var url = BuildPagedUrl(query, adjSkip, take, exactMatch, datasets, names, filenameOnly, extensions, dateFrom, dateTo, minPages, maxPages);
                 var response = await _httpClient.GetFromJsonAsync<PagedSearchResult>(url);
                 if (response is { Items.Count: > 0 } && fingerprint == _activeCacheFingerprint)
                 {
@@ -405,6 +438,7 @@ public class SearchService
 
 public class SearchResultDto
 {
+    public Guid Id { get; set; }
     public string FileName { get; set; } = string.Empty;
     public string? FilePath { get; set; }
     public string? ThumbnailPath { get; set; }
@@ -454,10 +488,10 @@ public class SystemStatsDto
     public long TotalDocuments { get; set; }
     public long TotalPages { get; set; }
     public long TotalImages { get; set; }
-    public long TotalSentences { get; set; }
+    public long TotalChunks { get; set; }
     public long SourceCount { get; set; }
     public long DataSetCount { get; set; }
-    public long DocumentsWithEmbeddings { get; set; }
+    public long ChunksWithEmbeddings { get; set; }
     public double AvgPagesPerDocument { get; set; }
     public DateTime? LastProcessedAt { get; set; }
 }
@@ -469,7 +503,8 @@ public class DataSetStatsDto
     public long DocumentCount { get; set; }
     public long TotalPages { get; set; }
     public long ImageCount { get; set; }
-    public long SentenceCount { get; set; }
+    public long ChunkCount { get; set; }
+    public long EmbeddingCount { get; set; }
     public DateTime? FirstProcessed { get; set; }
     public DateTime? LastProcessed { get; set; }
 }

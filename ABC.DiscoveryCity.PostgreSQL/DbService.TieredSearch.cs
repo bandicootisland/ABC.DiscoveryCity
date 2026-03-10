@@ -153,7 +153,7 @@ public partial class DbService
     // -----------------------------------------------------------------------
 
     public static string ComputeQueryHash(string? query, bool exactMatch, bool filenameOnly,
-        List<string>? datasets, List<string>? names)
+        List<string>? datasets, List<string>? names, AdvancedFilters? advanced = null)
     {
         var sb = new StringBuilder();
         sb.Append(query?.ToLowerInvariant() ?? "");
@@ -165,6 +165,11 @@ public partial class DbService
         {
             sb.Append("|ds=");
             sb.Append(string.Join(",", datasets.OrderBy(d => d)));
+        }
+        if (advanced?.HasAny == true)
+        {
+            sb.Append('|');
+            sb.Append(advanced.ToFingerprint());
         }
         if (names is { Count: > 0 })
         {
@@ -185,9 +190,9 @@ public partial class DbService
     /// </summary>
     public (string QueryHash, bool IsNew, SearchQueryStatus? Status) GetOrCreateSearchQuery(
         string? query, bool exactMatch, bool filenameOnly,
-        List<string>? datasets, List<string>? names)
+        List<string>? datasets, List<string>? names, AdvancedFilters? advanced = null)
     {
-        var hash = ComputeQueryHash(query, exactMatch, filenameOnly, datasets, names);
+        var hash = ComputeQueryHash(query, exactMatch, filenameOnly, datasets, names, advanced);
 
         using var conn = _dataSource.OpenConnection();
 
@@ -262,7 +267,7 @@ public partial class DbService
     // -----------------------------------------------------------------------
 
     public int ExecuteTier1_Filename(string queryHash, string query,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
         using var conn = _dataSource.OpenConnection();
         var datasetFilter = datasetNames is { Count: > 0 };
@@ -271,6 +276,8 @@ public partial class DbService
         var whereClauses = new List<string> { "p.FileName ILIKE @pattern" };
         if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
         if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+        var advFragment = advanced?.BuildWhereFragment("p");
+        if (!string.IsNullOrEmpty(advFragment)) whereClauses.Add(advFragment);
         var whereClause = "WHERE " + string.Join(" AND ", whereClauses);
 
         var sql = $@"
@@ -291,6 +298,7 @@ public partial class DbService
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(cmd);
 
         var count = cmd.ExecuteNonQuery();
 
@@ -309,7 +317,7 @@ public partial class DbService
     // -----------------------------------------------------------------------
 
     public int ExecuteTier2_Metadata(string queryHash, string query,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
         using var conn = _dataSource.OpenConnection();
         var datasetFilter = datasetNames is { Count: > 0 };
@@ -333,6 +341,8 @@ public partial class DbService
             var extraWhere = new List<string>();
             if (datasetFilter) extraWhere.Add("d.Name = ANY(@datasetNames)");
             if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+            var advFragment = advanced?.BuildWhereFragment("p");
+            if (!string.IsNullOrEmpty(advFragment)) extraWhere.Add(advFragment);
             var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
             var sql = $@"
@@ -350,12 +360,13 @@ public partial class DbService
             cmd.Parameters.AddWithValue("pattern", pattern);
             if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
             if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+            advanced?.ApplyParams(cmd);
 
             using var reader = cmd.ExecuteReader();
-            var batch = new List<(int docId, string? matchedValue, float similarity)>();
+            var batch = new List<(Guid docId, string? matchedValue, float similarity)>();
             while (reader.Read())
             {
-                batch.Add((reader.GetInt32(0),
+                batch.Add((reader.GetGuid(0),
                            reader.IsDBNull(1) ? null : reader.GetString(1),
                            reader.IsDBNull(2) ? 0f : reader.GetFloat(2)));
             }
@@ -394,11 +405,13 @@ public partial class DbService
     // -----------------------------------------------------------------------
 
     public int ExecuteTier3_FullText(string queryHash, string query,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
         using var conn = _dataSource.OpenConnection();
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
+        var advFragment = advanced?.BuildWhereFragment("p");
+        var needsParentJoin = datasetFilter || namesFilter || !string.IsNullOrEmpty(advFragment);
 
         var extraJoin = datasetFilter ? "JOIN ParentDocuments p ON c.ParentId = p.Id JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
         var extraWhere = new List<string>();
@@ -407,6 +420,11 @@ public partial class DbService
         {
             if (!datasetFilter) extraJoin = "JOIN ParentDocuments p ON c.ParentId = p.Id";
             extraWhere.Add(NamesAndClause("p"));
+        }
+        if (!string.IsNullOrEmpty(advFragment))
+        {
+            if (string.IsNullOrEmpty(extraJoin)) extraJoin = "JOIN ParentDocuments p ON c.ParentId = p.Id";
+            extraWhere.Add(advFragment);
         }
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
@@ -440,6 +458,7 @@ public partial class DbService
         cmd.Parameters.AddWithValue("query", query);
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(cmd);
 
         var count = cmd.ExecuteNonQuery();
 
@@ -457,7 +476,7 @@ public partial class DbService
     // -----------------------------------------------------------------------
 
     public async Task<int> ExecuteTier4_VectorAsync(string queryHash, string query,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
         if (_embeddingService == null) return 0;
 
@@ -485,6 +504,8 @@ public partial class DbService
         var whereClauses = new List<string> { "c.Embedding IS NOT NULL" };
         if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
         if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+        var advFragment = advanced?.BuildWhereFragment("p");
+        if (!string.IsNullOrEmpty(advFragment)) whereClauses.Add(advFragment);
         var whereClause = string.Join(" AND ", whereClauses);
 
         var sql = $@"
@@ -513,6 +534,7 @@ public partial class DbService
         cmd.Parameters.AddWithValue("queryVector", new Vector(queryEmbedding));
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(cmd);
 
         var count = await cmd.ExecuteNonQueryAsync();
 

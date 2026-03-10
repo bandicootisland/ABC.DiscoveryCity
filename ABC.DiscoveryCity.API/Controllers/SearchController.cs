@@ -70,32 +70,44 @@ public class SearchController : ControllerBase
         [FromQuery] bool exactMatch = false,
         [FromQuery] List<string>? datasets = null,
         [FromQuery] List<string>? names = null,
-        [FromQuery] bool filenameOnly = false)
+        [FromQuery] bool filenameOnly = false,
+        [FromQuery] List<string>? ext = null,
+        [FromQuery] string? dateFrom = null,
+        [FromQuery] string? dateTo = null,
+        [FromQuery] int? minPages = null,
+        [FromQuery] int? maxPages = null)
     {
         var datasetNames = datasets?.Where(s => !string.IsNullOrEmpty(s)).ToList();
         var nameValues = names?.Where(s => !string.IsNullOrEmpty(s)).ToList();
+        var extensions = ext?.Where(s => !string.IsNullOrEmpty(s)).ToList();
+        var advanced = new AdvancedFilters(
+            Extensions: extensions is { Count: > 0 } ? extensions : null,
+            DateFrom: DateTime.TryParse(dateFrom, out var df) ? df : null,
+            DateTo: DateTime.TryParse(dateTo, out var dt) ? dt : null,
+            MinPages: minPages,
+            MaxPages: maxPages);
 
         // No search query — use cached two-phase browse (unchanged)
         if (string.IsNullOrWhiteSpace(query))
         {
-            return Ok(BrowsePaged(skip, take, datasetNames, nameValues));
+            return Ok(BrowsePaged(skip, take, datasetNames, nameValues, advanced));
         }
 
         // Filename-only mode — single tier, no fan-out needed
         if (filenameOnly)
         {
-            return Ok(FilenamePaged(query, skip, take, datasetNames, nameValues));
+            return Ok(FilenamePaged(query, skip, take, datasetNames, nameValues, advanced));
         }
 
         // --- Tiered fan-out search ---
-        var queryHash = DbService.ComputeQueryHash(query, exactMatch, filenameOnly, datasetNames, nameValues);
+        var queryHash = DbService.ComputeQueryHash(query, exactMatch, filenameOnly, datasetNames, nameValues, advanced);
         var (_, isNew, existingStatus) = _dbService.GetOrCreateSearchQuery(
-            query, exactMatch, filenameOnly, datasetNames, nameValues);
+            query, exactMatch, filenameOnly, datasetNames, nameValues, advanced);
 
         if (isNew)
         {
             // Launch fan-out: all tiers in parallel, don't await all
-            LaunchFanOut(queryHash, query, exactMatch, datasetNames, nameValues);
+            LaunchFanOut(queryHash, query, exactMatch, datasetNames, nameValues, advanced);
 
             // Wait for fast tiers (1+2) to finish, with timeout
             var fastDeadline = Task.Delay(500);
@@ -155,7 +167,7 @@ public class SearchController : ControllerBase
     /// Merge checkpoints happen on the next poll from the client.
     /// </summary>
     private void LaunchFanOut(string queryHash, string query, bool exactMatch,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
         if (_inFlightSearches.ContainsKey(queryHash)) return;
 
@@ -166,19 +178,19 @@ public class SearchController : ControllerBase
                 // Launch all tiers in parallel
                 var tier1 = Task.Run(() =>
                 {
-                    try { _dbService.ExecuteTier1_Filename(queryHash, query, datasetNames, nameValues); }
+                    try { _dbService.ExecuteTier1_Filename(queryHash, query, datasetNames, nameValues, advanced); }
                     catch (Exception ex) { Console.WriteLine($"[Tier1] Error: {ex.Message}"); }
                 });
 
                 var tier2 = Task.Run(() =>
                 {
-                    try { _dbService.ExecuteTier2_Metadata(queryHash, query, datasetNames, nameValues); }
+                    try { _dbService.ExecuteTier2_Metadata(queryHash, query, datasetNames, nameValues, advanced); }
                     catch (Exception ex) { Console.WriteLine($"[Tier2] Error: {ex.Message}"); }
                 });
 
                 var tier3 = Task.Run(() =>
                 {
-                    try { _dbService.ExecuteTier3_FullText(queryHash, query, datasetNames, nameValues); }
+                    try { _dbService.ExecuteTier3_FullText(queryHash, query, datasetNames, nameValues, advanced); }
                     catch (Exception ex) { Console.WriteLine($"[Tier3] Error: {ex.Message}"); }
                 });
 
@@ -186,7 +198,7 @@ public class SearchController : ControllerBase
                 var tier4 = !exactMatch
                     ? Task.Run(async () =>
                     {
-                        try { await _dbService.ExecuteTier4_VectorAsync(queryHash, query, datasetNames, nameValues); }
+                        try { await _dbService.ExecuteTier4_VectorAsync(queryHash, query, datasetNames, nameValues, advanced); }
                         catch (Exception ex) { Console.WriteLine($"[Tier4] Error: {ex.Message}"); }
                     })
                     : Task.CompletedTask;
@@ -233,15 +245,15 @@ public class SearchController : ControllerBase
     // -----------------------------------------------------------------------
 
     private PagedSearchResult BrowsePaged(int skip, int take,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
-        var browseCacheKey = BuildBrowseCacheKey(datasetNames, nameValues);
+        var browseCacheKey = BuildBrowseCacheKey(datasetNames, nameValues, advanced);
 
         var browseEntry = _cache.GetOrCreate(browseCacheKey, cacheEntry =>
         {
             cacheEntry.SlidingExpiration = TimeSpan.FromMinutes(5);
             Console.WriteLine("[BrowseCache] MISS — loading browse IDs");
-            var (ids, realTotal) = _dbService.GetBrowseDocumentIds(datasetNames, nameValues);
+            var (ids, realTotal) = _dbService.GetBrowseDocumentIds(datasetNames, nameValues, advanced);
             return new BrowseCacheEntry { Ids = ids, TotalCount = realTotal };
         })!;
 
@@ -278,15 +290,15 @@ public class SearchController : ControllerBase
     // -----------------------------------------------------------------------
 
     private PagedSearchResult FilenamePaged(string query, int skip, int take,
-        List<string>? datasetNames, List<string>? nameValues)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
     {
-        var cacheKey = BuildCacheKey(query, false, datasetNames, nameValues, filenameOnly: true);
+        var cacheKey = BuildCacheKey(query, false, datasetNames, nameValues, filenameOnly: true, advanced: advanced);
 
         var entry = _cache.GetOrCreate(cacheKey, cacheEntry =>
         {
             cacheEntry.SlidingExpiration = TimeSpan.FromMinutes(5);
             Console.WriteLine($"[SearchCache] MISS — filename search for: {query}");
-            var ids = _dbService.SearchByFileNameIds(query, datasetNames, nameValues);
+            var ids = _dbService.SearchByFileNameIds(query, datasetNames, nameValues, advanced);
             return new SearchCacheEntry { Ids = ids };
         })!;
 
@@ -330,7 +342,7 @@ public class SearchController : ControllerBase
     }
 
     private static string BuildCacheKey(string query, bool exactMatch,
-        List<string>? datasets, List<string>? names, bool filenameOnly = false)
+        List<string>? datasets, List<string>? names, bool filenameOnly = false, AdvancedFilters? advanced = null)
     {
         var sb = new StringBuilder();
         sb.Append("search:");
@@ -348,10 +360,11 @@ public class SearchController : ControllerBase
             sb.Append(":nm=");
             sb.Append(string.Join(",", names.OrderBy(n => n)));
         }
+        if (advanced?.HasAny == true) { sb.Append(':'); sb.Append(advanced.ToFingerprint()); }
         return sb.ToString();
     }
 
-    private static string BuildBrowseCacheKey(List<string>? datasets, List<string>? names)
+    private static string BuildBrowseCacheKey(List<string>? datasets, List<string>? names, AdvancedFilters? advanced = null)
     {
         var sb = new StringBuilder();
         sb.Append("browse:");
@@ -365,32 +378,48 @@ public class SearchController : ControllerBase
             sb.Append(":nm=");
             sb.Append(string.Join(",", names.OrderBy(n => n)));
         }
+        if (advanced?.HasAny == true) { sb.Append(':'); sb.Append(advanced.ToFingerprint()); }
         return sb.ToString();
     }
 
-    private static SearchResultDto MapToDto(DocumentSearchResult r) => new()
+    private static SearchResultDto MapToDto(DocumentSearchResult r)
     {
-        FileName = r.FileName,
-        FilePath = r.ResolvedFilePath,
-        ThumbnailPath = r.ResolvedThumbnailPath,
-        FullImagePath = r.ResolvedFullImagePath,
-        Text = r.Text,
-        Distance = r.Distance,
-        Date = r.Date,
-        PageCount = r.PageCount,
-        SourceName = r.SourceName,
-        DataSetName = r.DataSetName,
-        SourceUrl = r.SourceUrl,
-        Names = ParseJsonStringArray(r.Names),
-        Terms = ParseJsonStringArray(r.Terms),
-        MetadataJson = r.MetadataJson
-    };
+        // Prefer resolved file path; fall back to blob endpoint for DB-stored images
+        string? thumbPath = r.ResolvedThumbnailPath;
+        string? fullImgPath = r.ResolvedFullImagePath;
+
+        // Fall back to bare filename — frontend wraps in /api/images/view?path=
+        // and the ViewFile endpoint falls back to DB blob lookup by filename
+        if (thumbPath == null && r.HasThumbnail)
+            thumbPath = r.ThumbnailFileName;
+        if (fullImgPath == null && r.HasFullImage)
+            fullImgPath = r.FullImageFileName;
+
+        return new()
+        {
+            Id = r.Id,
+            FileName = r.FileName,
+            FilePath = r.ResolvedFilePath,
+            ThumbnailPath = thumbPath,
+            FullImagePath = fullImgPath,
+            Text = r.Text,
+            Distance = r.Distance,
+            Date = r.Date,
+            PageCount = r.PageCount,
+            SourceName = r.SourceName,
+            DataSetName = r.DataSetName,
+            SourceUrl = r.SourceUrl,
+            Names = ParseJsonStringArray(r.Names),
+            Terms = ParseJsonStringArray(r.Terms),
+            MetadataJson = r.MetadataJson
+        };
+    }
 
     [HttpGet("counts")]
     public IActionResult GetCounts()
     {
-        var (docs, images, sentences) = _dbService.GetCounts();
-        return Ok(new { Documents = docs, Images = images, Sentences = sentences });
+        var (docs, images, chunks) = _dbService.GetCounts();
+        return Ok(new { Documents = docs, Images = images, Chunks = chunks });
     }
 
     [HttpGet("stats")]
@@ -434,6 +463,7 @@ public class SearchController : ControllerBase
 
 public class SearchResultDto
 {
+    public Guid Id { get; set; }
     public string FileName { get; set; } = string.Empty;
     public string? FilePath { get; set; }
     public string? ThumbnailPath { get; set; }

@@ -1,9 +1,13 @@
 using ABC.DiscoveryCity.API.Services;
 using Elastic.Clients.Elasticsearch;
 
-//Register Syncfusion license https://help.syncfusion.com/common/essential-studio/licensing/how-to-generate            
+//Register Syncfusion license https://help.syncfusion.com/common/essential-studio/licensing/how-to-generate
 //20/4/25, 4 major versions, from 29.x.x
 Syncfusion.Licensing.SyncfusionLicenseProvider.RegisterLicense("MzgyMzc3NUAzMjM5MmUzMDJlMzAzYjMzMzMzYkFFWFBEN3orNmlIekpzMmtSMDZXY2RZSnJ6TXZOMDArSjJ3RmFNay9QY0k9");
+
+// DevExpress font provider — required for PDF page rendering
+Telerik.Windows.Documents.Extensibility.FixedExtensibilityManager.FontsProvider =
+    new ABC.DiscoveryCity.TelerikProcessing.WindowsFontsProvider();
 
 var builder = WebApplication.CreateBuilder(args);
 // Add services to the container.

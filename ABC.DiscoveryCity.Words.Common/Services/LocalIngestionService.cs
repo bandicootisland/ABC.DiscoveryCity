@@ -57,7 +57,7 @@ namespace ABC.DiscoveryCity.Services
                     // 3. Get Vector
                     //float[] vector = await _ai.GetEmbeddingAsync(cleanText);
 
-                    float[] vector = new float[384]; // Dummy 384-dim vector for now
+                    float[] vector = new float[1024]; // Dummy 1024-dim vector for now
 
                     // 3. Write to DB
                     using (var cmd = new NpgsqlCommand(sql, conn, trans))
