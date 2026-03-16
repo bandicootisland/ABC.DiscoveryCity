@@ -42,7 +42,10 @@ public class OllamaEmbeddingService : IEmbeddingService
     /// <inheritdoc/>
     public async Task<float[]> GetEmbeddingAsync(string text)
     {
-        var requestObj = new { model = _modelName, prompt = text };
+        // mxbai-embed-large supports 512 tokens, truncate to ~2000 chars
+        string truncatedText = text.Length > 2000 ? text.Substring(0, 2000) : text;
+        
+        var requestObj = new { model = _modelName, prompt = truncatedText };
         var jsonContent = new StringContent(
             JsonSerializer.Serialize(requestObj),
             Encoding.UTF8,

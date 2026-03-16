@@ -29,7 +29,6 @@ bool extractNamesLlm = args.Any(a => a.Equals("--extract-names-llm", StringCompa
 bool noEmbeddings = args.Any(a => a.Equals("--no-embeddings", StringComparison.OrdinalIgnoreCase));
 int limitFiles = 0;
 string? folderArg = null;
-string? extFilter = null;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i].Equals("--limit", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
@@ -39,10 +38,6 @@ for (int i = 0; i < args.Length; i++)
     if (args[i].Equals("--folder", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
     {
         folderArg = args[i + 1];
-    }
-    if (args[i].Equals("--ext", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
-    {
-        extFilter = args[i + 1];
     }
 }
 
@@ -56,7 +51,7 @@ if (!rootFolder.EndsWith(Path.DirectorySeparatorChar) && !rootFolder.EndsWith(Pa
     rootFolder += Path.DirectorySeparatorChar;
 
 // Filter out --folder value and --limit value from positional args
-var skipArgs = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--folder", "--limit", "--ext" };
+var skipArgs = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "--folder", "--limit" };
 var positionalArgs = new List<string>();
 for (int i = 0; i < args.Length; i++)
 {
@@ -320,10 +315,9 @@ if (args.Any(a => a.Equals("--stats", StringComparison.OrdinalIgnoreCase)))
     {
         var stats = new DbService(null).GetSystemStats();
         Console.WriteLine($"\n=== DATABASE STATE ===");
-        Console.WriteLine($"Documents:  {stats.TotalDocuments}");
-        Console.WriteLine($"Images:     {stats.TotalImages}");
-        Console.WriteLine($"Chunks:     {stats.TotalChunks}");
-        Console.WriteLine($"Embeddings: {stats.ChunksWithEmbeddings}");
+        Console.WriteLine($"Documents: {stats.TotalDocuments}");
+        Console.WriteLine($"Images:    {stats.TotalImages}");
+        Console.WriteLine($"Sentences: {stats.TotalSentences}");
         Console.WriteLine("======================\n");
     }
     catch (Exception ex)
@@ -343,7 +337,6 @@ if (reprocessMode) Console.WriteLine("MODE: Reprocess (re-extract metadata from 
 if (forceReprocess) Console.WriteLine("MODE: Force reprocess (ignore .done flags)");
 if (extractNamesLlm) Console.WriteLine("MODE: LLM Names extraction (using Ollama) — NOT YET IMPLEMENTED");
 if (noEmbeddings) Console.WriteLine("MODE: No embeddings (skip embedding generation, preserve existing)");
-if (!string.IsNullOrEmpty(extFilter)) Console.WriteLine($"MODE: Extension filter: {extFilter}");
 
 // Initialize Embedding Service (Ollama)
 IEmbeddingService? embeddingService = null;
@@ -373,8 +366,10 @@ try
 {
     if (resetDb)
     {
+        Console.WriteLine("⚠ --reset-db: Dropping all tables for UUID v7 schema migration...");
         var resetService = new DbService(embeddingService);
-        resetService.ResetDb();
+        resetService.DropAllTables();
+        Console.WriteLine("All tables dropped. Recreating with UUID schema...");
     }
 
     new DbService(embeddingService).InitDb();
@@ -511,7 +506,7 @@ if (embeddingsOnly)
     int totalUpdated = 0;
     int totalErrors = 0;
     int batchLimit = limitFiles > 0 ? limitFiles : int.MaxValue;
-    int maxDegreeOfParallelism = 5;
+
     while (totalUpdated < batchLimit)
     {
         var docs = dbService.GetDocsWithoutEmbeddings(Math.Min(batchSize, batchLimit - totalUpdated));
@@ -519,7 +514,7 @@ if (embeddingsOnly)
 
         Console.WriteLine($"  Batch: {docs.Count} documents (total updated so far: {totalUpdated}/{totalMissing})");
 
-        await Parallel.ForEachAsync(docs, new ParallelOptions { MaxDegreeOfParallelism= maxDegreeOfParallelism }, async (doc, ct) =>
+        await Parallel.ForEachAsync(docs, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (doc, ct) =>
         {
             try
             {
@@ -715,7 +710,7 @@ Console.WriteLine($"Created/Found Source: {sourceName} (Id: {sourceId})");
 
 foreach (var folder in targetFolders)
 {
-    string dataSetName = Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) ?? "Default";
+    string dataSetName = Path.GetFileName(folder) ?? "Default";
     string publishedRelFolder = dataSetName + "/Published/";
     string publishedDir = Path.Combine(folder, "Published");
     Guid dataSetId = dbService.GetOrCreateDataSet(sourceId, dataSetName, publishedRelFolder);
@@ -732,22 +727,13 @@ foreach (var folder in targetFolders)
     // Scan for all supported file types, excluding the Published output directory
     var supportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         { ".pdf", ".xlsx", ".xls", ".csv", ".avi", ".mp4", ".vob", ".mov", ".mkv", ".wmv", ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac" };
-    // --ext filter: e.g. --ext .pdf or --ext ".pdf,.xlsx"
-    if (!string.IsNullOrEmpty(extFilter))
-    {
-        supportedExtensions = new HashSet<string>(
-            extFilter.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Select(e => e.StartsWith('.') ? e : "." + e),
-            StringComparer.OrdinalIgnoreCase);
-        Console.WriteLine($"  Extension filter: {string.Join(", ", supportedExtensions)}");
-    }
     var allFiles = Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories)
         .Where(f => !f.Contains(Path.DirectorySeparatorChar + "Published" + Path.DirectorySeparatorChar))
         .Where(f => supportedExtensions.Contains(Path.GetExtension(f)))
         .ToArray();
 
     // Process files concurrently using pipeline
-    int maxDegreeOfParallelism = 3; // 3 optimal proven by sampling
+    int maxDegreeOfParallelism = 1;
     var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism };
     await Parallel.ForEachAsync(allFiles, parallelOptions, async (filePath, ct) =>
     {
@@ -787,7 +773,8 @@ foreach (var folder in targetFolders)
                 .AddStep(new TextEnhanceStep())
                 .AddStep(new MetadataExtractionStep())
                 .AddStep(new SentenceIdStep())
-                // ThumbnailStep + PageImagesStep removed — thumbnails now rendered lazily by API on first view
+                .AddStep(new ThumbnailStep())
+                .AddStep(new PageImagesStep())
                 .AddStep(new HtmlViewerStep())
                 .AddStep(new XlsxBundleStep())
                 .AddStep(new StoreToPostgresStep());
