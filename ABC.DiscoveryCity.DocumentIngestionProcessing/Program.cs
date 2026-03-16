@@ -733,7 +733,7 @@ foreach (var folder in targetFolders)
         .ToArray();
 
     // Process files concurrently using pipeline
-    int maxDegreeOfParallelism = 1;
+    int maxDegreeOfParallelism = 3; // optimal proven by sampling (1/2/3/5/10 tested)
     var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = maxDegreeOfParallelism };
     await Parallel.ForEachAsync(allFiles, parallelOptions, async (filePath, ct) =>
     {
