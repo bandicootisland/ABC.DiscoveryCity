@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO.Packaging;
 using ABC.DiscoveryCity.DevExpressProcessing;
 using ABC.DiscoveryCity.PostgreSQL;
 using Microsoft.AspNetCore.Mvc;
@@ -57,10 +58,19 @@ public class ImagesController : ControllerBase
 
         // Resolve the path for the current OS — handles Windows paths on Linux and vice versa
         var resolvedPath = DbService.ResolveFilePathForCurrentOs(path);
+        var extension = Path.GetExtension(resolvedPath).ToLowerInvariant();
 
+        // For PDFs, try extracting from the XLSX bundle first (cloud-ready: no disk dependency)
+        if (extension == ".pdf")
+        {
+            var pdfFromBundle = ExtractPdfFromXlsxBundle(resolvedPath);
+            if (pdfFromBundle != null)
+                return File(pdfFromBundle, "application/pdf", enableRangeProcessing: true);
+        }
+
+        // Fall back to serving directly from disk
         if (System.IO.File.Exists(resolvedPath))
         {
-            var extension = Path.GetExtension(resolvedPath).ToLowerInvariant();
             string contentType = extension switch
             {
                 ".pdf" => "application/pdf",
@@ -74,11 +84,11 @@ public class ImagesController : ControllerBase
                 ".vob" => "video/mpeg",
                 _ => "application/octet-stream"
             };
-            
+
             return PhysicalFile(resolvedPath, contentType, enableRangeProcessing: true);
         }
 
-        // File not on disk — try serving from DB binary data
+        // Last resort — try serving from DB binary data
         var imageData = _dbService.GetImageData(path);
         if (imageData.Length > 0)
         {
@@ -86,6 +96,40 @@ public class ImagesController : ControllerBase
         }
 
         return NotFound($"File not found: {resolvedPath}");
+    }
+
+    /// <summary>
+    /// Extracts the embedded source PDF from the corresponding XLSX bundle.
+    /// The XLSX sits alongside the PDF in the Published folder with the same base name.
+    /// </summary>
+    private static byte[]? ExtractPdfFromXlsxBundle(string pdfPath)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(pdfPath);
+            if (dir == null) return null;
+
+            var baseName = Path.GetFileNameWithoutExtension(pdfPath);
+            var xlsxPath = Path.Combine(dir, baseName + ".xlsx");
+
+            if (!System.IO.File.Exists(xlsxPath)) return null;
+
+            using var stream = System.IO.File.OpenRead(xlsxPath);
+            using var package = Package.Open(stream, FileMode.Open, FileAccess.Read);
+
+            var pdfUri = PackUriHelper.CreatePartUri(new Uri("data/source.pdf", UriKind.Relative));
+            if (!package.PartExists(pdfUri)) return null;
+
+            var pdfPart = package.GetPart(pdfUri);
+            using var partStream = pdfPart.GetStream(FileMode.Open, FileAccess.Read);
+            using var ms = new MemoryStream();
+            partStream.CopyTo(ms);
+            return ms.ToArray();
+        }
+        catch
+        {
+            return null; // Fall through to other methods
+        }
     }
 
     /// <summary>
