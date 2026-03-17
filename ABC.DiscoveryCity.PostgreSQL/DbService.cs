@@ -1687,16 +1687,18 @@ public partial class DbService
     /// Filename-only search — returns IDs of documents whose FileName matches the query.
     /// </summary>
     public Guid[] SearchByFileNameIds(string query,
-        List<string>? datasetNames = null, List<string>? nameValues = null)
+        List<string>? datasetNames = null, List<string>? nameValues = null, AdvancedFilters? advanced = null)
     {
         using var conn = _dataSource.OpenConnection();
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
+        var advancedFilter = advanced?.HasAny == true;
 
         var extraJoin = datasetFilter ? "JOIN DataSets dd ON p.DataSetId = dd.Id" : "";
         var extraWhere = new List<string>();
         if (datasetFilter) extraWhere.Add("dd.Name = ANY(@datasetNames)");
         if (namesFilter) extraWhere.Add(NamesAndClause("p"));
+        if (advancedFilter) extraWhere.Add(advanced!.BuildWhereFragment("p"));
         var extraWhereStr = extraWhere.Count > 0 ? "AND " + string.Join(" AND ", extraWhere) : "";
 
         var sql = $@"
@@ -1709,6 +1711,7 @@ public partial class DbService
         cmd.Parameters.AddWithValue("pattern", $"%{query}%");
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        if (advancedFilter) advanced!.ApplyParams(cmd);
 
         var ids = new List<Guid>();
         using var reader = cmd.ExecuteReader();
@@ -1868,15 +1871,17 @@ public partial class DbService
     /// Used by the browse cache — run once, cache the IDs, hydrate pages via HydrateByIds.
     /// </summary>
     public (Guid[] Ids, int TotalCount) GetBrowseDocumentIds(
-        List<string>? datasetNames = null, List<string>? nameValues = null)
+        List<string>? datasetNames = null, List<string>? nameValues = null, AdvancedFilters? advanced = null)
     {
         using var conn = _dataSource.OpenConnection();
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
+        var advancedFilter = advanced?.HasAny == true;
 
         var whereClauses = new List<string>();
         if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
         if (namesFilter) whereClauses.Add(NamesAndClause("p"));
+        if (advancedFilter) whereClauses.Add(advanced!.BuildWhereFragment("p"));
         var whereClause = whereClauses.Count > 0
             ? "WHERE " + string.Join(" AND ", whereClauses)
             : "";
@@ -1888,6 +1893,7 @@ public partial class DbService
         countCmd.CommandTimeout = 120;
         if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        if (advancedFilter) advanced!.ApplyParams(countCmd);
         var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
 
         // IDs capped at 50K for cache-based paging
@@ -1903,6 +1909,7 @@ public partial class DbService
         cmd.CommandTimeout = 120;
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        if (advancedFilter) advanced!.ApplyParams(cmd);
 
         var ids = new List<Guid>();
         using var reader = cmd.ExecuteReader();
@@ -2205,6 +2212,8 @@ public class DocumentSearchResult
     public string? Terms { get; set; }
     public string MetadataJson { get; set; } = "{}";
     public string? SourceUrl { get; set; }
+    public bool HasThumbnail => !string.IsNullOrEmpty(ThumbnailFileName);
+    public bool HasFullImage => !string.IsNullOrEmpty(FullImageFileName);
 
     /// <summary>Resolve the document file path for the current OS.</summary>
     public string? ResolvedFilePath => 
@@ -2473,6 +2482,103 @@ public partial class DbService
         {
             Console.WriteLine($"Error getting image data: {ex.Message}");
             return Array.Empty<byte>();
+        }
+    }
+
+    /// <summary>
+    /// Serves image blob directly from DB by parent document Id and size.
+    /// </summary>
+    public byte[] GetImageDataByParentId(Guid parentId, string size)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            string sql = @"
+                SELECT ImageData FROM DocumentImages 
+                WHERE ParentId = @id AND ImageSize = @size AND ImageData IS NOT NULL
+                LIMIT 1;
+            ";
+
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("id", parentId);
+            cmd.Parameters.AddWithValue("size", size);
+
+            var result = cmd.ExecuteScalar();
+            return result as byte[] ?? Array.Empty<byte>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting image data by parent ID: {ex.Message}");
+            return Array.Empty<byte>();
+        }
+    }
+
+    /// <summary>
+    /// Resolves the absolute file path for a parent document.
+    /// </summary>
+    public string? GetFilePathByParentId(Guid parentId)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            string sql = @"
+                SELECT p.FileName, p.FilePath, d.PdfFolder 
+                FROM ParentDocuments p
+                LEFT JOIN DataSets d ON p.DataSetId = d.Id
+                WHERE p.Id = @id;
+            ";
+
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("id", parentId);
+
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                string fileName = reader.GetString(0);
+                string? filePath = reader.IsDBNull(1) ? null : reader.GetString(1);
+                string? pdfFolder = reader.IsDBNull(2) ? null : reader.GetString(2);
+
+                return BuildPath(pdfFolder, fileName) 
+                    ?? (filePath != null ? ResolveFilePathForCurrentOs(filePath) : null);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error getting file path: {ex.Message}");
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Inserts or updates a page image in the DocumentImages table.
+    /// </summary>
+    public void InsertPageImage(Guid parentId, string size, byte[] data, int width, int height)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            string sql = @"
+                INSERT INTO DocumentImages (ParentId, ImageType, ImageSize, ImageData, Width, Height, CreatedAt)
+                VALUES (@parentId, 'Page', @size, @data, @width, @height, NOW())
+                ON CONFLICT (ParentId, ImageSize) DO UPDATE SET
+                    ImageData = EXCLUDED.ImageData,
+                    Width = EXCLUDED.Width,
+                    Height = EXCLUDED.Height,
+                    CreatedAt = NOW();
+            ";
+
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("parentId", parentId);
+            cmd.Parameters.AddWithValue("size", size);
+            cmd.Parameters.AddWithValue("data", data);
+            cmd.Parameters.AddWithValue("width", width);
+            cmd.Parameters.AddWithValue("height", height);
+
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error inserting page image: {ex.Message}");
         }
     }
 }
