@@ -57,24 +57,28 @@ public class ThumbnailStep : IIngestionStep
             int w = img.Width;
             int h = img.Height;
 
-            // Save full preview
+            // Save full preview as JPEG
             string baseName = Path.GetFileNameWithoutExtension(ctx.FilePath);
-            string fullPath = Path.Combine(ctx.OutputDir, $"{baseName}_page1.png");
-            File.WriteAllBytes(fullPath, pageData);
+            using var previewMs = new MemoryStream();
+            img.SaveAsJpeg(previewMs);
+            byte[] previewData = previewMs.ToArray();
+
+            string fullPath = Path.Combine(ctx.OutputDir, $"{baseName}_page1.jpg");
+            File.WriteAllBytes(fullPath, previewData);
             ctx.FullImagePath = fullPath;
             ctx.FullImageWidth = w;
             ctx.FullImageHeight = h;
-            ctx.FullImageData = pageData;
+            ctx.FullImageData = previewData;
 
             // Generate thumb by resizing from the same render
             int thumbW = 100;
             int thumbH = w > 0 ? (int)(100.0 * h / w) : 0;
             using var thumbImg = img.Clone(x => x.Resize(thumbW, thumbH));
             using var thumbMs = new MemoryStream();
-            thumbImg.SaveAsPng(thumbMs);
+            thumbImg.SaveAsJpeg(thumbMs);
             byte[] thumbData = thumbMs.ToArray();
 
-            string thumbPath = Path.Combine(ctx.OutputDir, $"{baseName}_page1_thumb.png");
+            string thumbPath = Path.Combine(ctx.OutputDir, $"{baseName}_page1_thumb.jpg");
             File.WriteAllBytes(thumbPath, thumbData);
             ctx.ThumbImagePath = thumbPath;
             ctx.ThumbImageWidth = thumbW;

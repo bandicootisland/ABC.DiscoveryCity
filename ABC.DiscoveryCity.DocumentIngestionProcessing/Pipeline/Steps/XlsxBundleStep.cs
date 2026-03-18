@@ -31,7 +31,7 @@ public class XlsxBundleStep : IIngestionStep
             : null;
 
         XlsxBundleWriter.Write(xlsxPath, ctx.Metadata, ctx.DisplaySentences, ctx.RenderedPages, htmlContent,
-            ctx.SentenceIds.Count > 0 ? ctx.SentenceIds : null, pdfForBundle);
+            ctx.SentenceIds.Count > 0 ? ctx.SentenceIds : null, pdfForBundle, ctx.FileName);
         Console.WriteLine($"  XLSX bundle: {baseName}.xlsx");
 
         return Task.CompletedTask;

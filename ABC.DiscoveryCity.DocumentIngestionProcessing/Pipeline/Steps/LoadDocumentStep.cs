@@ -28,14 +28,15 @@ public class LoadDocumentStep : IIngestionStep
                 throw new InvalidOperationException($"Unsupported file type: {ctx.FileExtension}");
         }
 
-        // Ensure Published directory exists
-        if (!string.IsNullOrEmpty(ctx.PublishedDir) && !Directory.Exists(ctx.PublishedDir))
-            Directory.CreateDirectory(ctx.PublishedDir);
+        // Ensure per-document Published subfolder exists
+        var outputDir = ctx.OutputDir;
+        if (!string.IsNullOrEmpty(outputDir) && !Directory.Exists(outputDir))
+            Directory.CreateDirectory(outputDir);
 
-        // Copy source file to Published folder
+        // Copy source file to Published subfolder
         if (!string.IsNullOrEmpty(ctx.PublishedDir))
         {
-            ctx.PublishedFilePath = Path.Combine(ctx.PublishedDir, ctx.FileName);
+            ctx.PublishedFilePath = Path.Combine(outputDir, ctx.FileName);
             if (!File.Exists(ctx.PublishedFilePath))
             {
                 File.Copy(ctx.FilePath, ctx.PublishedFilePath);
