@@ -88,7 +88,15 @@ public class IngestionContext
     // --- Helpers ---
     public string FileName => Path.GetFileName(FilePath);
     public string FileExtension => Path.GetExtension(FilePath).ToLowerInvariant();
-    public string OutputDir => PublishedDir ?? Path.GetDirectoryName(FilePath) ?? "";
+    public string OutputDir
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(PublishedDir)) return Path.GetDirectoryName(FilePath) ?? "";
+            var baseName = Path.GetFileNameWithoutExtension(FilePath);
+            return Path.Combine(PublishedDir, baseName);
+        }
+    }
 
     public FileCategory Category => FileExtension switch
     {

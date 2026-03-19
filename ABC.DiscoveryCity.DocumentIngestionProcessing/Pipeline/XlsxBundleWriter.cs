@@ -24,7 +24,7 @@ public static class XlsxBundleWriter
     public static void Write(string outputPath, PdfMetadata metadata,
         List<string> sentences, Dictionary<int, byte[]> renderedPages,
         string? htmlContent = null, List<Guid>? sentenceIds = null,
-        byte[]? pdfBytes = null)
+        byte[]? pdfBytes = null, string? pdfFileName = null)
     {
         // Phase 1: Write XLSX spreadsheet
         using (var doc = SpreadsheetDocument.Create(outputPath, SpreadsheetDocumentType.Workbook))
@@ -49,7 +49,7 @@ public static class XlsxBundleWriter
             if (pdfBytes is { Length: > 0 })
             {
                 // Small PDF: embed source PDF directly (cheaper than page images)
-                pdfSize = EmbedPdf(package, pdfBytes);
+                pdfSize = EmbedPdf(package, pdfBytes, pdfFileName);
             }
             else
             {
@@ -141,9 +141,10 @@ public static class XlsxBundleWriter
         return count;
     }
 
-    private static int EmbedPdf(Package package, byte[] pdfBytes)
+    private static int EmbedPdf(Package package, byte[] pdfBytes, string? pdfFileName = null)
     {
-        var uri = PackUriHelper.CreatePartUri(new Uri("data/source.pdf", UriKind.Relative));
+        var name = pdfFileName ?? "source.pdf";
+        var uri = PackUriHelper.CreatePartUri(new Uri($"data/{name}", UriKind.Relative));
         var part = package.CreatePart(uri, "application/pdf", CompressionOption.Maximum);
         using var stream = part.GetStream(FileMode.Create);
         stream.Write(pdfBytes, 0, pdfBytes.Length);

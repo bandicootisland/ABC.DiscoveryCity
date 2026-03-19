@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO;
-using System.IO.Packaging;
+using System.IO.Compression;
 using ABC.DiscoveryCity.DevExpressProcessing;
 using ABC.DiscoveryCity.PostgreSQL;
 using Microsoft.AspNetCore.Mvc;
@@ -116,15 +116,15 @@ public class ImagesController : ControllerBase
             if (!System.IO.File.Exists(xlsxPath)) return null;
 
             using var stream = System.IO.File.OpenRead(xlsxPath);
-            using var package = Package.Open(stream, FileMode.Open, FileAccess.Read);
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
 
-            var pdfUri = PackUriHelper.CreatePartUri(new Uri("data/source.pdf", UriKind.Relative));
-            if (!package.PartExists(pdfUri)) return null;
+            var pdfName = Path.GetFileName(pdfPath);
+            var entry = zip.GetEntry($"data/{pdfName}") ?? zip.GetEntry("data/source.pdf");
+            if (entry == null) return null;
 
-            var pdfPart = package.GetPart(pdfUri);
-            using var partStream = pdfPart.GetStream(FileMode.Open, FileAccess.Read);
+            using var entryStream = entry.Open();
             using var ms = new MemoryStream();
-            partStream.CopyTo(ms);
+            entryStream.CopyTo(ms);
             return ms.ToArray();
         }
         catch
