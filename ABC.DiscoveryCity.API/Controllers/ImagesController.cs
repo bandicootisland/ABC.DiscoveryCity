@@ -61,9 +61,15 @@ public class ImagesController : ControllerBase
         var resolvedPath = DbService.ResolveFilePathForCurrentOs(path);
         var extension = Path.GetExtension(resolvedPath).ToLowerInvariant();
 
-        // For PDFs, try extracting from the XLSX bundle first (cloud-ready: no disk dependency)
+        // For PDFs: DB package first, then disk bundle, then direct file
         if (extension == ".pdf")
         {
+            // 1. Try XLSX package from DB (works on any machine)
+            var pdfFromDb = ExtractPdfFromDbPackage(resolvedPath);
+            if (pdfFromDb != null)
+                return File(pdfFromDb, "application/pdf", enableRangeProcessing: true);
+
+            // 2. Try XLSX bundle from disk (local fallback)
             var pdfFromBundle = ExtractPdfFromXlsxBundle(resolvedPath);
             if (pdfFromBundle != null)
                 return File(pdfFromBundle, "application/pdf", enableRangeProcessing: true);
@@ -100,8 +106,38 @@ public class ImagesController : ControllerBase
     }
 
     /// <summary>
-    /// Extracts the embedded source PDF from the corresponding XLSX bundle.
-    /// The XLSX sits alongside the PDF in the Published folder with the same base name.
+    /// Extracts the embedded PDF from the XLSX package stored in the database.
+    /// This is the primary path — works on any machine with DB access.
+    /// </summary>
+    private byte[]? ExtractPdfFromDbPackage(string pdfPath)
+    {
+        try
+        {
+            var fileName = Path.GetFileName(pdfPath);
+            var xlsxBytes = _dbService.GetDocumentPackageByFileName(fileName);
+            if (xlsxBytes == null) return null;
+
+            using var stream = new MemoryStream(xlsxBytes);
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
+
+            var pdfName = Path.GetFileName(pdfPath);
+            var entry = zip.GetEntry($"data/{pdfName}") ?? zip.GetEntry("data/source.pdf");
+            if (entry == null) return null;
+
+            using var entryStream = entry.Open();
+            using var ms = new MemoryStream();
+            entryStream.CopyTo(ms);
+            return ms.ToArray();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Extracts the embedded source PDF from the corresponding XLSX bundle on disk.
+    /// Fallback for local development when files are available.
     /// </summary>
     private static byte[]? ExtractPdfFromXlsxBundle(string pdfPath)
     {

@@ -722,7 +722,7 @@ public partial class DbService
         }
     }
 
-    public void InsertDocument(string filePath, PdfMetadata metadata, Guid? dataSetId = null, List<Guid>? sentenceIds = null)
+    public Guid InsertDocument(string filePath, PdfMetadata metadata, Guid? dataSetId = null, List<Guid>? sentenceIds = null)
     {
         try
         {
@@ -835,6 +835,7 @@ public partial class DbService
 
                 trans.Commit();
                 Console.WriteLine($"{(isUpdate ? "Updated" : "Saved")} in DB: {fileName} with {cleanSentences.Count} sentences across {Math.Max(1, cleanSentences.Count/5)} chunks.");
+                return parentId;
             }
             catch (Exception ex)
             {
@@ -846,6 +847,7 @@ public partial class DbService
         {
             Console.WriteLine($"Connection Error saving to DB for {filePath}: {ex.Message}");
         }
+        return Guid.Empty;
     }
 
     private List<string> GroupSentencesIntoChunks(List<string> sentences, int targetLength)
@@ -991,6 +993,188 @@ public partial class DbService
             Console.WriteLine($"  [WARN] UpsertDocumentImages failed: {ex.Message}");
         }
     }
+
+    // ── New relational tables (BookCity pattern) ──────────────────────────
+
+    /// <summary>
+    /// Store XLSX bundle in document_packages (1:1 with parentdocuments).
+    /// </summary>
+    public void UpsertDocumentPackage(Guid documentId, byte[] packageData)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                INSERT INTO document_packages (document_id, package_data, created_at)
+                VALUES (@id, @data, NOW())
+                ON CONFLICT (document_id) DO UPDATE SET package_data = EXCLUDED.package_data, created_at = NOW();", conn);
+            cmd.Parameters.AddWithValue("id", documentId);
+            cmd.Parameters.AddWithValue("data", packageData);
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex) { Console.WriteLine($"  [WARN] UpsertDocumentPackage failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Retrieve XLSX bundle bytes from document_packages.
+    /// </summary>
+    public byte[]? GetDocumentPackage(Guid documentId)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(
+                "SELECT package_data FROM document_packages WHERE document_id = @id;", conn);
+            cmd.Parameters.AddWithValue("id", documentId);
+            var result = cmd.ExecuteScalar();
+            return result as byte[];
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Retrieve XLSX bundle bytes by filename lookup.
+    /// </summary>
+    public byte[]? GetDocumentPackageByFileName(string fileName)
+    {
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                SELECT dp.package_data FROM document_packages dp
+                JOIN parentdocuments pd ON pd.id = dp.document_id
+                WHERE pd.filename = @fn LIMIT 1;", conn);
+            cmd.Parameters.AddWithValue("fn", fileName);
+            var result = cmd.ExecuteScalar();
+            return result as byte[];
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Upsert preview/thumb images into document_previews (like book_previews).
+    /// </summary>
+    public void UpsertDocumentPreview(Guid documentId, string imageSize,
+        int width, int height, byte[]? imageData, string contentType = "image/jpeg", string? renderMethod = null)
+    {
+        if (width <= 0 || height <= 0) return;
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var cmd = new NpgsqlCommand(@"
+                INSERT INTO document_previews (document_id, image_size, width, height, content_type, image_data, render_method, created_at)
+                VALUES (@id, @size, @w, @h, @ct, @data, @rm, NOW())
+                ON CONFLICT (document_id, image_size) DO UPDATE SET
+                    width = EXCLUDED.width, height = EXCLUDED.height,
+                    content_type = EXCLUDED.content_type, image_data = EXCLUDED.image_data,
+                    render_method = EXCLUDED.render_method, created_at = NOW();", conn);
+            cmd.Parameters.AddWithValue("id", documentId);
+            cmd.Parameters.AddWithValue("size", imageSize);
+            cmd.Parameters.AddWithValue("w", width);
+            cmd.Parameters.AddWithValue("h", height);
+            cmd.Parameters.AddWithValue("ct", contentType);
+            cmd.Parameters.AddWithValue("data", imageData is { Length: > 0 } ? (object)imageData : DBNull.Value);
+            cmd.Parameters.AddWithValue("rm", (object?)renderMethod ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex) { Console.WriteLine($"  [WARN] UpsertDocumentPreview failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Store sentences into document_sentences (proper relational, like book_sentences).
+    /// Deletes existing sentences first, then bulk inserts.
+    /// </summary>
+    public void StoreDocumentSentences(Guid documentId, List<string> sentences, List<Guid> sentenceIds, int pageCount = 1)
+    {
+        if (sentences.Count == 0) return;
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var trans = conn.BeginTransaction();
+
+            // Delete existing sentences (cascade deletes vectors too)
+            using (var del = new NpgsqlCommand("DELETE FROM document_sentences WHERE document_id = @id;", conn, trans))
+            {
+                del.Parameters.AddWithValue("id", documentId);
+                del.ExecuteNonQuery();
+            }
+
+            // Bulk insert sentences
+            bool hasIds = sentenceIds.Count == sentences.Count;
+            int sentencesPerPage = pageCount > 0 ? Math.Max(1, sentences.Count / pageCount) : sentences.Count;
+
+            for (int i = 0; i < sentences.Count; i++)
+            {
+                var text = sentences[i];
+                if (string.IsNullOrWhiteSpace(text)) continue;
+
+                int pageNum = pageCount > 0 ? Math.Min(i / sentencesPerPage + 1, pageCount) : 1;
+                int wordCount = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
+                var sentenceId = hasIds ? sentenceIds[i] : Guid.CreateVersion7();
+
+                using var cmd = new NpgsqlCommand(@"
+                    INSERT INTO document_sentences (document_id, ordinal, sentence_id, page_number, text, word_count)
+                    VALUES (@did, @ord, @sid, @pg, @txt, @wc);", conn, trans);
+                cmd.Parameters.AddWithValue("did", documentId);
+                cmd.Parameters.AddWithValue("ord", i + 1);
+                cmd.Parameters.AddWithValue("sid", sentenceId);
+                cmd.Parameters.AddWithValue("pg", pageNum);
+                cmd.Parameters.AddWithValue("txt", text);
+                cmd.Parameters.AddWithValue("wc", (short)wordCount);
+                cmd.ExecuteNonQuery();
+            }
+
+            trans.Commit();
+        }
+        catch (Exception ex) { Console.WriteLine($"  [WARN] StoreDocumentSentences failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Store page-level data into document_pages.
+    /// </summary>
+    public void StoreDocumentPages(Guid documentId, int pageCount, string? html = null,
+        float pageWidth = 0, float pageHeight = 0, List<string>? sentences = null)
+    {
+        if (pageCount <= 0) return;
+        try
+        {
+            using var conn = _dataSource.OpenConnection();
+            using var trans = conn.BeginTransaction();
+
+            using (var del = new NpgsqlCommand("DELETE FROM document_pages WHERE document_id = @id;", conn, trans))
+            {
+                del.Parameters.AddWithValue("id", documentId);
+                del.ExecuteNonQuery();
+            }
+
+            int totalSentences = sentences?.Count ?? 0;
+            int sentencesPerPage = totalSentences > 0 ? Math.Max(1, totalSentences / pageCount) : 0;
+
+            for (int p = 1; p <= pageCount; p++)
+            {
+                int sentStart = totalSentences > 0 ? (p - 1) * sentencesPerPage + 1 : 0;
+                int sentEnd = totalSentences > 0 ? Math.Min(p * sentencesPerPage, totalSentences) : 0;
+                string? pageHtml = p == 1 ? html : null;
+
+                using var cmd = new NpgsqlCommand(@"
+                    INSERT INTO document_pages (document_id, page_number, html, page_width, page_height, sentence_start, sentence_end)
+                    VALUES (@id, @pg, @html, @pw, @ph, @ss, @se);", conn, trans);
+                cmd.Parameters.AddWithValue("id", documentId);
+                cmd.Parameters.AddWithValue("pg", p);
+                cmd.Parameters.AddWithValue("html", (object?)pageHtml ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("pw", pageWidth);
+                cmd.Parameters.AddWithValue("ph", pageHeight);
+                cmd.Parameters.AddWithValue("ss", sentStart);
+                cmd.Parameters.AddWithValue("se", sentEnd);
+                cmd.ExecuteNonQuery();
+            }
+
+            trans.Commit();
+        }
+        catch (Exception ex) { Console.WriteLine($"  [WARN] StoreDocumentPages failed: {ex.Message}"); }
+    }
+
+    // ── End new relational tables ───────────────────────────────────────
 
     /// <summary>
     /// Check if a document already exists in the database by file path.
