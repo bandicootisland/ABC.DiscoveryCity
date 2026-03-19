@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.IO;
 using System.Diagnostics;
 using Telerik.Documents.Primitives;
 using Telerik.Windows.Documents.Common.FormatProviders;
