@@ -5,7 +5,7 @@ Legal document discovery and analysis platform for investigating large collectio
 ## Architecture
 
 ```
-Blazor WASM (5233) --> ASP.NET Core API (5022) --> PostgreSQL 16 + pgvector (5435)
+Blazor WASM (5288) --> ASP.NET Core API (5022) --> PostgreSQL 16 + pgvector (5435)
                                                 --> Ollama (11434, all-minilm:latest, 384-dim)
                                                 --> Elasticsearch (9200, optional)
 ```
