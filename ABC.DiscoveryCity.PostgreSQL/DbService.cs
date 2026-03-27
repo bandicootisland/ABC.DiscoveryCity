@@ -179,6 +179,7 @@ public partial class DbService
             DROP TABLE IF EXISTS DataSets CASCADE;
             DROP TABLE IF EXISTS Sources CASCADE;
             DROP TABLE IF EXISTS filesources CASCADE;
+            DROP TABLE IF EXISTS SentenceSignatures CASCADE;
         ", conn);
         cmd.ExecuteNonQuery();
         Console.WriteLine("All tables dropped successfully.");
@@ -277,6 +278,24 @@ public partial class DbService
                         created_at TIMESTAMPTZ DEFAULT NOW(),
                         updated_at TIMESTAMPTZ DEFAULT NOW()
                     );", conn)) cmd.ExecuteNonQuery();
+
+                // Ensure SentenceSignatures table exists
+                using (var cmd = new NpgsqlCommand(@"
+                    CREATE TABLE IF NOT EXISTS SentenceSignatures (
+                        SentenceId UUID PRIMARY KEY,
+                        ParentId UUID REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
+                        SemanticId UUID,
+                        Who int2,
+                        What int2,
+                        Where int2,
+                        When int2,
+                        Which int2,
+                        Why int2,
+                        How int2,
+                        Ordinal INT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_signatures_parent ON SentenceSignatures(ParentId);
+                ", conn)) cmd.ExecuteNonQuery();
 
                 Console.WriteLine("Schema migrations complete.");
                 return;
@@ -433,6 +452,25 @@ public partial class DbService
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );", conn)) cmd.ExecuteNonQuery();
+
+            // 7b. Create SentenceSignatures Table
+            Console.WriteLine("Creating SentenceSignatures table...");
+            using (var cmd = new NpgsqlCommand(@"
+                CREATE TABLE IF NOT EXISTS SentenceSignatures (
+                    SentenceId UUID PRIMARY KEY,
+                    ParentId UUID REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
+                    SemanticId UUID,
+                    Who int2,
+                    What int2,
+                    Where int2,
+                    When int2,
+                    Which int2,
+                    Why int2,
+                    How int2,
+                    Ordinal INT
+                );
+                CREATE INDEX IF NOT EXISTS idx_signatures_parent ON SentenceSignatures(ParentId);
+            ", conn)) cmd.ExecuteNonQuery();
 
             // 8. Create Indexes (skip if already exist)
             int indexCount = 0;

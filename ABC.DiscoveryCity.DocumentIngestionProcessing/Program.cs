@@ -22,6 +22,7 @@ bool usePlaywright = args.Any(a => a.Equals("--use-playwright", StringComparison
 bool renderDirect = !usePlaywright && !args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase)); // render-direct is now the default
 bool noImages = args.Any(a => a.Equals("--no-images", StringComparison.OrdinalIgnoreCase));
 bool embeddingsOnly = args.Any(a => a.Equals("--embeddings-only", StringComparison.OrdinalIgnoreCase));
+bool exportSignatures = args.Any(a => a.Equals("--export-signatures", StringComparison.OrdinalIgnoreCase));
 bool imagesOnly = args.Any(a => a.Equals("--images-only", StringComparison.OrdinalIgnoreCase));
 bool forceReprocess = args.Any(a => a.Equals("--force", StringComparison.OrdinalIgnoreCase));
 bool reprocessMode = args.Any(a => a.Equals("--reprocess", StringComparison.OrdinalIgnoreCase));
@@ -411,6 +412,21 @@ if (RUN_VERIFICATION)
     var verifier = new Verification(dbService);
     await verifier.RunVerificationAsync();
     Console.WriteLine("\nVerification complete. Exiting.");
+    return;
+}
+
+// ============================================================
+// EXPORT SIGNATURES MODE: High-speed ingestion indexing pipeline
+// ============================================================
+if (exportSignatures)
+{
+    Console.WriteLine("\n--- EXPORT SIGNATURES MODE ---");
+    // Connect using DbService string or default
+    string connStr = "Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
+    string binPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "signatures.bin");
+    
+    var manager = new IngestionManager(connStr, binPath);
+    await manager.RunAsync();
     return;
 }
 
