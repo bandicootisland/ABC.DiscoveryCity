@@ -10,7 +10,7 @@
 | REST API | ABC.DiscoveryCity.API | 5022 | Search endpoints, stats |
 | PDF Processor | ABC.DiscoveryCity.DocumentIngestionProcessing | CLI | Ingestion, embeddings, reprocessing |
 | PostgreSQL + pgvector | Docker | 5435 | Document storage, vector search |
-| Ollama | systemd | 11434 | Embedding generation (all-minilm:latest, 384 dims) |
+| Ollama | systemd | 11434 | Embedding generation (mxbai-embed-large:latest, 1024 dims) |
 
 ## Infrastructure
 
@@ -18,7 +18,7 @@
 - **Runtime**: .NET 10.0, Telerik UI for Blazor 12.0.0
 - **Database**: PostgreSQL 16 + pgvector in Docker container `discovery-city-postgres`
   - Port: 5435, DB: `discoverycity`, User: `discovery_user`
-- **Ollama**: v0.15.6, model `all-minilm:latest` (45MB, 384 dimensions)
+- **Ollama**: v0.15.6, model `mxbai-embed-large:latest` (670MB, 1024 dimensions)
 - **Data root**: `/media/stephen/18TB/EpsteinFiles/DepartmentofJustice/DOJ_Disclosures/`
 
 ## Database Stats (2026-02-10)
@@ -43,7 +43,7 @@
 2. **Ollama**:
    ```bash
    systemctl status ollama   # Should be running
-   ollama list               # Should show all-minilm:latest
+   ollama list               # Should show mxbai-embed-large:latest
    ```
 
 3. **Dependencies**: Restored automatically on build. Telerik NuGet source required.
@@ -107,7 +107,7 @@ automatically when Ollama is available. DataSet folders are processed in natural
 ## Database Schema
 
 - `ParentDocuments`: Id, FilePath (unique), Metadata (JSONB), DataSetId, ProcessedAt
-- `DocumentChunks`: ChunkId, ParentId, ChunkIndex, TextContent, Embedding (vector(384))
+- `DocumentChunks`: ChunkId, ParentId, ChunkIndex, TextContent, Embedding (vector(1024))
 - `DocumentImages`: Id, ParentId, ImageType, ImageSize, FilePath, Width, Height
 - `Sources` / `DataSets`: Hierarchy for organizing document collections
 

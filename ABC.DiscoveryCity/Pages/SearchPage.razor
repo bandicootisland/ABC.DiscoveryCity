@@ -135,174 +135,167 @@
         </TelerikDialog>
     }
 
-    <TelerikDockManager @ref="_dockManager" Height="calc(100vh - 145px)">
-        <DockManagerPanes>
-            <DockManagerSplitPane Orientation="@DockManagerPaneOrientation.Horizontal">
-                <Panes>
-                    @* Left pane: search results grid *@
-                    <DockManagerContentPane HeaderText="Search Results" @bind-Size="_gridPaneSize" AllowFloat="false" Closeable="false">
-                        <Content>
-                            <div @onkeydown="OnGridKeyDown" @onkeydown:preventDefault tabindex="0" style="outline: none; height: 100%;">
-                                <TelerikGrid @ref="GridRef"
-                                             TItem="SearchResultDto"
-                                             OnRead="@OnGridRead"
-                                             Sortable="true"
-                                             Resizable="true"
-                                             FilterMode="@GridFilterMode.FilterRow"
-                                             ScrollMode="@GridScrollMode.Virtual"
-                                             EnableLoaderContainer="true"
-                                             PageSize="50"
-                                             RowHeight="60"
-                                             Height="100%"
-                                             SelectionMode="@(IsMultiSelectMode ? GridSelectionMode.Multiple : GridSelectionMode.Single)"
-                                             SelectedItems="@SelectedItems"
-                                             SelectedItemsChanged="@((IEnumerable<SearchResultDto> items) => OnSelectionChanged(items))"
-                                             OnRowClick="@OnRowClick"
-                                             OnRowDoubleClick="@OnRowDoubleClick"
-                                             OnRowContextMenu="@OnRowContextMenu">
-                                    <GridColumns>
-                                        <GridCheckboxColumn SelectAll="@IsMultiSelectMode" Width="42px" />
-                                        <GridColumn Title="Thumb" Width="80px">
-                                             <Template>
-                                                @{
-                                                    var item = context as SearchResultDto;
-                                                    var thumbPath = item?.ThumbnailPath;
-                                                    if (!string.IsNullOrEmpty(thumbPath))
-                                                    {
-                                                        <img src="@($"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(thumbPath)}")"
-                                                             style="width: 50px; max-height: 52px; object-fit: cover; border: 1px solid #ddd; border-radius: 4px;"
-                                                             alt="Thumb" />
-                                                    }
-                                                    else if (item?.Id != Guid.Empty)
-                                                    {
-                                                        <img src="@SearchService.GetThumbnailUrl(item.Id)"
-                                                             style="width: 50px; max-height: 52px; object-fit: cover; border: 1px solid #ddd; border-radius: 4px;"
-                                                             alt="Thumb" loading="lazy" />
-                                                    }
-                                                    else
-                                                    {
-                                                        <div style="width: 50px; height: 52px; background: var(--kendo-base-bg, #f0f0f0); display: flex; align-items: center; justify-content: center; color: var(--kendo-subtle-text, #aaa);">
-                                                            <TelerikIcon Icon="@GetFileIcon(item?.FileName)" />
-                                                        </div>
-                                                    }
-                                                }
-                                             </Template>
-                                        </GridColumn>
-                                        <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
-                                        <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date" Width="120px">
-                                            <Template>
-                                                @{
-                                                    var item = context as SearchResultDto;
-                                                    if (item?.Date != null)
-                                                    {
-                                                        <span title="Date deduced from document content">@item.Date.Value.ToString("yyyy-MM-dd")</span>
-                                                    }
-                                                    else
-                                                    {
-                                                        <span class="text-muted">Unknown</span>
-                                                    }
-                                                }
-                                            </Template>
-                                        </GridColumn>
-                                        <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
-                                        <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
-                                        <GridColumn Title="Names" Width="150px">
-                                            <Template>
-                                                @{
-                                                    var item = context as SearchResultDto;
-                                                    <div style="max-height: 52px; overflow: hidden;">
-                                                        <NameBadges Names="@(item?.Names ?? new())"
-                                                                    SelectedNames="@SelectedNames"
-                                                                    OnNameClicked="@AddNameToFilter" />
-                                                    </div>
-                                                }
-                                            </Template>
-                                        </GridColumn>
-                                        <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" Width="120px">
-                                            <Template>
-                                                @{
-                                                    var item = context as SearchResultDto;
-                                                    var pct = Math.Max(0, (1 - (item?.Distance ?? 1)) * 100);
-                                                    var color = pct >= 70 ? "#28a745" : pct >= 40 ? "#ffc107" : "#dc3545";
-                                                    <div style="display: flex; align-items: center; gap: 6px;">
-                                                        <div style="flex: 1; height: 8px; background: var(--kendo-base-bg, #e9ecef); border-radius: 4px; overflow: hidden;">
-                                                            <div style="width: @($"{pct:F0}%"); height: 100%; background: @color; border-radius: 4px;"></div>
-                                                        </div>
-                                                        <span style="font-size: 0.8em; min-width: 36px; text-align: right;">@($"{pct:F0}%")</span>
-                                                    </div>
-                                                }
-                                            </Template>
-                                        </GridColumn>
-                                        <GridColumn Field="@nameof(SearchResultDto.Text)" Title="Preview Text">
-                                            <Template>
-                                                @{
-                                                    var item = context as SearchResultDto;
-                                                    var preview = item?.Text?.Length > 150 ? item.Text.Substring(0, 150) + "..." : item?.Text;
-                                                    var formatted = (preview ?? "").HighlightSearchTerms(SearchQuery);
-                                                    <div style="max-height: 52px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;" title="@item?.Text">@((MarkupString)formatted)</div>
-                                                }
-                                            </Template>
-                                        </GridColumn>
-                                    </GridColumns>
-                                </TelerikGrid>
-                                <TelerikContextMenu @ref="GridContextMenu"
-                                                    Data="@_contextMenuItems"
-                                                    TextField="Text"
-                                                    IconField="Icon"
-                                                    SeparatorField="IsSeparator"
-                                                    OnClick="@((ContextMenuItem item) => OnContextMenuClick(item))" />
-                            </div>
-                        </Content>
-                    </DockManagerContentPane>
-
-                    @* Right pane: document detail — docked, can be floated/undocked by user *@
-                    <DockManagerContentPane HeaderText="@(SelectedDetail?.FileName ?? "Document Details")"
-                                            Size="@_detailPaneSize"
-                                            SizeChanged="@OnDetailPaneSizeChanged"
-                                            Visible="@_detailWindowVisible"
-                                            Closeable="true"
-                                            AllowFloat="true">
-                        <Content>
-                            @if (SelectedDetail != null)
-                            {
-                                <div class="d-flex gap-1 mb-2 p-2">
-                                    @if (!string.IsNullOrEmpty(SelectedDetail.FilePath))
+    <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="calc(100vh - 185px)">
+        <SplitterPanes>
+            <SplitterPane Size="650px" Min="300px">
+                <div @onkeydown="OnGridKeyDown" @onkeydown:preventDefault tabindex="0" style="outline: none; height: 100%;">
+                <TelerikGrid @ref="GridRef"
+                             TItem="SearchResultDto"
+                             OnRead="@OnGridRead"
+                             Sortable="true"
+                             Resizable="true"
+                             FilterMode="@GridFilterMode.FilterRow"
+                             ScrollMode="@GridScrollMode.Virtual"
+                             EnableLoaderContainer="true"
+                             PageSize="50"
+                             RowHeight="60"
+                             Height="100%"
+                             SelectionMode="@(IsMultiSelectMode ? GridSelectionMode.Multiple : GridSelectionMode.Single)"
+                             SelectedItems="@SelectedItems"
+                             SelectedItemsChanged="@((IEnumerable<SearchResultDto> items) => OnSelectionChanged(items))"
+                             OnRowClick="@OnRowClick"
+                             OnRowContextMenu="@OnRowContextMenu">
+                    <GridColumns>
+                        <GridCheckboxColumn SelectAll="@IsMultiSelectMode" Width="42px" />
+                        <GridColumn Title="Thumb" Width="80px">
+                             <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var thumbPath = item?.ThumbnailPath;
+                                    if (!string.IsNullOrEmpty(thumbPath))
                                     {
-                                        <TelerikButton OnClick="@(() => DownloadFile(SelectedDetail))" Icon="@SvgIcon.Download" Title="Open in new tab" Size="@ThemeConstants.Button.Size.Small" />
+                                        <img src="@($"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(thumbPath)}")"
+                                             style="width: 50px; max-height: 52px; object-fit: cover; border: 1px solid #ddd; border-radius: 4px;"
+                                             alt="Thumb" />
                                     }
-                                    <TelerikSplitButton OnClick="@(() => QuickAddToLastList(SelectedDetail!))"
-                                                        Icon="@SvgIcon.ListUnordered"
-                                                        Size="@ThemeConstants.Button.Size.Small"
-                                                        Title="Add to most recent list">
-                                        <SplitButtonContent>Add to List</SplitButtonContent>
-                                        <SplitButtonItems>
-                                            @foreach (var list in RecentLists)
-                                            {
-                                                var capturedList = list;
-                                                <SplitButtonItem OnClick="@(() => QuickAddToList(SelectedDetail!, capturedList))"
-                                                                 Icon="@SvgIcon.ListUnordered">@capturedList.Name</SplitButtonItem>
-                                            }
-                                            <SplitButtonItem OnClick="@(() => ShowQuickNewListDialog(SelectedDetail!))"
-                                                             Icon="@SvgIcon.Plus">New List...</SplitButtonItem>
-                                        </SplitButtonItems>
-                                    </TelerikSplitButton>
-                                </div>
-                                <DocumentDetails Document="@SelectedDetail"
-                                                 @bind-ActiveTabIndex="_detailTabIndex"
-                                                 SearchQuery="@SearchQuery" />
-                            }
-                            else
-                            {
-                                <div class="d-flex align-items-center justify-content-center h-100 text-muted">
-                                    <em>Select a document to view details</em>
-                                </div>
-                            }
-                        </Content>
-                    </DockManagerContentPane>
-                </Panes>
-            </DockManagerSplitPane>
-        </DockManagerPanes>
-    </TelerikDockManager>
+                                    else
+                                    {
+                                        <div style="width: 50px; height: 52px; background: var(--kendo-base-bg, #f0f0f0); display: flex; align-items: center; justify-content: center; color: var(--kendo-subtle-text, #aaa);">
+                                            <TelerikIcon Icon="@GetFileIcon(item?.FileName)" />
+                                        </div>
+                                    }
+                                }
+                             </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
+                        <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date" Width="120px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    if (item?.Date != null)
+                                    {
+                                        <span title="Date deduced from document content">~@item.Date.Value.ToString("yyyy-MM-dd")</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">Unknown</span>
+                                    }
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
+                        <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
+                        <GridColumn Title="Names" Width="150px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    <div style="max-height: 52px; overflow: hidden;">
+                                        <NameBadges Names="@(item?.Names ?? new())"
+                                                    SelectedNames="@SelectedNames"
+                                                    OnNameClicked="@AddNameToFilter" />
+                                    </div>
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" Width="120px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var pct = Math.Max(0, (1 - (item?.Distance ?? 1)) * 100);
+                                    var color = pct >= 70 ? "#28a745" : pct >= 40 ? "#ffc107" : "#dc3545";
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                        <div style="flex: 1; height: 8px; background: var(--kendo-base-bg, #e9ecef); border-radius: 4px; overflow: hidden;">
+                                            <div style="width: @($"{pct:F0}%"); height: 100%; background: @color; border-radius: 4px;"></div>
+                                        </div>
+                                        <span style="font-size: 0.8em; min-width: 36px; text-align: right;">@($"{pct:F0}%")</span>
+                                    </div>
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.Text)" Title="Preview Text">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var preview = item?.Text?.Length > 150 ? item.Text.Substring(0, 150) + "..." : item?.Text;
+                                    var formatted = (preview ?? "").HighlightSearchTerms(SearchQuery);
+                                    <div style="max-height: 52px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;" title="@item?.Text">@((MarkupString)formatted)</div>
+                                }
+                            </Template>
+                        </GridColumn>
+                    </GridColumns>
+                </TelerikGrid>
+                <TelerikContextMenu @ref="GridContextMenu"
+                                    Data="@_contextMenuItems"
+                                    TextField="Text"
+                                    IconField="Icon"
+                                    SeparatorField="IsSeparator"
+                                    OnClick="@((ContextMenuItem item) => OnContextMenuClick(item))" />
+                </div>
+            </SplitterPane>
+            <SplitterPane Min="200px">
+                <div class="border rounded p-3 bg-light" style="height: 100%; overflow-y: auto;">
+                    @if (SelectedDetail != null)
+                    {
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h5 class="mb-0">@SelectedDetail.FileName</h5>
+                            <div class="d-flex gap-1">
+                                @if (!string.IsNullOrEmpty(SelectedDetail.FilePath))
+                                {
+                                    <TelerikButton OnClick="@(() => DownloadFile(SelectedDetail))" Icon="@SvgIcon.Download" Title="Download original file" />
+                                }
+                                <TelerikSplitButton OnClick="@(() => QuickAddToLastList(SelectedDetail!))"
+                                                    Icon="@SvgIcon.ListUnordered"
+                                                    Size="@ThemeConstants.Button.Size.Small"
+                                                    Title="Add to most recent list">
+                                    <SplitButtonContent>Add to List</SplitButtonContent>
+                                    <SplitButtonItems>
+                                        @foreach (var list in RecentLists)
+                                        {
+                                            var capturedList = list;
+                                            <SplitButtonItem OnClick="@(() => QuickAddToList(SelectedDetail!, capturedList))"
+                                                             Icon="@SvgIcon.ListUnordered">@capturedList.Name</SplitButtonItem>
+                                        }
+                                        <SplitButtonItem OnClick="@(() => ShowQuickNewListDialog(SelectedDetail!))"
+                                                         Icon="@SvgIcon.Plus">New List...</SplitButtonItem>
+                                    </SplitButtonItems>
+                                </TelerikSplitButton>
+                                <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
+                            </div>
+                        </div>
+                        <DocumentDetails Document="@SelectedDetail"
+                                         @bind-ActiveTabIndex="_detailTabIndex"
+                                         SearchQuery="@SearchQuery" />
+                    }
+                    else
+                    {
+                        <div style="padding: 1rem;">
+                            <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="50%" Height="24px" Visible="true" />
+                            <div class="mt-3">
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Rectangle" Width="100%" Height="200px" Visible="true" />
+                            </div>
+                            <div class="mt-2 d-flex gap-3">
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="30%" Height="16px" Visible="true" />
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="40%" Height="16px" Visible="true" />
+                            </div>
+                            <div class="mt-3 text-center text-muted">
+                                <em>Select a document row above to view details</em>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </SplitterPane>
+        </SplitterPanes>
+    </TelerikSplitter>
 </div>
 
 @code {
@@ -335,20 +328,6 @@
     private int _detailTabIndex;
     private bool IsMultiSelectMode { get; set; } = false;
     private bool _showAdvancedFind;
-
-    // Advanced find filters (persisted across searches until Reset is clicked in the dialog)
-    private List<string>? _advancedExtensions;
-    private DateTime? _advancedDateFrom;
-    private DateTime? _advancedDateTo;
-    private int? _advancedMinPages;
-    private int? _advancedMaxPages;
-
-    // DockManager layout
-    private TelerikDockManager? _dockManager;
-    private string _gridPaneSize = "100%";
-    private string _detailPaneSize = "50%";
-    private bool _detailWindowVisible;
-    private string _savedDetailSize = "50%"; // remembered user preference
     private bool _showSaveListDialog;
     private string _newListName = "";
     private string _saveToListMode = "new";
@@ -386,56 +365,9 @@
         AvailableDataSets = (await SearchService.GetDataSetNamesAsync())
             .OrderBy(n => Regex.Replace(n, @"\d+", m => m.Value.PadLeft(10, '0')))
             .ToList();
-
+            
         AvailableLists = await UserListService.GetAllAsync();
         // Grid will fire OnRead automatically on first render
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (firstRender)
-        {
-            // Restore saved detail pane size from localStorage
-            var saved = await JS.InvokeAsync<string?>("localStorage.getItem", "dc_detailPaneSize");
-            if (!string.IsNullOrEmpty(saved))
-            {
-                _savedDetailSize = saved;
-                _detailPaneSize = saved;
-            }
-        }
-    }
-
-    private void ShowDetailPanel()
-    {
-        if (!_detailWindowVisible)
-        {
-            _detailWindowVisible = true;
-            _detailPaneSize = _savedDetailSize;
-            _gridPaneSize = ""; // auto-fill remaining space
-        }
-    }
-
-    private void HideDetailPanel()
-    {
-        if (_detailWindowVisible)
-        {
-            // Save current size before hiding
-            if (!string.IsNullOrEmpty(_detailPaneSize) && _detailPaneSize != "0")
-                _savedDetailSize = _detailPaneSize;
-            _detailWindowVisible = false;
-            _gridPaneSize = "100%";
-            _ = JS.InvokeVoidAsync("localStorage.setItem", "dc_detailPaneSize", _savedDetailSize);
-        }
-    }
-
-    private void OnDetailPaneSizeChanged(string newSize)
-    {
-        _detailPaneSize = newSize;
-        if (!string.IsNullOrEmpty(newSize) && newSize != "0")
-        {
-            _savedDetailSize = newSize;
-            _ = JS.InvokeVoidAsync("localStorage.setItem", "dc_detailPaneSize", newSize);
-        }
     }
 
     /// <summary>
@@ -451,8 +383,7 @@
         var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
 
         // Fast path: if page is already in client cache, return instantly — no debounce, no HTTP call
-        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter, FilenameOnly,
-            _advancedExtensions, _advancedDateFrom, _advancedDateTo, _advancedMinPages, _advancedMaxPages);
+        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter, FilenameOnly);
         if (cached != null)
         {
             args.Data = cached.Items;
@@ -482,9 +413,7 @@
         {
             var result = await SearchService.SearchPagedAsync(
                 query, skip, take, exactMatch: true,
-                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly,
-                extensions: _advancedExtensions, dateFrom: _advancedDateFrom, dateTo: _advancedDateTo,
-                minPages: _advancedMinPages, maxPages: _advancedMaxPages);
+                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
 
             if (token.IsCancellationRequested)
             {
@@ -500,11 +429,10 @@
             TotalCount = result.TotalCount;
             HasSearched = true;
 
-            // Close detail panel and clear selection on new search
+            // Clear preview when fresh results arrive so skeleton shows
             if (skip == 0)
             {
                 SelectedDetail = null;
-                HideDetailPanel();
                 SelectedItems = Enumerable.Empty<SearchResultDto>();
             }
 
@@ -633,29 +561,19 @@
 
     private void OnRowClick(GridRowClickEventArgs args)
     {
+        if (!IsMultiSelectMode) return; // Single-select uses default grid behaviour
+
         var item = (SearchResultDto)args.Item;
+        var currentList = SelectedItems.ToList();
 
-        if (IsMultiSelectMode)
-        {
-            var currentList = SelectedItems.ToList();
-            if (currentList.Contains(item))
-                currentList.Remove(item);
-            else
-                currentList.Add(item);
-            SelectedItems = currentList;
-            _suppressSelectionChanged = true;
-        }
+        if (currentList.Contains(item))
+            currentList.Remove(item);
+        else
+            currentList.Add(item);
 
-        // Open detail panel
-        SelectedDetail = item;
-        ShowDetailPanel();
-    }
-
-    private void OnRowDoubleClick(GridRowClickEventArgs args)
-    {
-        var item = (SearchResultDto)args.Item;
-        SelectedDetail = item;
-        ShowDetailPanel();
+        SelectedItems = currentList;
+        SelectedDetail = item; // Show the clicked item in the detail pane
+        _suppressSelectionChanged = true;
     }
 
     private void OnSelectionChanged(IEnumerable<SearchResultDto> items)
@@ -667,31 +585,14 @@
         }
 
         SelectedItems = items;
-        var first = items.FirstOrDefault();
-        if (first != null)
-        {
-            SelectedDetail = first;
-            ShowDetailPanel();
-        }
+        SelectedDetail = items.FirstOrDefault();
     }
 
     private async Task OnGridKeyDown(KeyboardEventArgs e)
     {
         if (e.Key == "Escape")
         {
-            if (_detailWindowVisible)
-            {
-                HideDetailPanel();
-                return;
-            }
             CancelSearch();
-            return;
-        }
-
-        // Enter opens the detail panel for the selected row
-        if (e.Key == "Enter" && SelectedDetail != null)
-        {
-            ShowDetailPanel();
             return;
         }
 
@@ -706,19 +607,12 @@
         var item = GridData[newIndex];
         SelectedDetail = item;
         SelectedItems = new[] { item };
-        ShowDetailPanel();
         await JS.InvokeVoidAsync("scrollGridRowIntoView", newIndex, 60);
     }
 
     private void OnPageKeyDown(KeyboardEventArgs e)
     {
-        if (e.Key == "Escape")
-        {
-            if (_detailWindowVisible)
-                HideDetailPanel();
-            else
-                CancelSearch();
-        }
+        if (e.Key == "Escape") CancelSearch();
     }
 
     private void CancelSearch()
@@ -753,9 +647,7 @@
                 // Fetch silently — don't use Rebind() which triggers the grid spinner
                 var result = await SearchService.SearchPagedAsync(
                     SearchQuery, currentSkip, currentTake, exactMatch: true,
-                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly,
-                    extensions: _advancedExtensions, dateFrom: _advancedDateFrom, dateTo: _advancedDateTo,
-                    minPages: _advancedMinPages, maxPages: _advancedMaxPages);
+                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
 
                 if (token.IsCancellationRequested) return;
 
@@ -827,34 +719,13 @@
         if (criteria.Names.Count > 0)
             SelectedNames = new List<string>(criteria.Names);
 
-        // File type filter: only active when at least one type is deselected
-        _advancedExtensions = BuildExtensionFilter(criteria);
-        _advancedDateFrom = criteria.DateFrom;
-        _advancedDateTo = criteria.DateTo;
-        _advancedMinPages = criteria.MinPages > 0 ? criteria.MinPages : null;
-        _advancedMaxPages = criteria.MaxPages > 0 ? criteria.MaxPages : null;
-
         RebindGrid();
-    }
-
-    private static List<string>? BuildExtensionFilter(AdvancedFindCriteria c)
-    {
-        // All checked = no filter needed
-        if (c.IncludePdf && c.IncludeSpreadsheet && c.IncludeVideo && c.IncludeAudio && c.IncludeOther)
-            return null;
-
-        var exts = new List<string>();
-        if (c.IncludePdf) exts.AddRange(new[] { "pdf" });
-        if (c.IncludeSpreadsheet) exts.AddRange(new[] { "xlsx", "xls", "csv" });
-        if (c.IncludeVideo) exts.AddRange(new[] { "avi", "mp4", "vob", "mov", "mkv", "wmv" });
-        if (c.IncludeAudio) exts.AddRange(new[] { "m4a", "mp3", "wav", "aac", "ogg", "flac" });
-        return exts.Count > 0 ? exts : null;
     }
 
     private async Task DownloadFile(SearchResultDto doc)
     {
         var url = $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(doc.FilePath!)}";
-        await JS.InvokeVoidAsync("open", url, "_blank");
+        await JS.InvokeVoidAsync("triggerFileDownload", url, doc.FileName);
     }
 
     private static ISvgIcon GetFileIcon(string? fileName)
@@ -866,6 +737,7 @@
             ".xlsx" or ".xls" or ".csv" => SvgIcon.FileExcel,
             ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv" => SvgIcon.FileVideo,
             ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => SvgIcon.FileAudio,
+            ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".tiff" or ".tif" or ".cr2" or ".webp" => SvgIcon.Image,
             _ => SvgIcon.File
         };
     }

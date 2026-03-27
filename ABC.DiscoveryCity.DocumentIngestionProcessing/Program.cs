@@ -726,7 +726,8 @@ foreach (var folder in targetFolders)
 
     // Scan for all supported file types, excluding the Published output directory
     var supportedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        { ".pdf", ".xlsx", ".xls", ".csv", ".avi", ".mp4", ".vob", ".mov", ".mkv", ".wmv", ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac" };
+        { ".pdf", ".xlsx", ".xls", ".csv", ".avi", ".mp4", ".vob", ".mov", ".mkv", ".wmv", ".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac",
+          ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".cr2", ".webp" };
     var allFiles = Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories)
         .Where(f => !f.Contains(Path.DirectorySeparatorChar + "Published" + Path.DirectorySeparatorChar))
         .Where(f => supportedExtensions.Contains(Path.GetExtension(f)))

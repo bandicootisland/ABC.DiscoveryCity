@@ -9,6 +9,14 @@ public class LoadDocumentStep : IIngestionStep
 
     public Task ExecuteAsync(IngestionContext ctx)
     {
+        // Check file size — oversized files get a DB entry but skip the copy to Published
+        var fileSize = new FileInfo(ctx.FilePath).Length;
+        if (fileSize > ctx.MaxFileSizeForCopy)
+        {
+            ctx.SkipFileCopy = true;
+            Console.WriteLine($"  [SIZE] {fileSize / (1024.0 * 1024):F1} MB exceeds {ctx.MaxFileSizeForCopy / (1024 * 1024)} MB limit — will reference original path");
+        }
+
         switch (ctx.Category)
         {
             case FileCategory.Pdf:
@@ -24,6 +32,10 @@ public class LoadDocumentStep : IIngestionStep
                 LoadMediaFile(ctx);
                 break;
 
+            case FileCategory.Image:
+                LoadImageFile(ctx);
+                break;
+
             default:
                 throw new InvalidOperationException($"Unsupported file type: {ctx.FileExtension}");
         }
@@ -33,8 +45,8 @@ public class LoadDocumentStep : IIngestionStep
         if (!string.IsNullOrEmpty(outputDir) && !Directory.Exists(outputDir))
             Directory.CreateDirectory(outputDir);
 
-        // Copy source file to Published subfolder
-        if (!string.IsNullOrEmpty(ctx.PublishedDir))
+        // Copy source file to Published subfolder (unless oversized)
+        if (!string.IsNullOrEmpty(ctx.PublishedDir) && !ctx.SkipFileCopy)
         {
             ctx.PublishedFilePath = Path.Combine(outputDir, ctx.FileName);
             if (!File.Exists(ctx.PublishedFilePath))
@@ -86,13 +98,22 @@ public class LoadDocumentStep : IIngestionStep
 
         // Media metadata is descriptive (not real content text).
         // Store as DisplaySentences directly — no Sentence struct needed.
-        // When transcription is added, it would populate RawTextLines instead,
-        // and AssembleDocumentStep would create proper Sentence structs.
         ctx.DisplaySentences = MediaFileProcessor.ToSentences(mediaMeta);
         ctx.FullText = string.Join(" ", ctx.DisplaySentences);
         ctx.PageCount = 0;
 
         // Store for metadata step
         ctx.MediaMetadata = mediaMeta;
+    }
+
+    private void LoadImageFile(IngestionContext ctx)
+    {
+        var imageMeta = ImageFileProcessor.GetMetadata(ctx.FilePath);
+
+        ctx.DisplaySentences = ImageFileProcessor.ToSentences(imageMeta);
+        ctx.FullText = string.Join(" ", ctx.DisplaySentences);
+        ctx.PageCount = 0;
+
+        ctx.ImageFileMetadata = imageMeta;
     }
 }

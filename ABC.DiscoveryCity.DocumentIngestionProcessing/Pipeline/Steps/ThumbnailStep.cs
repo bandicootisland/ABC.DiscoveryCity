@@ -23,6 +23,9 @@ public class ThumbnailStep : IIngestionStep
             case FileCategory.Video:
                 GenerateMediaThumbnail(ctx);
                 return Task.CompletedTask;
+            case FileCategory.Image:
+                GenerateImageThumbnail(ctx);
+                return Task.CompletedTask;
             default:
                 return Task.CompletedTask;
         }
@@ -137,6 +140,54 @@ public class ThumbnailStep : IIngestionStep
             ctx.ThumbImagePath = thumbPath;
             ctx.ThumbImageWidth = 100;
             ctx.ThumbImageHeight = 0;
+        }
+    }
+
+    private void GenerateImageThumbnail(IngestionContext ctx)
+    {
+        try
+        {
+            string baseName = Path.GetFileNameWithoutExtension(ctx.FilePath);
+
+            using var img = Image.Load(ctx.FilePath);
+            int w = img.Width;
+            int h = img.Height;
+
+            // Save a reduced preview (max 800px wide) as JPEG
+            int previewW = Math.Min(w, 800);
+            int previewH = w > 0 ? (int)((double)previewW / w * h) : 0;
+            using var previewImg = img.Clone(x => x.Resize(previewW, previewH));
+            using var previewMs = new MemoryStream();
+            previewImg.SaveAsJpeg(previewMs);
+            byte[] previewData = previewMs.ToArray();
+
+            string fullPath = Path.Combine(ctx.OutputDir, $"{baseName}_preview.jpg");
+            File.WriteAllBytes(fullPath, previewData);
+            ctx.FullImagePath = fullPath;
+            ctx.FullImageWidth = previewW;
+            ctx.FullImageHeight = previewH;
+            ctx.FullImageData = previewData;
+
+            // Generate thumb (100px wide)
+            int thumbW = 100;
+            int thumbH = w > 0 ? (int)(100.0 * h / w) : 0;
+            using var thumbImg = img.Clone(x => x.Resize(thumbW, thumbH));
+            using var thumbMs = new MemoryStream();
+            thumbImg.SaveAsJpeg(thumbMs);
+            byte[] thumbData = thumbMs.ToArray();
+
+            string thumbPath = Path.Combine(ctx.OutputDir, $"{baseName}_thumb.jpg");
+            File.WriteAllBytes(thumbPath, thumbData);
+            ctx.ThumbImagePath = thumbPath;
+            ctx.ThumbImageWidth = thumbW;
+            ctx.ThumbImageHeight = thumbH;
+            ctx.ThumbImageData = thumbData;
+
+            Console.WriteLine($"  [THUMB] Image {w}x{h} → preview {previewW}x{previewH}, thumb {thumbW}x{thumbH}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  [WARN] Image thumbnail failed: {ex.Message}");
         }
     }
 }

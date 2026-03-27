@@ -9,17 +9,17 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Elastic.Clients.Elasticsearch" Version="9.2.2" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <PackageReference Include="Elastic.Clients.Elasticsearch" Version="9.3.3" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.5" />
     <PackageReference Include="MonoTorrent" Version="3.0.2" />
-    <PackageReference Include="Telerik.Documents.CMapUtils" Version="2025.4.1216" />
+    <PackageReference Include="Telerik.Documents.CMapUtils" Version="2026.1.304" />
 	  <PackageReference Include="Telerik.Documents.Core" Version="*" />
 	  <PackageReference Include="Telerik.Documents.Fixed" Version="*" />
-	  <PackageReference Include="Telerik.Documents.Fixed.FormatProviders.Ocr" Version="2025.4.1216" />
+	  <PackageReference Include="Telerik.Documents.Fixed.FormatProviders.Ocr" Version="2026.1.304" />
 	  <PackageReference Include="Telerik.Documents.Flow" Version="*" />
 	  <PackageReference Include="Telerik.Documents.Flow.FormatProviders.Pdf" Version="*" />
 	  <PackageReference Include="Telerik.Documents.ImageUtils" Version="*" />
-	  <PackageReference Include="Telerik.Documents.TesseractOcr" Version="2025.4.1216" />
+	  <PackageReference Include="Telerik.Documents.TesseractOcr" Version="2026.1.304" />
 	  <PackageReference Include="Telerik.Documents.Spreadsheet" Version="*" />
 	  <PackageReference Include="Telerik.Documents.Spreadsheet.FormatProviders.OpenXml" Version="*" />
 	  <PackageReference Include="Telerik.Documents.Spreadsheet.FormatProviders.Xls" Version="*" />

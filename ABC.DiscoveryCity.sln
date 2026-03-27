@@ -22,8 +22,6 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.MariaDB",
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.PdfProcessing.Syncfusion", "ABC.PdfProcessing.Syncfusion\ABC.PdfProcessing.Syncfusion.csproj", "{5758BF4B-B05D-4F81-B766-F36C93BCB305}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.DocReader", "ABC.DiscoveryCity.DocReader\ABC.DiscoveryCity.DocReader.csproj", "{1CF1BFF4-6609-5509-5C78-F11575090921}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.PostgreSQL", "ABC.DiscoveryCity.PostgreSQL\ABC.DiscoveryCity.PostgreSQL.csproj", "{7FBF0424-F3AD-B364-86B3-7008321B43E0}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ABC.DiscoveryCity.TelerikProcessing", "ABC.DiscoveryCity.TelerikProcessing\ABC.DiscoveryCity.TelerikProcessing.csproj", "{89C791CE-A865-7C7D-4369-DD316E242DA8}"
@@ -124,18 +122,6 @@ Global
 		{5758BF4B-B05D-4F81-B766-F36C93BCB305}.Release|x64.Build.0 = Release|Any CPU
 		{5758BF4B-B05D-4F81-B766-F36C93BCB305}.Release|x86.ActiveCfg = Release|Any CPU
 		{5758BF4B-B05D-4F81-B766-F36C93BCB305}.Release|x86.Build.0 = Release|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Debug|x64.Build.0 = Debug|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Debug|x86.Build.0 = Debug|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Release|Any CPU.Build.0 = Release|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Release|x64.ActiveCfg = Release|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Release|x64.Build.0 = Release|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Release|x86.ActiveCfg = Release|Any CPU
-		{1CF1BFF4-6609-5509-5C78-F11575090921}.Release|x86.Build.0 = Release|Any CPU
 		{7FBF0424-F3AD-B364-86B3-7008321B43E0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{7FBF0424-F3AD-B364-86B3-7008321B43E0}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7FBF0424-F3AD-B364-86B3-7008321B43E0}.Debug|x64.ActiveCfg = Debug|Any CPU

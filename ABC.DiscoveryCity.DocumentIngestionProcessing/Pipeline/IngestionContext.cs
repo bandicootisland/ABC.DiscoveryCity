@@ -20,6 +20,7 @@ public class IngestionContext
     public bool NoImages { get; init; }
     public bool NoEmbeddings { get; init; }
     public bool ForceReprocess { get; init; }
+    public long MaxFileSizeForCopy { get; init; } = 100 * 1024 * 1024; // 100 MB
 
     // --- Services (injected) ---
     public required DbService DbService { get; init; }
@@ -78,6 +79,12 @@ public class IngestionContext
     // --- File-type-specific data (populated by LoadDocumentStep) ---
     public SpreadsheetResult? SpreadsheetResult { get; set; }
     public MediaMetadata? MediaMetadata { get; set; }
+    public ImageFileMetadata? ImageFileMetadata { get; set; }
+
+    /// <summary>
+    /// Set when a file exceeds MaxFileSizeForCopy — DB entry is created but the file is not copied to Published.
+    /// </summary>
+    public bool SkipFileCopy { get; set; }
 
     // --- Page images (rendered by PageImagesStep) ---
     public Dictionary<int, byte[]> RenderedPages { get; set; } = new();
@@ -104,6 +111,7 @@ public class IngestionContext
         ".xlsx" or ".xls" or ".csv" => FileCategory.Spreadsheet,
         ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv" => FileCategory.Video,
         ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => FileCategory.Audio,
+        ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".tiff" or ".tif" or ".cr2" or ".webp" => FileCategory.Image,
         _ => FileCategory.Unknown
     };
 }
@@ -114,5 +122,6 @@ public enum FileCategory
     Spreadsheet,
     Video,
     Audio,
+    Image,
     Unknown
 }

@@ -134,6 +134,54 @@
             }
         }
 
+        else if (Category == FileCategory.Video && !string.IsNullOrEmpty(FileViewUrl))
+        {
+            <div style="height: 800px; display: flex; flex-direction: column; background: #000;">
+                <video controls style="width: 100%; max-height: 700px; flex: 1;" preload="metadata">
+                    <source src="@FileViewUrl" type="@FileContentType" />
+                    Your browser does not support the video element.
+                </video>
+                <div style="padding: 8px 12px; background: var(--kendo-base-bg, #1a1a1a); color: var(--kendo-subtle-text, #aaa); font-size: 0.85em;">
+                    @Document?.FileName
+                    @if (!string.IsNullOrEmpty(Document?.Text))
+                    {
+                        <span class="ms-3">@Document.Text.Replace("\n", " ").Trim()</span>
+                    }
+                </div>
+            </div>
+        }
+        else if (Category == FileCategory.Audio && !string.IsNullOrEmpty(FileViewUrl))
+        {
+            <div style="height: 800px; padding: 20px; background-color: var(--kendo-base-bg, #f9f9f9);">
+                <div class="mb-3 d-flex align-items-center gap-2">
+                    <TelerikIcon Icon="@FileIcon" />
+                    <strong>@Document?.FileName</strong>
+                </div>
+                <audio controls style="width: 100%;" preload="metadata">
+                    <source src="@FileViewUrl" type="@FileContentType" />
+                    Your browser does not support the audio element.
+                </audio>
+                @if (!string.IsNullOrEmpty(Document?.Text))
+                {
+                    <div style="margin-top: 16px; font-family: 'Consolas', monospace; font-size: 0.9em; color: var(--kendo-subtle-text, #666);">
+                        @((MarkupString)Document.Text.FormatWithSentenceBreaks())
+                    </div>
+                }
+            </div>
+        }
+        else if (Category == FileCategory.Image && !string.IsNullOrEmpty(FileViewUrl))
+        {
+            <div style="height: 800px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--kendo-base-bg, #1a1a1a); overflow: auto;">
+                <img src="@FileViewUrl" style="max-width: 100%; max-height: 750px; object-fit: contain;" alt="@Document?.FileName" />
+                <div style="padding: 8px; color: var(--kendo-subtle-text, #aaa); font-size: 0.85em;">
+                    @Document?.FileName
+                    @if (!string.IsNullOrEmpty(Document?.Text))
+                    {
+                        <span class="ms-3">@Document.Text.Replace("\n", " ").Trim()</span>
+                    }
+                </div>
+            </div>
+        }
         else
         {
             <div style="height: 800px; overflow-y: auto; padding: 20px; background-color: var(--kendo-base-bg, #f9f9f9); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
@@ -299,9 +347,41 @@
         }
     }
 
+    private string? FileViewUrl
+    {
+        get
+        {
+            var path = Document?.FilePath;
+            return string.IsNullOrEmpty(path)
+                ? null
+                : $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(path)}";
+        }
+    }
+
+    private string FileContentType => FileExtension switch
+    {
+        ".mp4" => "video/mp4",
+        ".avi" => "video/x-msvideo",
+        ".mov" => "video/quicktime",
+        ".mkv" => "video/x-matroska",
+        ".wmv" => "video/x-ms-wmv",
+        ".vob" => "video/mpeg",
+        ".m4a" => "audio/mp4",
+        ".mp3" => "audio/mpeg",
+        ".wav" => "audio/wav",
+        ".ogg" => "audio/ogg",
+        ".flac" => "audio/flac",
+        ".aac" => "audio/aac",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".png" => "image/png",
+        ".gif" => "image/gif",
+        ".webp" => "image/webp",
+        _ => "application/octet-stream"
+    };
+
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
 
-    private enum FileCategory { Pdf, Spreadsheet, Video, Audio, Unknown }
+    private enum FileCategory { Pdf, Spreadsheet, Video, Audio, Image, Unknown }
 
     private FileCategory Category => GetFileCategory();
 
@@ -333,6 +413,7 @@
             ".xlsx" or ".xls" or ".csv" => FileCategory.Spreadsheet,
             ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv" => FileCategory.Video,
             ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => FileCategory.Audio,
+            ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".tiff" or ".tif" or ".cr2" or ".webp" => FileCategory.Image,
             _ => FileCategory.Unknown
         };
     }
@@ -343,6 +424,7 @@
         FileCategory.Spreadsheet => SvgIcon.FileExcel,
         FileCategory.Video => SvgIcon.FileVideo,
         FileCategory.Audio => SvgIcon.FileAudio,
+        FileCategory.Image => SvgIcon.Image,
         _ => SvgIcon.File
     };
     //
@@ -353,6 +435,7 @@
         FileCategory.Spreadsheet => "Spreadsheet",
         FileCategory.Video => "Video File",
         FileCategory.Audio => "Audio File",
+        FileCategory.Image => "Image",
         _ => "Document"
     };
 
@@ -361,6 +444,7 @@
         FileCategory.Pdf => "PDF Viewer",
         FileCategory.Spreadsheet => "Spreadsheet Viewer",
         FileCategory.Video or FileCategory.Audio => "Media Info",
+        FileCategory.Image => "Image Viewer",
         _ => "Document Viewer"
     };
 
@@ -374,6 +458,7 @@
     {
         FileCategory.Spreadsheet => "Spreadsheet Content",
         FileCategory.Video or FileCategory.Audio => "Media Metadata",
+        FileCategory.Image => "Image Metadata",
         _ => "Text Preview"
     };
 
@@ -381,6 +466,7 @@
     {
         FileCategory.Spreadsheet => "Row",
         FileCategory.Video or FileCategory.Audio => "Metadata",
+        FileCategory.Image => "EXIF",
         _ => "Sentence"
     };
 

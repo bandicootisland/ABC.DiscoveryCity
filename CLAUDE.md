@@ -6,7 +6,7 @@ Legal document discovery and analysis platform for investigating large collectio
 
 ```
 Blazor WASM (5233) --> ASP.NET Core API (5022) --> PostgreSQL 16 + pgvector (5435)
-                                                --> Ollama (11434, all-minilm:latest, 384-dim)
+                                                --> Ollama (11434, mxbai-embed-large:latest, 1024-dim)
                                                 --> Elasticsearch (9200, optional)
 ```
 
@@ -17,7 +17,7 @@ Blazor WASM (5233) --> ASP.NET Core API (5022) --> PostgreSQL 16 + pgvector (543
 | `ABC.DiscoveryCity.PostgreSQL` | Database layer via Dapper/Npgsql. `DbService.cs` is the main service (~104KB). pgvector for semantic search. |
 | `ABC.DiscoveryCity.DocumentIngestionProcessing` | CLI tool for batch PDF ingestion. `Program.cs` (~58KB) orchestrates the pipeline. |
 | `ABC.DiscoveryCity.TelerikProcessing` | PDF processing, thumbnail generation, image extraction, spreadsheet handling. |
-| `ABC.DiscoveryCity.Embeddings` | Ollama embedding service (384-dim vectors via all-minilm). |
+| `ABC.DiscoveryCity.Embeddings` | Ollama embedding service (1024-dim vectors via mxbai-embed-large). |
 | `ABC.DiscoveryCity.Words` / `.Words.Common` | Linguistic analysis, people extraction, grammar rules, ontology. |
 | `ABC.DiscoveryCity.DocReader` | PDF text/image extraction console app with web scraping. |
 | `ABC.DiscoveryCity.MariaDB` | Legacy MariaDB/MySQL data loaders (HathiTrust, OpenLibrary, CSV). |
@@ -32,7 +32,7 @@ Blazor WASM (5233) --> ASP.NET Core API (5022) --> PostgreSQL 16 + pgvector (543
 - .NET 10.0, C# 13 (nullable enable, implicit usings)
 - Blazor WebAssembly with Telerik UI for Blazor 12.0.0
 - PostgreSQL 16 + pgvector extension (Docker, port 5435)
-- Ollama for embeddings (all-minilm:latest, 384 dimensions)
+- Ollama for embeddings (mxbai-embed-large:latest, 1024 dimensions)
 - Dapper + Npgsql (no EF Core)
 - Telerik Document Processing + iText7 + Syncfusion for PDFs
 - Tesseract 5.2.0 for OCR
@@ -41,7 +41,7 @@ Blazor WASM (5233) --> ASP.NET Core API (5022) --> PostgreSQL 16 + pgvector (543
 ## Database Schema
 
 - **ParentDocuments**: Id, FilePath (unique), Metadata (JSONB with People, Terms, etc.), DataSetId, ProcessedAt
-- **DocumentChunks**: ChunkId, ParentId, ChunkIndex, TextContent, Embedding (vector(384))
+- **DocumentChunks**: ChunkId, ParentId, ChunkIndex, TextContent, Embedding (vector(1024))
 - **DocumentImages**: Id, ParentId, ImageType, ImageSize, FilePath, Width, Height
 - **Sources / DataSets**: Hierarchical document collection organization
 
