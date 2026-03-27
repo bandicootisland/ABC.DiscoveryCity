@@ -75,12 +75,32 @@ public class ImagesController : ControllerBase
                 return File(pdfFromBundle, "application/pdf", enableRangeProcessing: true);
         }
 
-        // For videos: try DB package (raw mp4 bytes stored by VideoProxyStep)
+        // For videos: try ZIP package from DB (data/{name}.mp4 — original or proxy)
         if (extension is ".mp4" or ".avi" or ".vob" or ".mov" or ".mkv" or ".wmv")
         {
-            var videoBytes = _dbService.GetDocumentPackageByFileName(Path.GetFileName(resolvedPath));
-            if (videoBytes is { Length: > 0 })
-                return File(videoBytes, "video/mp4", enableRangeProcessing: true);
+            // Video ZIP entry is always .mp4 (transcoded if needed)
+            var mp4Name = Path.ChangeExtension(Path.GetFileName(resolvedPath), ".mp4");
+            var videoFromDb = ExtractFileFromDbPackage(resolvedPath, mp4Name);
+            if (videoFromDb != null)
+                return File(videoFromDb, "video/mp4", enableRangeProcessing: true);
+        }
+
+        // For images: try ZIP package from DB (data/{filename} — same layout as XLSX bundles)
+        if (extension is ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".tiff" or ".tif" or ".cr2" or ".webp")
+        {
+            var imageFromDb = ExtractFileFromDbPackage(resolvedPath);
+            if (imageFromDb != null)
+            {
+                string imgContentType = extension switch
+                {
+                    ".jpg" or ".jpeg" => "image/jpeg",
+                    ".png" => "image/png",
+                    ".gif" => "image/gif",
+                    ".webp" => "image/webp",
+                    _ => "application/octet-stream"
+                };
+                return File(imageFromDb, imgContentType, enableRangeProcessing: true);
+            }
         }
 
         // Fall back to serving directly from disk
@@ -130,6 +150,36 @@ public class ImagesController : ControllerBase
 
             var pdfName = Path.GetFileName(pdfPath);
             var entry = zip.GetEntry($"data/{pdfName}") ?? zip.GetEntry("data/source.pdf");
+            if (entry == null) return null;
+
+            using var entryStream = entry.Open();
+            using var ms = new MemoryStream();
+            entryStream.CopyTo(ms);
+            return ms.ToArray();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Extracts any file from its ZIP package in the database.
+    /// Looks for data/{entryName} inside the ZIP — same layout used by XLSX bundles, video, and image packages.
+    /// </summary>
+    private byte[]? ExtractFileFromDbPackage(string filePath, string? entryName = null)
+    {
+        try
+        {
+            var fileName = Path.GetFileName(filePath);
+            var packageBytes = _dbService.GetDocumentPackageByFileName(fileName);
+            if (packageBytes == null) return null;
+
+            using var stream = new MemoryStream(packageBytes);
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Read);
+
+            var zipEntryName = entryName ?? fileName;
+            var entry = zip.GetEntry($"data/{zipEntryName}");
             if (entry == null) return null;
 
             using var entryStream = entry.Open();

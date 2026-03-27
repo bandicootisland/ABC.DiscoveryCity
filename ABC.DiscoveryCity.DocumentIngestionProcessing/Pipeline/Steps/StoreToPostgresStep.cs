@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json;
 
 namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline.Steps;
@@ -64,20 +65,39 @@ public class StoreToPostgresStep : IIngestionStep
             }
         }
 
-        // 3. Store package: video bytes (original or proxy) or XLSX bundle for PDFs
+        // 3. Store package: all non-PDF types use ZIP with data/{filename}, PDFs use XLSX bundle
         if (ctx.VideoBytesForPackage is { Length: > 0 })
         {
             try
             {
+                // Video: store as ZIP with data/{name}.mp4 (always mp4 — original or transcoded)
+                string videoName = Path.ChangeExtension(ctx.FileName, ".mp4");
+                byte[] zipPackage = CreateZipPackage(videoName, ctx.VideoBytesForPackage);
                 lock (ctx.DbService)
                 {
-                    ctx.DbService.UpsertDocumentPackage(parentId, ctx.VideoBytesForPackage);
+                    ctx.DbService.UpsertDocumentPackage(parentId, zipPackage);
                 }
-                Console.WriteLine($"  [DB] Video package: {ctx.VideoBytesForPackage.Length / (1024.0 * 1024):F1} MB ({(ctx.IsVideoProxy ? "proxy 720p" : "original")})");
+                Console.WriteLine($"  [DB] Video package: {zipPackage.Length / (1024.0 * 1024):F1} MB ZIP ({(ctx.IsVideoProxy ? "proxy 720p" : "original")})");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"  [WARN] Video package store error: {ex.Message}");
+            }
+        }
+        else if (ctx.Category == FileCategory.Image && File.Exists(ctx.FilePath))
+        {
+            try
+            {
+                byte[] zipPackage = CreateZipPackage(ctx.FileName, File.ReadAllBytes(ctx.FilePath));
+                lock (ctx.DbService)
+                {
+                    ctx.DbService.UpsertDocumentPackage(parentId, zipPackage);
+                }
+                Console.WriteLine($"  [DB] Image package: {zipPackage.Length / (1024.0 * 1024):F1} MB (ZIP)");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [WARN] Image package store error: {ex.Message}");
             }
         }
         else
@@ -139,5 +159,21 @@ public class StoreToPostgresStep : IIngestionStep
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Creates a minimal ZIP package with the file under data/{filename}.
+    /// Same OPC layout as XLSX bundles so the API can extract with the same ZipArchive pattern.
+    /// </summary>
+    private static byte[] CreateZipPackage(string fileName, byte[] fileBytes)
+    {
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            var entry = zip.CreateEntry($"data/{fileName}", CompressionLevel.Optimal);
+            using var entryStream = entry.Open();
+            entryStream.Write(fileBytes, 0, fileBytes.Length);
+        }
+        return ms.ToArray();
     }
 }
