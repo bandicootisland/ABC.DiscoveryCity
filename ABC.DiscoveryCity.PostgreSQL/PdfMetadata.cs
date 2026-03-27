@@ -24,6 +24,7 @@ public class PdfMetadata
     public long FileSizeBytes { get; set; }
     public int WordCount { get; set; }
     public string ImageColorSpace { get; set; } = "";
+    public string VideoQuality { get; set; } = "";
 
     /// <summary>
     /// Returns metadata for JSONB storage (excludes Text — stored as Sentences JSONB on ParentDocuments)
@@ -48,7 +49,8 @@ public class PdfMetadata
         IngestedAtUtc = IngestedAtUtc,
         FileSizeBytes = FileSizeBytes,
         WordCount = WordCount,
-        ImageColorSpace = ImageColorSpace
+        ImageColorSpace = ImageColorSpace,
+        VideoQuality = VideoQuality
     };
 }
 
@@ -78,4 +80,5 @@ public class PdfMetadataForStorage
     public long FileSizeBytes { get; set; }
     public int WordCount { get; set; }
     public string ImageColorSpace { get; set; } = "";
+    public string VideoQuality { get; set; } = "";
 }

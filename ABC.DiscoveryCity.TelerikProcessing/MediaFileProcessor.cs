@@ -211,7 +211,7 @@ public static class MediaFileProcessor
         }
     }
 
-    private static string? RunProcess(string fileName, string arguments, int timeoutMs = 10000)
+    public static string? RunProcess(string fileName, string arguments, int timeoutMs = 10000)
     {
         var psi = new ProcessStartInfo
         {

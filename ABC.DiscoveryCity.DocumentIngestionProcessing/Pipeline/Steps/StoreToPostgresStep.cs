@@ -64,21 +64,39 @@ public class StoreToPostgresStep : IIngestionStep
             }
         }
 
-        // 3. Store XLSX package
-        string xlsxPath = Path.Combine(ctx.OutputDir, Path.GetFileNameWithoutExtension(ctx.FilePath) + ".xlsx");
-        if (File.Exists(xlsxPath))
+        // 3. Store package: video bytes (original or proxy) or XLSX bundle for PDFs
+        if (ctx.VideoBytesForPackage is { Length: > 0 })
         {
             try
             {
-                byte[] xlsxBytes = File.ReadAllBytes(xlsxPath);
                 lock (ctx.DbService)
                 {
-                    ctx.DbService.UpsertDocumentPackage(parentId, xlsxBytes);
+                    ctx.DbService.UpsertDocumentPackage(parentId, ctx.VideoBytesForPackage);
                 }
+                Console.WriteLine($"  [DB] Video package: {ctx.VideoBytesForPackage.Length / (1024.0 * 1024):F1} MB ({(ctx.IsVideoProxy ? "proxy 720p" : "original")})");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  [WARN] Package store error: {ex.Message}");
+                Console.WriteLine($"  [WARN] Video package store error: {ex.Message}");
+            }
+        }
+        else
+        {
+            string xlsxPath = Path.Combine(ctx.OutputDir, Path.GetFileNameWithoutExtension(ctx.FilePath) + ".xlsx");
+            if (File.Exists(xlsxPath))
+            {
+                try
+                {
+                    byte[] xlsxBytes = File.ReadAllBytes(xlsxPath);
+                    lock (ctx.DbService)
+                    {
+                        ctx.DbService.UpsertDocumentPackage(parentId, xlsxBytes);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  [WARN] Package store error: {ex.Message}");
+                }
             }
         }
 

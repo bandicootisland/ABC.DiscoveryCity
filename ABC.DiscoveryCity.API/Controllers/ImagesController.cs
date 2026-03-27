@@ -75,6 +75,14 @@ public class ImagesController : ControllerBase
                 return File(pdfFromBundle, "application/pdf", enableRangeProcessing: true);
         }
 
+        // For videos: try DB package (raw mp4 bytes stored by VideoProxyStep)
+        if (extension is ".mp4" or ".avi" or ".vob" or ".mov" or ".mkv" or ".wmv")
+        {
+            var videoBytes = _dbService.GetDocumentPackageByFileName(Path.GetFileName(resolvedPath));
+            if (videoBytes is { Length: > 0 })
+                return File(videoBytes, "video/mp4", enableRangeProcessing: true);
+        }
+
         // Fall back to serving directly from disk
         if (System.IO.File.Exists(resolvedPath))
         {

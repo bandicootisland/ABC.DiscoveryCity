@@ -21,6 +21,7 @@ public class IngestionContext
     public bool NoEmbeddings { get; init; }
     public bool ForceReprocess { get; init; }
     public long MaxFileSizeForCopy { get; init; } = 100 * 1024 * 1024; // 100 MB
+    public long VideoProxyThreshold { get; init; } = 50 * 1024 * 1024; // 50 MB — videos over this get transcoded to 720p proxy
 
     // --- Services (injected) ---
     public required DbService DbService { get; init; }
@@ -80,6 +81,10 @@ public class IngestionContext
     public SpreadsheetResult? SpreadsheetResult { get; set; }
     public MediaMetadata? MediaMetadata { get; set; }
     public ImageFileMetadata? ImageFileMetadata { get; set; }
+
+    // --- Video proxy state (set by VideoProxyStep) ---
+    public byte[]? VideoBytesForPackage { get; set; }
+    public bool IsVideoProxy { get; set; }
 
     /// <summary>
     /// Set when a file exceeds MaxFileSizeForCopy — DB entry is created but the file is not copied to Published.

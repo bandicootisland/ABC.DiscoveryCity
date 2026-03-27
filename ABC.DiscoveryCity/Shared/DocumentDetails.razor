@@ -138,14 +138,29 @@
         {
             <div style="height: 800px; display: flex; flex-direction: column; background: #000;">
                 <video controls style="width: 100%; max-height: 700px; flex: 1;" preload="metadata">
-                    <source src="@FileViewUrl" type="@FileContentType" />
+                    <source src="@FileViewUrl" type="video/mp4" />
                     Your browser does not support the video element.
                 </video>
-                <div style="padding: 8px 12px; background: var(--kendo-base-bg, #1a1a1a); color: var(--kendo-subtle-text, #aaa); font-size: 0.85em;">
+                <div style="padding: 8px 12px; background: var(--kendo-base-bg, #1a1a1a); color: var(--kendo-subtle-text, #aaa); font-size: 0.85em; display: flex; align-items: center; gap: 8px;">
                     @Document?.FileName
+                    @{
+                        var vq = GetMetadataValue("VideoQuality");
+                        if (vq == "original")
+                        {
+                            <span class="badge" style="background: #28a745; color: #fff; font-size: 0.75em;">Original</span>
+                        }
+                        else if (vq == "proxy_720p")
+                        {
+                            <span class="badge" style="background: #ffc107; color: #333; font-size: 0.75em;">720p Reduced</span>
+                        }
+                        else if (string.IsNullOrEmpty(vq))
+                        {
+                            <span class="badge" style="background: #6c757d; color: #fff; font-size: 0.75em;">Disk Only</span>
+                        }
+                    }
                     @if (!string.IsNullOrEmpty(Document?.Text))
                     {
-                        <span class="ms-3">@Document.Text.Replace("\n", " ").Trim()</span>
+                        <span class="ms-2">@Document.Text.Replace("\n", " ").Trim()</span>
                     }
                 </div>
             </div>
@@ -390,6 +405,17 @@
         ".webp" => "image/webp",
         _ => "application/octet-stream"
     };
+
+    private string? GetMetadataValue(string key)
+    {
+        if (string.IsNullOrEmpty(Document?.MetadataJson)) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(Document.MetadataJson);
+            return doc.RootElement.TryGetProperty(key, out var val) ? val.GetString() : null;
+        }
+        catch { return null; }
+    }
 
     /// <summary>
     /// Best URL for the image viewer: preview (800px) > full image > original file.
