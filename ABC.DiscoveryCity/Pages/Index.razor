@@ -1,5 +1,7 @@
 @page "/"
+@using ABC.DiscoveryCity.Services
 @inject NavigationManager NavigationManager
+@inject SearchService SearchService
 
 <PageTitle>Dæmask - Home</PageTitle>
 
@@ -43,16 +45,16 @@
                 
                 <div class="hero-stats">
                     <div class="stat-item">
-                        <span class="stat-value">1M+</span>
+                        <span class="stat-value">@DocumentCountDisplay</span>
                         <span class="stat-label">Documents Indexed</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-value">Vector</span>
-                        <span class="stat-label">HNSW Search</span>
+                        <span class="stat-value">AI</span>
+                        <span class="stat-label">Semantic Search</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-value">WebGL</span>
-                        <span class="stat-label">Hardware Acceleration</span>
+                        <span class="stat-value">Hybrid</span>
+                        <span class="stat-label">Multi-Tier Fusion</span>
                     </div>
                 </div>
             </div>
@@ -80,8 +82,32 @@
             <div class="feature-card">
                 <div class="feature-icon"><i class="bi bi-diagram-3"></i></div>
                 <h3>Graph Relationships</h3>
-                <p>Traverse data clusters in a frictionless, highly responsive WebGL environment.</p>
+                <p>Traverse data clusters in a frictionless, highly responsive environment.</p>
             </div>
         </section>
     </div>
 </div>
+
+@code {
+    private int _documentCount;
+
+    private string DocumentCountDisplay
+    {
+        get
+        {
+            if (_documentCount <= 0) return "...";
+            int rounded = (_documentCount / 100) * 100;
+            return $"{rounded:N0}+";
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var counts = await SearchService.GetCountsAsync();
+            _documentCount = counts.Documents;
+        }
+        catch { }
+    }
+}

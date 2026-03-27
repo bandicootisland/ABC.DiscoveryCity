@@ -311,6 +311,18 @@ public class SearchService
         }
     }
 
+    public async Task<CountsDto> GetCountsAsync()
+    {
+        try
+        {
+            return await _httpClient.GetFromJsonAsync<CountsDto>("api/search/counts") ?? new();
+        }
+        catch
+        {
+            return new();
+        }
+    }
+
     public async Task<List<string>> GetDataSetNamesAsync()
     {
         try
@@ -494,6 +506,13 @@ public class SystemStatsDto
     public long ChunksWithEmbeddings { get; set; }
     public double AvgPagesPerDocument { get; set; }
     public DateTime? LastProcessedAt { get; set; }
+}
+
+public class CountsDto
+{
+    public int Documents { get; set; }
+    public int Images { get; set; }
+    public int Chunks { get; set; }
 }
 
 public class DataSetStatsDto
