@@ -169,18 +169,30 @@
                 }
             </div>
         }
-        else if (Category == FileCategory.Image && !string.IsNullOrEmpty(FileViewUrl))
+        else if (Category == FileCategory.Image)
         {
-            <div style="height: 800px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--kendo-base-bg, #1a1a1a); overflow: auto;">
-                <img src="@FileViewUrl" style="max-width: 100%; max-height: 750px; object-fit: contain;" alt="@Document?.FileName" />
-                <div style="padding: 8px; color: var(--kendo-subtle-text, #aaa); font-size: 0.85em;">
-                    @Document?.FileName
-                    @if (!string.IsNullOrEmpty(Document?.Text))
-                    {
-                        <span class="ms-3">@Document.Text.Replace("\n", " ").Trim()</span>
-                    }
+            @* Use preview image if available (smaller), fall back to full original, then FilePath *@
+            var imgUrl = ImageViewerUrl;
+
+            if (!string.IsNullOrEmpty(imgUrl))
+            {
+                <div style="height: 800px; display: flex; flex-direction: column; align-items: center; justify-content: center; background: var(--kendo-base-bg, #1a1a1a); overflow: auto;">
+                    <img src="@imgUrl" style="max-width: 100%; max-height: 750px; object-fit: contain;" alt="@Document?.FileName" />
+                    <div style="padding: 8px; color: var(--kendo-subtle-text, #aaa); font-size: 0.85em;">
+                        @Document?.FileName
+                        @if (!string.IsNullOrEmpty(Document?.Text))
+                        {
+                            <span class="ms-3">@Document.Text.Replace("\n", " ").Trim()</span>
+                        }
+                    </div>
                 </div>
-            </div>
+            }
+            else
+            {
+                <div style="height: 800px; display: flex; align-items: center; justify-content: center; color: var(--kendo-subtle-text, #aaa);">
+                    No image path available for @Document?.FileName
+                </div>
+            }
         }
         else
         {
@@ -378,6 +390,21 @@
         ".webp" => "image/webp",
         _ => "application/octet-stream"
     };
+
+    /// <summary>
+    /// Best URL for the image viewer: preview (800px) > full image > original file.
+    /// </summary>
+    private string? ImageViewerUrl
+    {
+        get
+        {
+            if (!string.IsNullOrEmpty(Document?.FullImagePath))
+                return $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(Document.FullImagePath)}";
+            if (!string.IsNullOrEmpty(Document?.ThumbnailPath))
+                return $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(Document.ThumbnailPath)}";
+            return FileViewUrl;
+        }
+    }
 
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
 
