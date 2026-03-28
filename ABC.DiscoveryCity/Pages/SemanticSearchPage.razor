@@ -1,0 +1,835 @@
+@page "/semantic-search"
+@using System.Text.RegularExpressions
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+@using Telerik.Blazor.Components.Common.Icon
+@using static ABC.DiscoveryCity.Services.TextFormatExtensions
+@inject SearchService SearchService
+@inject UserListService UserListService
+@inject NotificationService NotificationService
+@inject IJSRuntime JS
+
+<PageTitle>Semantic Search</PageTitle>
+
+<div class="container-fluid" @onkeydown="OnPageKeyDown" tabindex="-1">
+    <h3>Semantic Search</h3>
+
+    <SearchToolbar @bind-SearchQuery="SearchQuery"
+                   AvailableDataSets="@AvailableDataSets"
+                   @bind-SelectedDataSets="SelectedDataSets"
+                   AvailableNames="@AvailableNames"
+                   @bind-SelectedNames="SelectedNames"
+                   OnSearch="@OnSearchRequested"
+                   OnDataSetChanged="@OnDataSetFilterChanged"
+                   OnNamesSearch="@OnNamesSearchRequested"
+                   TotalCount="@TotalCount"
+                   OnAdvancedFind="@(() => _showAdvancedFind = true)"
+                   @bind-FilenameOnly="FilenameOnly" />
+
+    <AdvancedFindDialog @bind-Visible="_showAdvancedFind"
+                        AvailableDataSets="@AvailableDataSets"
+                        AvailableNames="@AvailableNames"
+                        OnApplyCriteria="@OnAdvancedFindApply" />
+
+    @if (_isEnriching)
+    {
+        <div class="d-flex align-items-center gap-2 mb-1" style="opacity: 0.7;">
+            <div style="flex: 0 0 80px; height: 3px; background: var(--kendo-base-bg, #e9ecef); border-radius: 2px; overflow: hidden;">
+                <div style="width: @($"{_completedTiers * 25}%"); height: 100%; background: var(--kendo-selected-bg, #0d6efd); border-radius: 2px; transition: width 0.5s;"></div>
+            </div>
+            <span class="text-muted small">@_completedTiers/4</span>
+        </div>
+    }
+    @if (GridData != null && GridData.Count == 0 && TotalCount == 0 && HasSearched)
+    {
+        <div class="alert alert-warning">No results found.</div>
+    }
+    @if (string.IsNullOrWhiteSpace(SearchQuery) && TotalCount > 0)
+    {
+        <div class="mb-1 text-muted fst-italic small">Browsing recent documents</div>
+    }
+    <div class="d-flex align-items-center gap-3 mb-1">
+        <label class="form-check form-check-inline mb-0">
+            <input type="checkbox" class="form-check-input" @bind="IsMultiSelectMode" />
+            <span class="form-check-label text-muted small">Multi-select</span>
+        </label>
+        @if (IsMultiSelectMode && SelectedItems.Any())
+        {
+            <TelerikButton OnClick="@(() => _showSaveListDialog = true)"
+                           Icon="@SvgIcon.Save"
+                           ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                           Size="@ThemeConstants.Button.Size.Small">
+                Save @SelectedItems.Count() to List
+            </TelerikButton>
+        }
+    </div>
+
+    @if (_showSaveListDialog)
+    {
+        <TelerikDialog @bind-Visible="_showSaveListDialog" Title="Save to List" Width="400px">
+            <DialogContent>
+                <div class="mb-3">
+                    <label class="form-label">Destination</label>
+                    <div class="d-flex flex-column gap-2 mb-2">
+                        <label class="form-check">
+                            <input type="radio" class="form-check-input" checked="@(_saveToListMode == "new")" @onchange="@(() => _saveToListMode = "new")" />
+                            Create new list
+                        </label>
+                        @if (AvailableLists != null && AvailableLists.Any())
+                        {
+                            <label class="form-check">
+                                <input type="radio" class="form-check-input" checked="@(_saveToListMode == "existing")" @onchange="@(() => _saveToListMode = "existing")" />
+                                Add to existing list
+                            </label>
+                        }
+                    </div>
+                </div>
+
+                @if (_saveToListMode == "new")
+                {
+                    <div class="mb-3">
+                        <label class="form-label">New List Name</label>
+                        <input type="text" class="form-control" @bind="_newListName" @bind:event="oninput" placeholder="Enter list name..." />
+                    </div>
+                }
+                else
+                {
+                    <div class="mb-3">
+                        <label class="form-label">Select List</label>
+                        <TelerikDropDownList Data="@AvailableLists"
+                                             @bind-Value="_selectedExistingListId"
+                                             TextField="Name"
+                                             ValueField="Id"
+                                             DefaultText="Select a list..."
+                                             Width="100%">
+                        </TelerikDropDownList>
+                    </div>
+                }
+                
+                <p class="text-muted small">@SelectedItems.Count() documents will be saved.</p>
+            </DialogContent>
+            <DialogButtons>
+                <TelerikButton OnClick="@(() => _showSaveListDialog = false)">Cancel</TelerikButton>
+                <TelerikButton OnClick="@SaveSelectionToList" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                               Enabled="@CanSaveList">Save</TelerikButton>
+            </DialogButtons>
+        </TelerikDialog>
+    }
+
+    @if (_showQuickNewListDialog)
+    {
+        <TelerikDialog @bind-Visible="_showQuickNewListDialog" Title="New List" Width="350px">
+            <DialogContent>
+                <div class="mb-3">
+                    <label class="form-label">List Name</label>
+                    <input type="text" class="form-control" @bind="_quickNewListName" @bind:event="oninput" placeholder="Enter list name..." />
+                </div>
+                <p class="text-muted small">1 document will be added.</p>
+            </DialogContent>
+            <DialogButtons>
+                <TelerikButton OnClick="@(() => _showQuickNewListDialog = false)">Cancel</TelerikButton>
+                <TelerikButton OnClick="@SaveQuickNewList" ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                               Enabled="@(!string.IsNullOrWhiteSpace(_quickNewListName))">Save</TelerikButton>
+            </DialogButtons>
+        </TelerikDialog>
+    }
+
+    <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="calc(100vh - 185px)">
+        <SplitterPanes>
+            <SplitterPane Size="650px" Min="300px">
+                <div @onkeydown="OnGridKeyDown" @onkeydown:preventDefault tabindex="0" style="outline: none; height: 100%;">
+                <TelerikGrid @ref="GridRef"
+                             TItem="SearchResultDto"
+                             OnRead="@OnGridRead"
+                             Sortable="true"
+                             Resizable="true"
+                             FilterMode="@GridFilterMode.FilterRow"
+                             ScrollMode="@GridScrollMode.Virtual"
+                             EnableLoaderContainer="true"
+                             PageSize="50"
+                             RowHeight="60"
+                             Height="100%"
+                             SelectionMode="@(IsMultiSelectMode ? GridSelectionMode.Multiple : GridSelectionMode.Single)"
+                             SelectedItems="@SelectedItems"
+                             SelectedItemsChanged="@((IEnumerable<SearchResultDto> items) => OnSelectionChanged(items))"
+                             OnRowClick="@OnRowClick"
+                             OnRowContextMenu="@OnRowContextMenu">
+                    <GridColumns>
+                        <GridCheckboxColumn SelectAll="@IsMultiSelectMode" Width="42px" />
+                        <GridColumn Title="Thumb" Width="80px">
+                             <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var thumbPath = item?.ThumbnailPath;
+                                    if (!string.IsNullOrEmpty(thumbPath))
+                                    {
+                                        <img src="@($"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(thumbPath)}")"
+                                             style="width: 50px; max-height: 52px; object-fit: cover; border: 1px solid #ddd; border-radius: 4px;"
+                                             alt="Thumb" />
+                                    }
+                                    else
+                                    {
+                                        <div style="width: 50px; height: 52px; background: var(--kendo-base-bg, #f0f0f0); display: flex; align-items: center; justify-content: center; color: var(--kendo-subtle-text, #aaa);">
+                                            <TelerikIcon Icon="@GetFileIcon(item?.FileName)" />
+                                        </div>
+                                    }
+                                }
+                             </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
+                        <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date" Width="120px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    if (item?.Date != null)
+                                    {
+                                        <span title="Date deduced from document content">~@item.Date.Value.ToString("yyyy-MM-dd")</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted">Unknown</span>
+                                    }
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.PageCount)" Title="Pages" Width="80px" />
+                        <GridColumn Field="@nameof(SearchResultDto.DataSetName)" Title="DataSet" Width="120px" Filterable="true" />
+                        <GridColumn Title="Names" Width="150px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    <div style="max-height: 52px; overflow: hidden;">
+                                        <NameBadges Names="@(item?.Names ?? new())"
+                                                    SelectedNames="@SelectedNames"
+                                                    OnNameClicked="@AddNameToFilter" />
+                                    </div>
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.Distance)" Title="Relevance" Width="120px">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var pct = Math.Max(0, (1 - (item?.Distance ?? 1)) * 100);
+                                    var color = pct >= 70 ? "#28a745" : pct >= 40 ? "#ffc107" : "#dc3545";
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                        <div style="flex: 1; height: 8px; background: var(--kendo-base-bg, #e9ecef); border-radius: 4px; overflow: hidden;">
+                                            <div style="width: @($"{pct:F0}%"); height: 100%; background: @color; border-radius: 4px;"></div>
+                                        </div>
+                                        <span style="font-size: 0.8em; min-width: 36px; text-align: right;">@($"{pct:F0}%")</span>
+                                    </div>
+                                }
+                            </Template>
+                        </GridColumn>
+                        <GridColumn Field="@nameof(SearchResultDto.Text)" Title="Preview Text">
+                            <Template>
+                                @{
+                                    var item = context as SearchResultDto;
+                                    var preview = item?.Text?.Length > 150 ? item.Text.Substring(0, 150) + "..." : item?.Text;
+                                    var formatted = (preview ?? "").HighlightSearchTerms(SearchQuery);
+                                    <div style="max-height: 52px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;" title="@item?.Text">@((MarkupString)formatted)</div>
+                                }
+                            </Template>
+                        </GridColumn>
+                    </GridColumns>
+                </TelerikGrid>
+                <TelerikContextMenu @ref="GridContextMenu"
+                                    Data="@_contextMenuItems"
+                                    TextField="Text"
+                                    IconField="Icon"
+                                    SeparatorField="IsSeparator"
+                                    OnClick="@((ContextMenuItem item) => OnContextMenuClick(item))" />
+                </div>
+            </SplitterPane>
+            <SplitterPane Min="200px">
+                <div class="border rounded p-3 bg-light" style="height: 100%; overflow-y: auto;">
+                    @if (SelectedDetail != null)
+                    {
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h5 class="mb-0">@SelectedDetail.FileName</h5>
+                            <div class="d-flex gap-1">
+                                @if (!string.IsNullOrEmpty(SelectedDetail.FilePath))
+                                {
+                                    <TelerikButton OnClick="@(() => DownloadFile(SelectedDetail))" Icon="@SvgIcon.Download" Title="Download original file" />
+                                }
+                                <TelerikSplitButton OnClick="@(() => QuickAddToLastList(SelectedDetail!))"
+                                                    Icon="@SvgIcon.ListUnordered"
+                                                    Size="@ThemeConstants.Button.Size.Small"
+                                                    Title="Add to most recent list">
+                                    <SplitButtonContent>Add to List</SplitButtonContent>
+                                    <SplitButtonItems>
+                                        @foreach (var list in RecentLists)
+                                        {
+                                            var capturedList = list;
+                                            <SplitButtonItem OnClick="@(() => QuickAddToList(SelectedDetail!, capturedList))"
+                                                             Icon="@SvgIcon.ListUnordered">@capturedList.Name</SplitButtonItem>
+                                        }
+                                        <SplitButtonItem OnClick="@(() => ShowQuickNewListDialog(SelectedDetail!))"
+                                                         Icon="@SvgIcon.Plus">New List...</SplitButtonItem>
+                                    </SplitButtonItems>
+                                </TelerikSplitButton>
+                                <TelerikButton OnClick="@(() => SelectedDetail = null)" Icon="@SvgIcon.X" Title="Close details" />
+                            </div>
+                        </div>
+                        <DocumentDetails Document="@SelectedDetail"
+                                         @bind-ActiveTabIndex="_detailTabIndex"
+                                         SearchQuery="@SearchQuery" />
+                    }
+                    else
+                    {
+                        <div style="padding: 1rem;">
+                            <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="50%" Height="24px" Visible="true" />
+                            <div class="mt-3">
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Rectangle" Width="100%" Height="200px" Visible="true" />
+                            </div>
+                            <div class="mt-2 d-flex gap-3">
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="30%" Height="16px" Visible="true" />
+                                <TelerikSkeleton ShapeType="@SkeletonShapeType.Text" Width="40%" Height="16px" Visible="true" />
+                            </div>
+                            <div class="mt-3 text-center text-muted">
+                                <em>Select a document row above to view details</em>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </SplitterPane>
+        </SplitterPanes>
+    </TelerikSplitter>
+</div>
+
+@code {
+    private string SearchQuery { get; set; } = "";
+    private bool HasSearched { get; set; } = false;
+    private bool FilenameOnly { get; set; } = false;
+
+    // Server-side paged grid state
+    private List<SearchResultDto>? GridData { get; set; }
+    private int TotalCount { get; set; }
+
+    // Telerik grid reference for rebinding
+    private TelerikGrid<SearchResultDto>? GridRef { get; set; }
+
+    // DataSet filter
+    private List<string> AvailableDataSets { get; set; } = new();
+    private List<string> SelectedDataSets { get; set; } = new();
+
+    // Names filter
+    private List<string> AvailableNames { get; set; } = new();
+    private List<string> SelectedNames { get; set; } = new();
+
+    // Active filters for API queries (empty = all)
+    private List<string>? ActiveDataSetFilter =>
+        SelectedDataSets is { Count: > 0 } ? SelectedDataSets : null;
+    private List<string>? ActiveNamesFilter =>
+        SelectedNames is { Count: > 0 } ? SelectedNames : null;
+
+    private SearchResultDto? SelectedDetail { get; set; }
+    private int _detailTabIndex;
+    private bool IsMultiSelectMode { get; set; } = false;
+    private bool _showAdvancedFind;
+    private bool _showSaveListDialog;
+    private string _newListName = "";
+    private string _saveToListMode = "new";
+    private string? _selectedExistingListId;
+    private List<UserList> AvailableLists { get; set; } = new();
+
+    // Context menu & quick add-to-list
+    private TelerikContextMenu<ContextMenuItem>? GridContextMenu;
+    private SearchResultDto? _contextMenuTarget;
+    private List<ContextMenuItem> _contextMenuItems = new();
+    private bool _showQuickNewListDialog;
+    private string _quickNewListName = "";
+
+    private bool CanSaveList => 
+        _saveToListMode == "new" ? !string.IsNullOrWhiteSpace(_newListName) : !string.IsNullOrEmpty(_selectedExistingListId);
+
+    // Debounce: cancels in-flight scroll requests when new scrolls arrive
+    private CancellationTokenSource _gridReadCts = new();
+
+    // Debounce for DataSet selector — waits 800ms after last change before searching
+    private CancellationTokenSource _dataSetDebounceCts = new();
+
+    // Debounce for search text — waits 500ms after typing stops
+    private CancellationTokenSource _searchTextCts = new();
+
+    // Enrichment polling: when search results are still being enriched by slower tiers,
+    // we poll again after a delay to get improved results
+    private CancellationTokenSource _enrichmentPollCts = new();
+    private int _lastMergeVersion;
+    private bool _isEnriching;
+    private int _completedTiers;
+
+    protected override async Task OnInitializedAsync()
+    {
+        AvailableDataSets = (await SearchService.GetDataSetNamesAsync())
+            .OrderBy(n => Regex.Replace(n, @"\d+", m => m.Value.PadLeft(10, '0')))
+            .ToList();
+            
+        AvailableLists = await UserListService.GetAllAsync();
+        // Grid will fire OnRead automatically on first render
+    }
+
+    /// <summary>
+    /// Telerik Grid OnRead handler — fetches one page of data from the server.
+    /// Debounced: rapid scroll events are collapsed — only the last one fires.
+    /// IMPORTANT: Never call StateHasChanged() here — it would re-render the grid
+    /// and reset the virtual scroll position.
+    /// </summary>
+    private async Task OnGridRead(GridReadEventArgs args)
+    {
+        var skip = args.Request.Skip;
+        var take = args.Request.PageSize;
+        var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
+
+        // Fast path: if page is already in client cache, return instantly — no debounce, no HTTP call
+        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter, FilenameOnly);
+        if (cached != null)
+        {
+            args.Data = cached.Items;
+            args.Total = cached.TotalCount;
+            GridData = cached.Items;
+            TotalCount = cached.TotalCount;
+            return;
+        }
+
+        // Slow path: debounce rapid scroll events, then fetch from API
+        _gridReadCts.Cancel();
+        _gridReadCts = new CancellationTokenSource();
+        var token = _gridReadCts.Token;
+
+        try
+        {
+            await Task.Delay(50, token);
+        }
+        catch (TaskCanceledException)
+        {
+            args.Data = GridData ?? new List<SearchResultDto>();
+            args.Total = TotalCount;
+            return;
+        }
+
+        try
+        {
+            var result = await SearchService.SearchPagedAsync(
+                query, skip, take, exactMatch: false,
+                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
+
+            if (token.IsCancellationRequested)
+            {
+                args.Data = GridData ?? new List<SearchResultDto>();
+                args.Total = TotalCount;
+                return;
+            }
+
+            args.Data = result.Items;
+            args.Total = result.TotalCount;
+
+            GridData = result.Items;
+            TotalCount = result.TotalCount;
+            HasSearched = true;
+
+            // Clear preview when fresh results arrive so skeleton shows
+            if (skip == 0)
+            {
+                SelectedDetail = null;
+                SelectedItems = Enumerable.Empty<SearchResultDto>();
+            }
+
+            UpdateAvailableNames(result.Items);
+
+            // Track enrichment state for UI indicator
+            _isEnriching = result.Enriching;
+            _completedTiers = result.CompletedTiers;
+
+            // Enrichment polling: keep polling while tiers are still running
+            if (result.Enriching)
+            {
+                _lastMergeVersion = result.MergeVersion;
+                ScheduleEnrichmentPoll(skip, take);
+            }
+            else
+            {
+                _lastMergeVersion = result.MergeVersion;
+                _isEnriching = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"OnRead error: {ex.Message}");
+            args.Data = GridData ?? new List<SearchResultDto>();
+            args.Total = TotalCount;
+        }
+    }
+
+    /// <summary>
+    /// Force the grid to re-read from the server (resets to page 0).
+    /// Clears the client-side page cache so stale data is not served.
+    /// </summary>
+    private void RebindGrid()
+    {
+        _enrichmentPollCts.Cancel();
+        _lastMergeVersion = 0;
+        _isEnriching = false;
+        _completedTiers = 0;
+        SearchService.ClearPageCache();
+        GridRef?.Rebind();
+    }
+
+    /// <summary>
+    /// Called from SearchToolbar when search text changes or search button clicked.
+    /// Debounced 500ms for text changes, immediate for button clicks.
+    /// </summary>
+    private async Task OnSearchRequested()
+    {
+        _searchTextCts.Cancel();
+        _searchTextCts = new CancellationTokenSource();
+        var token = _searchTextCts.Token;
+
+        try
+        {
+            await Task.Delay(300, token);
+            if (!token.IsCancellationRequested)
+            {
+                RebindGrid();
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            // Another keystroke came in — debounce restarted
+        }
+    }
+
+    private async Task OnDataSetFilterChanged()
+    {
+        // Cancel any pending debounce
+        _dataSetDebounceCts.Cancel();
+        _dataSetDebounceCts = new CancellationTokenSource();
+        var token = _dataSetDebounceCts.Token;
+
+        try
+        {
+            await Task.Delay(800, token);
+            if (!token.IsCancellationRequested)
+            {
+                RebindGrid();
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            // Another selection came in — debounce restarted
+        }
+    }
+
+    private void OnNamesSearchRequested()
+    {
+        RebindGrid();
+    }
+
+    private void AddNameToFilter(string name)
+    {
+        if (!SelectedNames.Contains(name))
+        {
+            SelectedNames = new List<string>(SelectedNames) { name };
+            if (!AvailableNames.Contains(name))
+            {
+                AvailableNames = new List<string>(AvailableNames) { name }.OrderBy(n => n).ToList();
+            }
+            StateHasChanged();
+        }
+    }
+
+    private void UpdateAvailableNames(List<SearchResultDto> pageItems)
+    {
+        var fromResults = pageItems
+            .Where(r => r.Names != null)
+            .SelectMany(r => r.Names!)
+            .Distinct();
+        var combined = new HashSet<string>(AvailableNames); // Keep existing
+        var countBefore = combined.Count;
+        foreach (var sp in SelectedNames) combined.Add(sp);
+        foreach (var p in fromResults) combined.Add(p);
+        // Only reassign if new names were actually added — avoids triggering re-render on scroll
+        if (combined.Count > countBefore)
+            AvailableNames = combined.OrderBy(n => n).ToList();
+    }
+
+    private IEnumerable<SearchResultDto> SelectedItems { get; set; } = Enumerable.Empty<SearchResultDto>();
+
+    // Suppress SelectedItemsChanged when OnRowClick already handled the toggle
+    private bool _suppressSelectionChanged;
+
+    private void OnRowClick(GridRowClickEventArgs args)
+    {
+        if (!IsMultiSelectMode) return; // Single-select uses default grid behaviour
+
+        var item = (SearchResultDto)args.Item;
+        var currentList = SelectedItems.ToList();
+
+        if (currentList.Contains(item))
+            currentList.Remove(item);
+        else
+            currentList.Add(item);
+
+        SelectedItems = currentList;
+        SelectedDetail = item; // Show the clicked item in the detail pane
+        _suppressSelectionChanged = true;
+    }
+
+    private void OnSelectionChanged(IEnumerable<SearchResultDto> items)
+    {
+        if (_suppressSelectionChanged)
+        {
+            _suppressSelectionChanged = false;
+            return;
+        }
+
+        SelectedItems = items;
+        SelectedDetail = items.FirstOrDefault();
+    }
+
+    private async Task OnGridKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            CancelSearch();
+            return;
+        }
+
+        if (GridData == null || GridData.Count == 0) return;
+        if (e.Key != "ArrowDown" && e.Key != "ArrowUp") return;
+
+        var currentIndex = SelectedDetail != null ? GridData.IndexOf(SelectedDetail) : -1;
+        var newIndex = e.Key == "ArrowDown"
+            ? Math.Min(currentIndex + 1, GridData.Count - 1)
+            : Math.Max(currentIndex - 1, 0);
+
+        var item = GridData[newIndex];
+        SelectedDetail = item;
+        SelectedItems = new[] { item };
+        await JS.InvokeVoidAsync("scrollGridRowIntoView", newIndex, 60);
+    }
+
+    private void OnPageKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") CancelSearch();
+    }
+
+    private void CancelSearch()
+    {
+        _gridReadCts.Cancel();
+        _searchTextCts.Cancel();
+        _dataSetDebounceCts.Cancel();
+        _enrichmentPollCts.Cancel();
+    }
+
+    /// <summary>
+    /// Schedules a background poll for enriched results after slower tiers complete.
+    /// Poll intervals increase: 300ms after first return, 500ms after second.
+    /// Clears client cache and rebinds the grid to pick up re-ranked results.
+    /// </summary>
+    private void ScheduleEnrichmentPoll(int currentSkip, int currentTake)
+    {
+        _enrichmentPollCts.Cancel();
+        _enrichmentPollCts = new CancellationTokenSource();
+        var token = _enrichmentPollCts.Token;
+
+        // Gentle intervals: no spinner, no UI block
+        var delay = _lastMergeVersion <= 1 ? 1500 : 3000;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, token);
+                if (token.IsCancellationRequested) return;
+
+                // Fetch silently — don't use Rebind() which triggers the grid spinner
+                var result = await SearchService.SearchPagedAsync(
+                    SearchQuery, currentSkip, currentTake, exactMatch: false,
+                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
+
+                if (token.IsCancellationRequested) return;
+
+                await InvokeAsync(() =>
+                {
+                    _isEnriching = result.Enriching;
+                    _completedTiers = result.CompletedTiers;
+
+                    // Only update grid data if results actually changed
+                    if (result.TotalCount != TotalCount || result.MergeVersion != _lastMergeVersion)
+                    {
+                        GridData = result.Items;
+                        TotalCount = result.TotalCount;
+                        SearchService.ClearPageCache();
+                    }
+
+                    _lastMergeVersion = result.MergeVersion;
+
+                    if (result.Enriching)
+                        ScheduleEnrichmentPoll(currentSkip, currentTake);
+
+                    StateHasChanged();
+                });
+            }
+            catch (TaskCanceledException) { }
+            catch (Exception ex) { Console.WriteLine($"Enrichment poll error: {ex.Message}"); }
+        }, token);
+    }
+
+    private async Task SaveSelectionToList()
+    {
+        if (!SelectedItems.Any()) return;
+
+        if (_saveToListMode == "new")
+        {
+            if (string.IsNullOrWhiteSpace(_newListName)) return;
+            var list = UserListService.CreateFromSearchResults(_newListName, SearchQuery, SelectedItems);
+            await UserListService.SaveAsync(list);
+            NotificationService.ShowSuccess($"Saved {list.Items.Count} documents to new list \"{_newListName}\"");
+        }
+        else if (_saveToListMode == "existing" && !string.IsNullOrEmpty(_selectedExistingListId))
+        {
+            var targetList = await UserListService.GetByIdAsync(_selectedExistingListId);
+            if (targetList != null)
+            {
+                var sourceList = UserListService.CreateFromSearchResults(" temp ", SearchQuery, SelectedItems);
+                UserListService.Append(targetList, sourceList); 
+                await UserListService.SaveAsync(targetList);
+                NotificationService.ShowSuccess($"Added {SelectedItems.Count()} documents to \"{targetList.Name}\"");
+            }
+        }
+        
+        // Refresh available lists so next time we open it, it's up to date
+        AvailableLists = await UserListService.GetAllAsync();
+        
+        _showSaveListDialog = false;
+        _newListName = "";
+        _selectedExistingListId = null;
+    }
+
+    private void OnAdvancedFindApply(AdvancedFindCriteria criteria)
+    {
+        if (!string.IsNullOrWhiteSpace(criteria.TextQuery))
+            SearchQuery = criteria.TextQuery;
+
+        if (criteria.DataSets.Count > 0)
+            SelectedDataSets = new List<string>(criteria.DataSets);
+
+        if (criteria.Names.Count > 0)
+            SelectedNames = new List<string>(criteria.Names);
+
+        RebindGrid();
+    }
+
+    private async Task DownloadFile(SearchResultDto doc)
+    {
+        var url = $"{SearchService.ApiBaseUrl}/api/images/view?path={Uri.EscapeDataString(doc.FilePath!)}";
+        await JS.InvokeVoidAsync("triggerFileDownload", url, doc.FileName);
+    }
+
+    private static ISvgIcon GetFileIcon(string? fileName)
+    {
+        var ext = System.IO.Path.GetExtension(fileName ?? "").ToLowerInvariant();
+        return ext switch
+        {
+            ".pdf" => SvgIcon.FilePdf,
+            ".xlsx" or ".xls" or ".csv" => SvgIcon.FileExcel,
+            ".avi" or ".mp4" or ".vob" or ".mov" or ".mkv" or ".wmv" => SvgIcon.FileVideo,
+            ".m4a" or ".mp3" or ".wav" or ".aac" or ".ogg" or ".flac" => SvgIcon.FileAudio,
+            ".jpg" or ".jpeg" or ".png" or ".gif" or ".bmp" or ".tiff" or ".tif" or ".cr2" or ".webp" => SvgIcon.Image,
+            _ => SvgIcon.File
+        };
+    }
+
+    // --- Context menu & quick add-to-list ---
+
+    private List<UserList> RecentLists =>
+        (AvailableLists ?? new()).OrderByDescending(l => l.ModifiedAt).Take(5).ToList();
+
+    private async Task OnRowContextMenu(GridRowClickEventArgs args)
+    {
+        _contextMenuTarget = (SearchResultDto)args.Item;
+        _contextMenuItems = BuildContextMenuItems();
+        if (args.EventArgs is MouseEventArgs mouseArgs)
+            await GridContextMenu!.ShowAsync(mouseArgs.ClientX, mouseArgs.ClientY);
+    }
+
+    private List<ContextMenuItem> BuildContextMenuItems()
+    {
+        var items = new List<ContextMenuItem>();
+        var recent = RecentLists;
+        foreach (var list in recent)
+        {
+            items.Add(new ContextMenuItem
+            {
+                Text = list.Name,
+                Icon = SvgIcon.ListUnordered,
+                ListId = list.Id
+            });
+        }
+        if (recent.Count > 0)
+            items.Add(new ContextMenuItem { IsSeparator = true });
+        items.Add(new ContextMenuItem
+        {
+            Text = "New List...",
+            Icon = SvgIcon.Plus,
+            ListId = null
+        });
+        return items;
+    }
+
+    private async Task OnContextMenuClick(ContextMenuItem item)
+    {
+        if (item.IsSeparator || _contextMenuTarget == null) return;
+
+        if (item.ListId != null)
+            await QuickAddToList(_contextMenuTarget, (await UserListService.GetByIdAsync(item.ListId))!);
+        else
+            ShowQuickNewListDialog(_contextMenuTarget);
+    }
+
+    private async Task QuickAddToList(SearchResultDto doc, UserList targetList)
+    {
+        var source = UserListService.CreateFromSearchResults("_", null, new[] { doc });
+        UserListService.Append(targetList, source);
+        await UserListService.SaveAsync(targetList);
+        AvailableLists = await UserListService.GetAllAsync();
+        NotificationService.ShowSuccess($"Added \"{doc.FileName}\" to \"{targetList.Name}\"");
+    }
+
+    private async Task QuickAddToLastList(SearchResultDto doc)
+    {
+        var last = RecentLists.FirstOrDefault();
+        if (last != null)
+            await QuickAddToList(doc, last);
+        else
+            ShowQuickNewListDialog(doc);
+    }
+
+    private void ShowQuickNewListDialog(SearchResultDto doc)
+    {
+        _contextMenuTarget = doc;
+        _quickNewListName = "";
+        _showQuickNewListDialog = true;
+    }
+
+    private async Task SaveQuickNewList()
+    {
+        if (string.IsNullOrWhiteSpace(_quickNewListName) || _contextMenuTarget == null) return;
+        var list = UserListService.CreateFromSearchResults(_quickNewListName, null, new[] { _contextMenuTarget });
+        await UserListService.SaveAsync(list);
+        AvailableLists = await UserListService.GetAllAsync();
+        NotificationService.ShowSuccess($"Created list \"{_quickNewListName}\" with \"{_contextMenuTarget.FileName}\"");
+        _showQuickNewListDialog = false;
+        _quickNewListName = "";
+    }
+
+    private class ContextMenuItem
+    {
+        public string Text { get; set; } = "";
+        public ISvgIcon? Icon { get; set; }
+        public string? ListId { get; set; }
+        public bool IsSeparator { get; set; }
+    }
+}

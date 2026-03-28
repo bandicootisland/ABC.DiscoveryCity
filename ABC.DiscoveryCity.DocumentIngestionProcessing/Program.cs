@@ -137,6 +137,8 @@ if (args.Any(a => a.Equals("--alter-vectors", StringComparison.OrdinalIgnoreCase
     return;
 }
 
+
+
 if (args.Any(a => a.Equals("--import-dictionary", StringComparison.OrdinalIgnoreCase)))
 {
     Console.WriteLine("=== IMPORT DICTIONARY FROM BOOKCITY ===\n");
@@ -425,7 +427,7 @@ if (exportSignatures)
     string connStr = "Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
     string binPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "signatures.bin");
     
-    var manager = new IngestionManager(connStr, binPath);
+    var manager = new IngestionManager(connStr, binPath, embeddingService ?? new OllamaEmbeddingService());
     await manager.RunAsync();
     return;
 }

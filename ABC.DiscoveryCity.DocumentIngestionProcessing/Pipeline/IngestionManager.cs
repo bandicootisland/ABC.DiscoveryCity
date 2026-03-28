@@ -17,11 +17,13 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline
     {
         private readonly string _connectionString;
         private readonly string _outputBinPath;
+        private readonly ABC.DiscoveryCity.Embeddings.IEmbeddingService _embeddingService;
 
-        public IngestionManager(string connectionString, string outputBinPath)
+        public IngestionManager(string connectionString, string outputBinPath, ABC.DiscoveryCity.Embeddings.IEmbeddingService embeddingService)
         {
             _connectionString = connectionString;
             _outputBinPath = outputBinPath;
+            _embeddingService = embeddingService;
         }
 
         public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -131,28 +133,15 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline
         {
             var localBatch = new List<OutputRow>(500);
 
+            string sqBinPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sq_codebook.bin");
+            var encoder = new SentenceEncoder(sqBinPath, _embeddingService);
+            var parser = new MockLinguisticParser();
+            var symbols = new MockSymbolRegistry();
+            var ingestionService = new IngestionService(encoder, parser, symbols);
+
             await foreach (var row in reader.ReadAllAsync(ct))
             {
-                // 1. Vectorization (Mock a 384-dimensional network)
-                float[] embedding = GenerateMockEmbedding(row.Text);
-
-                // 2. Quantization (ProductQuantizer reduction to 16 bytes)
-                Guid semanticId = MockProductQuantizer(embedding);
-
-                // 3. Linguistic Mapping using safe cast to short to protect Postgres int2 limits
-                var sig = new SentenceSignature
-                {
-                    Id = row.SentenceId,
-                    SemanticId = semanticId,
-                    DocId = row.DocId,
-                    Who = SafeCastToInt16(row.Text.Length),
-                    What = SafeCastToInt16(row.Ordinal),
-                    Where = 0,
-                    When = 0,
-                    Which = 0,
-                    Why = 0,
-                    How = 0
-                };
+                var sig = ingestionService.Ingest(row.Text, row.SentenceId, row.DocId);
 
                 var outRow = new OutputRow
                 {
@@ -249,27 +238,28 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline
             await tx.CommitAsync(ct);
         }
 
-        private float[] GenerateMockEmbedding(string text)
+        private class MockLinguisticParser : ILinguisticParser
         {
-            float[] vector = new float[384];
-            float val = text.Length;
-            for (int i = 0; i < 384; i++) vector[i] = val % (i + 1);
-            return vector;
+            public LinguisticAnalysis Analyze(string rawText)
+            {
+                return new LinguisticAnalysis
+                {
+                    Subject = "mock_subject",
+                    Action = rawText.Length.ToString()
+                };
+            }
         }
 
-        private Guid MockProductQuantizer(float[] vector)
+        private class MockSymbolRegistry : ISymbolRegistry
         {
-            byte[] bytes = new byte[16];
-            int hash = vector.GetHashCode();
-            BitConverter.TryWriteBytes(bytes.AsSpan(0, 4), hash);
-            return new Guid(bytes);
-        }
-
-        private short SafeCastToInt16(int value)
-        {
-            if (value > 32767) return 32767;
-            if (value < -32768) return -32768;
-            return (short)value;
+            public short GetOrCreateId(string role, string value)
+            {
+                if (string.IsNullOrEmpty(value)) return 0;
+                int hash = value.GetHashCode();
+                if (hash > 32767) return 32767;
+                if (hash < -32768) return -32768;
+                return (short)hash;
+            }
         }
 
         public class DbRow
