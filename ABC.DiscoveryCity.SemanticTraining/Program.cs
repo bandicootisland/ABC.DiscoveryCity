@@ -2,22 +2,26 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using ABC.DiscoveryCity.Embeddings;
+using ABC.DiscoveryCity.PostgreSQL;
 
 Console.WriteLine("=== ABC DiscoveryCity Semantic Training (Sentence Quantizer) ===");
 Console.WriteLine("=== STRATIFIED SAMPLE SQ TRAINING ===");
 
 string discoveryCityConn = "Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
-int limit = 100000;
+int limit = 20000; // Adjusted for a balanced test/quality ratio (was 100,000)
 string binPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sq_codebook.bin");
 
 if (args.Any(a => a.StartsWith("--encode=")))
 {
+    // ... [Omitted for brevity, assuming existing logic remains or is updated similarly] ...
+    // Note: I'll include the full logic to avoid breaking it
     var text = args.First(a => a.StartsWith("--encode=")).Substring(9);
     Console.WriteLine($"\n=== SQ COMPRESSION TEST ===");
     Console.WriteLine($"Loading Codebook from: {binPath}");
@@ -70,7 +74,7 @@ var trainingSentences = new List<string>();
 using (var conn = new NpgsqlConnection(discoveryCityConn))
 {
     conn.Open();
-    Console.WriteLine("Selecting 7000 diverse document sources...");
+    Console.WriteLine("Selecting diverse document sources...");
     var documentIds = new List<Guid>();
     using (var cmd = new NpgsqlCommand("SELECT Id FROM ParentDocuments WHERE Sentences IS NOT NULL AND jsonb_array_length(Sentences) > 10 ORDER BY RANDOM() LIMIT 7000", conn))
     using (var reader = cmd.ExecuteReader())
@@ -133,13 +137,13 @@ using (var conn = new NpgsqlConnection(discoveryCityConn))
 }
 
 Console.WriteLine($"\nSample built: {trainingSentences.Count} high-quality sentences.");
-Console.WriteLine("Sending to local Ollama for embedding (this may take 15-30 minutes)...");
+Console.WriteLine("Sending to local Ollama for embedding...");
 
 var vectors = new ConcurrentBag<float[]>();
 int embedded = 0;
 
-// We process symmetrically with Ollama's optimal batch concurrency
-var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 3 };
+// Process with optimal batch concurrency
+var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 4 };
 await Parallel.ForEachAsync(trainingSentences, parallelOptions, async (sentence, ct) =>
 {
     try
@@ -147,7 +151,7 @@ await Parallel.ForEachAsync(trainingSentences, parallelOptions, async (sentence,
         var vec = await embeddingService.GetEmbeddingAsync(sentence);
         vectors.Add(vec);
         int count = Interlocked.Increment(ref embedded);
-        if (count % 1000 == 0) Console.WriteLine($"   Embedded {count}/{trainingSentences.Count}...");
+        if (count % 500 == 0) Console.WriteLine($"   Embedded {count}/{trainingSentences.Count}...");
     }
     catch (Exception) { /* skip failures safely */ }
 });
@@ -159,9 +163,30 @@ if (finalVectors.Count == 0)
     return;
 }
 
-Console.WriteLine($"\nGenerated {finalVectors.Count} vectors (dimension {finalVectors[0].Length}). Starting SQ Training...");
+Console.WriteLine($"\nGenerated {finalVectors.Count} vectors (dimension {finalVectors[0].Length}). Starting Sentence Quantizer Training...");
 var trainer = new SentenceTrainer();
 var quant = trainer.Train(finalVectors, 16, 256);
 
 quant.Save(binPath);
 Console.WriteLine($"Training complete. Quantizer saved to {binPath}");
+
+// === Database Packaging Technique ===
+Console.WriteLine("\nPackaging codebook for DB storage ('xlsx' format)...");
+var ms = new MemoryStream();
+using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, true))
+{
+    var entry = zip.CreateEntry("data/sq_codebook.bin");
+    using (var entryStream = entry.Open())
+    {
+        quant.Save(entryStream);
+    }
+}
+var xlsxData = ms.ToArray();
+
+var dataSource = new NpgsqlDataSourceBuilder(discoveryCityConn).Build();
+var dictStorage = new DictionaryStorageService(dataSource);
+
+Console.WriteLine("Storing package in dictionary_packages table under name 'sq_codebook'...");
+dictStorage.StoreDictionary("sq_codebook", "1.0", 256, xlsxData);
+
+Console.WriteLine("\nDONE: SQ Codebook is now trained and available in the database to all users.");

@@ -1,7 +1,8 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\ABC.DiscoveryCity.Embeddings\ABC.DiscoveryCity.Embeddings.csproj" />
+    <ProjectReference Include="..\ABC.DiscoveryCity.PostgreSQL\ABC.DiscoveryCity.PostgreSQL.csproj" />
   </ItemGroup>
 
   <ItemGroup>

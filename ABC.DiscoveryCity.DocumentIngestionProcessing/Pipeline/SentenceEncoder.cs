@@ -1,6 +1,6 @@
-using System;
-using System.IO;
+using System.IO.Compression;
 using ABC.DiscoveryCity.Embeddings;
+using ABC.DiscoveryCity.PostgreSQL;
 
 namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline
 {
@@ -9,19 +9,56 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline
         private readonly SentenceQuantizer _quantizer;
         private readonly IEmbeddingService _embedding;
 
-        // Initialize with default paths and dimensions
-        public SentenceEncoder(string sqBinPath, IEmbeddingService embedding)
+        // Initialize with optional DB storage and fallback file path
+        public SentenceEncoder(string sqBinPath, IEmbeddingService embedding, DictionaryStorageService? dictStorage = null)
         {
             _quantizer = new SentenceQuantizer(16, 256, 64);
-            
-            if (File.Exists(sqBinPath))
+            bool loaded = false;
+
+            // 1. Try to load from Database (XLSX package)
+            if (dictStorage != null)
             {
-                _quantizer.Load(sqBinPath);
+                try
+                {
+                    byte[]? package = dictStorage.LoadDictionaryPackage("sq_codebook");
+                    if (package != null)
+                    {
+                        using var ms = new MemoryStream(package);
+                        using var zip = new ZipArchive(ms, ZipArchiveMode.Read);
+                        var entry = zip.GetEntry("data/sq_codebook.bin");
+                        if (entry != null)
+                        {
+                            using var s = entry.Open();
+                            _quantizer.Load(s);
+                            loaded = true;
+                            Console.WriteLine("[INFO] SQ Codebook loaded from Database package.");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[WARN] Failed to load SQ Codebook from DB: {ex.Message}");
+                }
             }
-            else
+
+            // 2. Fallback to local file
+            if (!loaded && File.Exists(sqBinPath))
             {
-                // Warn but do not crash during test builds if not trained yet
-                Console.WriteLine($"[WARN] SQ Codebook not found at {sqBinPath}. Inference will yield zero-hashes until trained!");
+                try
+                {
+                    _quantizer.Load(sqBinPath);
+                    loaded = true;
+                    Console.WriteLine($"[INFO] SQ Codebook loaded from local file: {sqBinPath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[ERROR] Failed to load SQ Codebook from disk: {ex.Message}");
+                }
+            }
+
+            if (!loaded)
+            {
+                Console.WriteLine($"[WARN] SQ Codebook NOT FOUND in DB or at {sqBinPath}. Inference will yield zero-hashes until trained!");
             }
             
             _embedding = embedding;

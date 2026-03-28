@@ -28,10 +28,15 @@ namespace ABC.DiscoveryCity.Embeddings
         public void Load(string filePath)
         {
             using var fs = File.OpenRead(filePath);
-            using var br = new BinaryReader(fs);
+            Load(fs);
+        }
 
-            // Read magic/header (PQ -> SQ magic could be kept or updated. User said initials become sq, so updating magic to match intent)
-            int magic = br.ReadInt32(); // e.g. 0x01535101 (SQ instead of PQ)
+        public void Load(Stream stream)
+        {
+            using var br = new BinaryReader(stream, System.Text.Encoding.Default, leaveOpen: true);
+
+            // Read magic/header
+            int magic = br.ReadInt32(); // 0x01535101 (SQ)
             if (magic != 0x01535101) throw new InvalidDataException("Invalid SQ file header.");
             
             int cSub = br.ReadInt32();
@@ -56,7 +61,12 @@ namespace ABC.DiscoveryCity.Embeddings
         public void Save(string filePath)
         {
             using var fs = File.Create(filePath);
-            using var bw = new BinaryWriter(fs);
+            Save(fs);
+        }
+
+        public void Save(Stream stream)
+        {
+            using var bw = new BinaryWriter(stream, System.Text.Encoding.Default, leaveOpen: true);
 
             bw.Write(0x01535101); // Magic header SQ
             bw.Write(Subspaces);

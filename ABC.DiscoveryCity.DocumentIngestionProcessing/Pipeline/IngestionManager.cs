@@ -134,7 +134,10 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline
             var localBatch = new List<OutputRow>(500);
 
             string sqBinPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sq_codebook.bin");
-            var encoder = new SentenceEncoder(sqBinPath, _embeddingService);
+            var ds = new NpgsqlDataSourceBuilder(_connectionString).Build();
+            var dictStorage = new ABC.DiscoveryCity.PostgreSQL.DictionaryStorageService(ds);
+            
+            var encoder = new SentenceEncoder(sqBinPath, _embeddingService, dictStorage);
             var parser = new MockLinguisticParser();
             var symbols = new MockSymbolRegistry();
             var ingestionService = new IngestionService(encoder, parser, symbols);
