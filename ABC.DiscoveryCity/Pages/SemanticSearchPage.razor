@@ -25,7 +25,8 @@
                    OnNamesSearch="@OnNamesSearchRequested"
                    TotalCount="@TotalCount"
                    OnAdvancedFind="@(() => _showAdvancedFind = true)"
-                   @bind-FilenameOnly="FilenameOnly" />
+                   @bind-FilenameOnly="FilenameOnly"
+                   @bind-UseSemantic="_useSemantic" />
 
     <AdvancedFindDialog @bind-Visible="_showAdvancedFind"
                         AvailableDataSets="@AvailableDataSets"
@@ -177,7 +178,18 @@
                                 }
                              </Template>
                         </GridColumn>
-                        <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px" />
+                        <GridColumn Field="@nameof(SearchResultDto.FileName)" Title="File Name" Width="200px">
+                             <Template>
+                                 @{
+                                     var item = context as SearchResultDto;
+                                     <span>@item?.FileName</span>
+                                     @if (item?.SnippetSource == "tier4")
+                                     {
+                                         <span class="badge bg-primary text-light small ms-1" style="font-size: 0.65rem; padding: 2px 4px; vertical-align: middle;" title="Result found via Semantic SQ Index">Semantic</span>
+                                     }
+                                 }
+                             </Template>
+                        </GridColumn>
                         <GridColumn Field="@nameof(SearchResultDto.Date)" Title="Date" Width="120px">
                             <Template>
                                 @{
@@ -302,6 +314,7 @@
     private string SearchQuery { get; set; } = "";
     private bool HasSearched { get; set; } = false;
     private bool FilenameOnly { get; set; } = false;
+    private bool _useSemantic = true;
 
     // Server-side paged grid state
     private List<SearchResultDto>? GridData { get; set; }
@@ -381,9 +394,9 @@
         var skip = args.Request.Skip;
         var take = args.Request.PageSize;
         var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
-
+    
         // Fast path: if page is already in client cache, return instantly — no debounce, no HTTP call
-        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter, FilenameOnly);
+        var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter, FilenameOnly, _useSemantic);
         if (cached != null)
         {
             args.Data = cached.Items;
@@ -413,7 +426,7 @@
         {
             var result = await SearchService.SearchPagedAsync(
                 query, skip, take, exactMatch: false,
-                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
+                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly, useSemantic: _useSemantic);
 
             if (token.IsCancellationRequested)
             {
@@ -437,10 +450,6 @@
             }
 
             UpdateAvailableNames(result.Items);
-
-            // Track enrichment state for UI indicator
-            _isEnriching = result.Enriching;
-            _completedTiers = result.CompletedTiers;
 
             // Enrichment polling: keep polling while tiers are still running
             if (result.Enriching)
@@ -488,7 +497,7 @@
 
         try
         {
-            await Task.Delay(300, token);
+            await Task.Delay(1000, token);
             if (!token.IsCancellationRequested)
             {
                 RebindGrid();
@@ -647,7 +656,7 @@
                 // Fetch silently — don't use Rebind() which triggers the grid spinner
                 var result = await SearchService.SearchPagedAsync(
                     SearchQuery, currentSkip, currentTake, exactMatch: false,
-                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly);
+                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly, useSemantic: _useSemantic);
 
                 if (token.IsCancellationRequested) return;
 

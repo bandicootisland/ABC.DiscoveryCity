@@ -2,7 +2,9 @@ using Npgsql;
 using Pgvector;
 using Pgvector.Npgsql;
 using System.Text.Json;
+using System.IO.Compression;
 using ABC.DiscoveryCity.Embeddings;
+using System.Text;
 
 namespace ABC.DiscoveryCity.PostgreSQL;
 
@@ -161,6 +163,45 @@ public partial class DbService
         }
     }
 
+    private static SentenceQuantizer? _sentenceQuantizer;
+    private static readonly object _sqLock = new();
+
+    /// <summary>
+    /// Lazy-loads the Sentence Quantization (SQ) codebook from the DB package.
+    /// Shared static instance to prevent reloading on every Scoped DbService instantiation.
+    /// </summary>
+    public SentenceQuantizer GetSentenceQuantizer()
+    {
+        if (_sentenceQuantizer != null) return _sentenceQuantizer;
+        lock (_sqLock)
+        {
+            if (_sentenceQuantizer != null) return _sentenceQuantizer;
+            _sentenceQuantizer = new SentenceQuantizer(16, 256, 64);
+            try
+            {
+                var dictStorage = new DictionaryStorageService(_dataSource);
+                byte[]? package = dictStorage.LoadDictionaryPackage("sq_codebook");
+                if (package != null)
+                {
+                    using var ms = new MemoryStream(package);
+                    using var zip = new ZipArchive(ms, ZipArchiveMode.Read);
+                    var entry = zip.GetEntry("data/sq_codebook.bin");
+                    if (entry != null)
+                    {
+                        using var s = entry.Open();
+                        _sentenceQuantizer.Load(s);
+                        Console.WriteLine("[INFO] SQ Codebook loaded into TieredSearch engine.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] Failed to load SQ Codebook for Tier 4: {ex.Message}");
+            }
+            return _sentenceQuantizer;
+        }
+    }
+
     /// <summary>
     /// Drops all application tables. Used for schema migration (e.g. int→UUID PKs).
     /// Requires full reprocessing of all documents afterward.
@@ -285,14 +326,14 @@ public partial class DbService
                         SentenceId UUID PRIMARY KEY,
                         ParentId UUID REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
                         SemanticId UUID,
-                        Who int2,
-                        What int2,
-                        Where int2,
-                        When int2,
-                        Which int2,
-                        Why int2,
-                        How int2,
-                        Ordinal INT
+                        ""Who"" int2,
+                        ""What"" int2,
+                        ""Where"" int2,
+                        ""When"" int2,
+                        ""Which"" int2,
+                        ""Why"" int2,
+                        ""How"" int2,
+                        ""Ordinal"" INT
                     );
                     CREATE INDEX IF NOT EXISTS idx_signatures_parent ON SentenceSignatures(ParentId);
                 ", conn)) cmd.ExecuteNonQuery();
@@ -460,14 +501,14 @@ public partial class DbService
                     SentenceId UUID PRIMARY KEY,
                     ParentId UUID REFERENCES ParentDocuments(Id) ON DELETE CASCADE,
                     SemanticId UUID,
-                    Who int2,
-                    What int2,
-                    Where int2,
-                    When int2,
-                    Which int2,
-                    Why int2,
-                    How int2,
-                    Ordinal INT
+                    ""Who"" int2,
+                    ""What"" int2,
+                    ""Where"" int2,
+                    ""When"" int2,
+                    ""Which"" int2,
+                    ""Why"" int2,
+                    ""How"" int2,
+                    ""Ordinal"" INT
                 );
                 CREATE INDEX IF NOT EXISTS idx_signatures_parent ON SentenceSignatures(ParentId);
             ", conn)) cmd.ExecuteNonQuery();
@@ -886,6 +927,16 @@ public partial class DbService
             Console.WriteLine($"Connection Error saving to DB for {filePath}: {ex.Message}");
         }
         return Guid.Empty;
+    }
+
+    public string GetSearchHash(string? query, bool exactMatch, List<string>? datasets, List<string>? names, bool filenameOnly = false, bool useSemantic = true)
+    {
+        var hashBuilder = new global::System.Text.StringBuilder();
+        hashBuilder.Append($"Q:{query?.ToLowerInvariant()}");
+        hashBuilder.Append($"|E:{exactMatch}");
+        hashBuilder.Append($"|FN:{filenameOnly}");
+        hashBuilder.Append($"|S:{useSemantic}");
+        return hashBuilder.ToString();
     }
 
     private List<string> GroupSentencesIntoChunks(List<string> sentences, int targetLength)
@@ -2409,47 +2460,7 @@ public class DataSetStats
     public DateTime? LastProcessed { get; set; }
 }
 
-/// <summary>
-/// OS-agnostic search result from DbService. Carries folder + filename info.
-/// Full paths are constructed via DbService.BuildPath(folder, filename).
-/// </summary>
-public class DocumentSearchResult
-{
-    public Guid Id { get; set; }
-    public string FileName { get; set; } = "";
-    public string? FilePath { get; set; }           // Legacy full path
-    public string? PdfFolder { get; set; }          // Relative folder from datasets
-    public string? ImageFolder { get; set; }        // Image folder (falls back to PdfFolder)
-    public string? ThumbnailFileName { get; set; }
-    public string? FullImageFileName { get; set; }
 
-    // Content & metadata
-    public string Text { get; set; } = "";
-    public double Distance { get; set; }
-    public DateTime? Date { get; set; }
-    public int PageCount { get; set; }
-    public string? SourceName { get; set; }
-    public string? DataSetName { get; set; }
-    public string? Names { get; set; }
-    public string? Terms { get; set; }
-    public string MetadataJson { get; set; } = "{}";
-    public string? SourceUrl { get; set; }
-    public bool HasThumbnail => !string.IsNullOrEmpty(ThumbnailFileName);
-    public bool HasFullImage => !string.IsNullOrEmpty(FullImageFileName);
-
-    /// <summary>Resolve the document file path for the current OS.</summary>
-    public string? ResolvedFilePath => 
-        DbService.BuildPath(PdfFolder, FileName) 
-        ?? (FilePath != null ? DbService.ResolveFilePathForCurrentOs(FilePath) : null);
-
-    /// <summary>Resolve the thumbnail path for the current OS.</summary>
-    public string? ResolvedThumbnailPath => 
-        DbService.BuildPath(ImageFolder ?? PdfFolder, ThumbnailFileName);
-
-    /// <summary>Resolve the full image path for the current OS.</summary>
-    public string? ResolvedFullImagePath => 
-        DbService.BuildPath(ImageFolder ?? PdfFolder, FullImageFileName);
-}
 
 public class SystemStats
 {

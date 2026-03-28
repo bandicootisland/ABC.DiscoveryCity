@@ -218,7 +218,7 @@ namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline
         {
             using var tx = await conn.BeginTransactionAsync(ct);
             // Ultra-fast COPY inserts to the flattened postgres signature table
-            using (var importer = await conn.BeginBinaryImportAsync("COPY SentenceSignatures (SentenceId, ParentId, SemanticId, Who, What, Where, When, Which, Why, How, Ordinal) FROM STDIN (FORMAT BINARY)", ct))
+            using (var importer = await conn.BeginBinaryImportAsync("COPY SentenceSignatures (\"SentenceId\", \"ParentId\", \"SemanticId\", \"Who\", \"What\", \"Where\", \"When\", \"Which\", \"Why\", \"How\", \"Ordinal\") FROM STDIN (FORMAT BINARY)", ct))
             {
                 foreach (var row in batch)
                 {

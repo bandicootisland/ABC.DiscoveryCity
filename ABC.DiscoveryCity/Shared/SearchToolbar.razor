@@ -25,6 +25,10 @@
                     <input type="checkbox" class="form-check-input" checked="@FilenameOnly" @onchange="OnFilenameOnlyToggled" />
                     <span class="form-check-label text-muted small">Filename</span>
                 </label>
+                <label class="form-check form-check-inline mb-0 ms-2" title="Enable SQ Semantic Index">
+                    <input type="checkbox" class="form-check-input" checked="@UseSemantic" @onchange="OnSemanticToggled" />
+                    <span class="form-check-label text-muted small">Semantic</span>
+                </label>
                 @if (TotalCount > 0)
                 {
                     <span class="ms-2 text-muted small" style="white-space: nowrap;"><strong>@TotalCount.ToString("N0")</strong> found</span>
@@ -77,6 +81,8 @@
     [Parameter] public EventCallback OnAdvancedFind { get; set; }
     [Parameter] public bool FilenameOnly { get; set; }
     [Parameter] public EventCallback<bool> FilenameOnlyChanged { get; set; }
+    [Parameter] public bool UseSemantic { get; set; } = true;
+    [Parameter] public EventCallback<bool> UseSemanticChanged { get; set; }
 
     // Local backing field — isolates the text box from parent re-renders
     private string _localSearchText = "";
@@ -186,6 +192,14 @@
     {
         FilenameOnly = (bool)(e.Value ?? false);
         await FilenameOnlyChanged.InvokeAsync(FilenameOnly);
+        if (!string.IsNullOrWhiteSpace(_localSearchText))
+            await OnSearch.InvokeAsync();
+    }
+
+    private async Task OnSemanticToggled(ChangeEventArgs e)
+    {
+        UseSemantic = (bool)(e.Value ?? false);
+        await UseSemanticChanged.InvokeAsync(UseSemantic);
         if (!string.IsNullOrWhiteSpace(_localSearchText))
             await OnSearch.InvokeAsync();
     }

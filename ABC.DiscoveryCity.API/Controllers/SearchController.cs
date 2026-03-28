@@ -71,6 +71,7 @@ public class SearchController : ControllerBase
         [FromQuery] List<string>? datasets = null,
         [FromQuery] List<string>? names = null,
         [FromQuery] bool filenameOnly = false,
+        [FromQuery] bool useSemantic = true,
         [FromQuery] List<string>? ext = null,
         [FromQuery] string? dateFrom = null,
         [FromQuery] string? dateTo = null,
@@ -107,7 +108,7 @@ public class SearchController : ControllerBase
         if (isNew)
         {
             // Launch fan-out: all tiers in parallel, don't await all
-            LaunchFanOut(queryHash, query, exactMatch, datasetNames, nameValues, advanced);
+            LaunchFanOut(queryHash, query, exactMatch, datasetNames, nameValues, advanced, useSemantic: useSemantic);
 
             // Wait for fast tiers (1+2) to finish, with timeout
             var fastDeadline = Task.Delay(500);
@@ -167,7 +168,7 @@ public class SearchController : ControllerBase
     /// Merge checkpoints happen on the next poll from the client.
     /// </summary>
     private void LaunchFanOut(string queryHash, string query, bool exactMatch,
-        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null, bool useSemantic = true)
     {
         if (_inFlightSearches.ContainsKey(queryHash)) return;
 
@@ -195,13 +196,21 @@ public class SearchController : ControllerBase
                 });
 
                 // Tier 4 only for non-exact-match (semantic search)
-                var tier4 = !exactMatch
-                    ? Task.Run(async () =>
+                Task tier4;
+                if (!exactMatch && useSemantic)
+                {
+                    tier4 = Task.Run(async () =>
                     {
                         try { await _dbService.ExecuteTier4_VectorAsync(queryHash, query, datasetNames, nameValues, advanced); }
                         catch (Exception ex) { Console.WriteLine($"[Tier4] Error: {ex.Message}"); }
-                    })
-                    : Task.CompletedTask;
+                    });
+                }
+                else
+                {
+                    // Mark as done immediately if skipping so polling stops
+                    _dbService.MarkTierDone(queryHash, 4);
+                    tier4 = Task.CompletedTask;
+                }
 
                 // Wait for all tiers
                 await Task.WhenAll(tier1, tier2, tier3, tier4);
@@ -411,6 +420,7 @@ public class SearchController : ControllerBase
             SourceUrl = r.SourceUrl,
             Names = ParseJsonStringArray(r.Names),
             Terms = ParseJsonStringArray(r.Terms),
+            SnippetSource = r.SnippetSource,
             MetadataJson = r.MetadataJson
         };
     }
@@ -479,6 +489,7 @@ public class SearchResultDto
     public string? SourceUrl { get; set; }
     public List<string>? Names { get; set; }
     public List<string>? Terms { get; set; }
+    public string? SnippetSource { get; set; }
     public string MetadataJson { get; set; } = "{}";
 }
 

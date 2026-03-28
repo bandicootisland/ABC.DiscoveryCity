@@ -30,7 +30,7 @@ public class OllamaEmbeddingService : IEmbeddingService
         string modelName = "mxbai-embed-large:latest",
         int dimension = 1024)
     {
-        _httpClient = httpClient ?? new HttpClient { BaseAddress = new Uri(baseUrl) };
+        _httpClient = httpClient ?? new HttpClient { BaseAddress = new Uri(baseUrl), Timeout = TimeSpan.FromSeconds(300) };
         if (_httpClient.BaseAddress == null)
         {
             _httpClient.BaseAddress = new Uri(baseUrl);

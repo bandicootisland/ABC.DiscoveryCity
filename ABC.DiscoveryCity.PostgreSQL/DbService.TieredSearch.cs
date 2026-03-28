@@ -23,6 +23,14 @@ public partial class DbService
         using var conn = _dataSource.OpenConnection();
 
         var ddl = @"
+            -- MIGRATION: Drop old INT-based tier tables if they were accidentally created
+            DROP TABLE IF EXISTS SearchTier1_Filename CASCADE;
+            DROP TABLE IF EXISTS SearchTier2_Metadata CASCADE;
+            DROP TABLE IF EXISTS SearchTier3_FullText CASCADE;
+            DROP TABLE IF EXISTS SearchTier4_Vector CASCADE;
+            DROP TABLE IF EXISTS SearchTier5_Grammar CASCADE;
+            DROP TABLE IF EXISTS SearchResultsMerged CASCADE;
+
             CREATE TABLE IF NOT EXISTS SearchQueries (
                 Id              SERIAL PRIMARY KEY,
                 QueryHash       TEXT NOT NULL UNIQUE,
@@ -53,7 +61,7 @@ public partial class DbService
             CREATE TABLE IF NOT EXISTS SearchTier1_Filename (
                 Id              SERIAL PRIMARY KEY,
                 QueryHash       TEXT NOT NULL,
-                DocumentId      INT NOT NULL,
+                DocumentId      UUID NOT NULL,
                 FileName        TEXT NOT NULL,
                 Rank            INT NOT NULL,
                 Similarity      REAL,
@@ -65,7 +73,7 @@ public partial class DbService
             CREATE TABLE IF NOT EXISTS SearchTier2_Metadata (
                 Id              SERIAL PRIMARY KEY,
                 QueryHash       TEXT NOT NULL,
-                DocumentId      INT NOT NULL,
+                DocumentId      UUID NOT NULL,
                 MatchedField    TEXT NOT NULL,
                 MatchedValue    TEXT,
                 Rank            INT NOT NULL,
@@ -79,8 +87,8 @@ public partial class DbService
             CREATE TABLE IF NOT EXISTS SearchTier3_FullText (
                 Id              SERIAL PRIMARY KEY,
                 QueryHash       TEXT NOT NULL,
-                DocumentId      INT NOT NULL,
-                ChunkId         INT,
+                DocumentId      UUID NOT NULL,
+                ChunkId         UUID,
                 ChunkIndex      INT,
                 MatchingChunks  INT NOT NULL DEFAULT 1,
                 Snippet         TEXT,
@@ -94,8 +102,8 @@ public partial class DbService
             CREATE TABLE IF NOT EXISTS SearchTier4_Vector (
                 Id              SERIAL PRIMARY KEY,
                 QueryHash       TEXT NOT NULL,
-                DocumentId      INT NOT NULL,
-                ChunkId         INT,
+                DocumentId      UUID NOT NULL,
+                ChunkId         UUID,
                 ChunkIndex      INT,
                 Distance        REAL NOT NULL,
                 Snippet         TEXT,
@@ -108,7 +116,7 @@ public partial class DbService
             CREATE TABLE IF NOT EXISTS SearchTier5_Grammar (
                 Id              SERIAL PRIMARY KEY,
                 QueryHash       TEXT NOT NULL,
-                DocumentId      INT NOT NULL,
+                DocumentId      UUID NOT NULL,
                 MatchType       TEXT NOT NULL,
                 RuleName        TEXT,
                 MatchedText     TEXT,
@@ -125,7 +133,7 @@ public partial class DbService
             CREATE TABLE IF NOT EXISTS SearchResultsMerged (
                 Id              SERIAL PRIMARY KEY,
                 QueryHash       TEXT NOT NULL,
-                DocumentId      INT NOT NULL,
+                DocumentId      UUID NOT NULL,
                 FinalRank       INT NOT NULL,
                 RrfScore        DOUBLE PRECISION NOT NULL,
                 Tier1Rank       INT,
@@ -501,37 +509,34 @@ public partial class DbService
         var datasetFilter = datasetNames is { Count: > 0 };
         var namesFilter = nameValues is { Count: > 0 };
 
-        var whereClauses = new List<string> { "c.Embedding IS NOT NULL" };
+        var whereClauses = new List<string> { "1=1" };
         if (datasetFilter) whereClauses.Add("d.Name = ANY(@datasetNames)");
         if (namesFilter) whereClauses.Add(NamesAndClause("p"));
         var advFragment = advanced?.BuildWhereFragment("p");
         if (!string.IsNullOrEmpty(advFragment)) whereClauses.Add(advFragment);
         var whereClause = string.Join(" AND ", whereClauses);
 
+        // --- SQ LOGIC: Quantize query and search for matching signatures ---
+        var quantizer = GetSentenceQuantizer();
+        var queryGuid = quantizer.Quantize(queryEmbedding);
+
         var sql = $@"
             INSERT INTO SearchTier4_Vector (QueryHash, DocumentId, ChunkId, ChunkIndex, Distance, Snippet, Rank)
-            SELECT @hash, sub.ParentId, sub.ChunkId, sub.ChunkIndex, sub.Distance,
-                   LEFT(sub.TextContent, 500),
-                   ROW_NUMBER() OVER (ORDER BY sub.Distance) as Rank
-            FROM (
-                SELECT DISTINCT ON (c.ParentId)
-                       c.ParentId, c.Id as ChunkId, c.ChunkIndex,
-                       c.TextContent,
-                       c.Embedding <=> @queryVector as Distance
-                FROM DocumentChunks c
-                JOIN ParentDocuments p ON c.ParentId = p.Id
-                LEFT JOIN DataSets d ON p.DataSetId = d.Id
-                WHERE {whereClause}
-                ORDER BY c.ParentId, c.Embedding <=> @queryVector
-            ) sub
-            ORDER BY sub.Distance
+            SELECT @hash, p.Id, NULL, s.""Ordinal"", 0.0,
+                   p.Sentences->>s.""Ordinal"",
+                   ROW_NUMBER() OVER (ORDER BY s.SemanticId = @queryGuid DESC) as Rank
+            FROM SentenceSignatures s
+            JOIN ParentDocuments p ON s.ParentId = p.Id
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            WHERE s.SemanticId = @queryGuid
+            AND {whereClause}
             LIMIT 2000
             ON CONFLICT (QueryHash, DocumentId) DO NOTHING";
 
         using var cmd = new NpgsqlCommand(sql, conn);
         cmd.CommandTimeout = DbCommandTimeout;
         cmd.Parameters.AddWithValue("hash", queryHash);
-        cmd.Parameters.AddWithValue("queryVector", new Vector(queryEmbedding));
+        cmd.Parameters.AddWithValue("queryGuid", queryGuid);
         if (datasetFilter) cmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
         if (namesFilter) cmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
         advanced?.ApplyParams(cmd);
@@ -641,6 +646,41 @@ public partial class DbService
     // Read merged results (paged)
     // -----------------------------------------------------------------------
 
+    public List<DocumentSearchResult> GetMergedResults(string queryHash, int skip = 0, int take = 50)
+    {
+        using var conn = _dataSource.OpenConnection();
+        using var cmd = new NpgsqlCommand(@"
+            SELECT m.DocumentId, p.FileName, p.FilePath, m.BestSnippet, p.Metadata, d.Name, m.RrfScore as Distance, p.PageCount, p.Date, m.SnippetSource
+            FROM SearchResultsMerged m
+            JOIN ParentDocuments p ON m.DocumentId = p.Id
+            LEFT JOIN DataSets d ON p.DataSetId = d.Id
+            WHERE m.QueryHash = @hash
+            ORDER BY m.FinalRank
+            LIMIT @take OFFSET @skip", conn);
+        cmd.Parameters.AddWithValue("hash", queryHash);
+        cmd.Parameters.AddWithValue("skip", skip);
+        cmd.Parameters.AddWithValue("take", take);
+
+        var results = new List<DocumentSearchResult>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var r = new DocumentSearchResult();
+            r.Id = reader.GetGuid(0);
+            r.FileName = reader.GetString(1);
+            r.FilePath = reader.IsDBNull(2) ? null : reader.GetString(2);
+            r.Text = reader.IsDBNull(3) ? "" : reader.GetString(3);
+            r.MetadataJson = reader.IsDBNull(4) ? "{}" : reader.GetString(4);
+            r.DataSetName = reader.IsDBNull(5) ? null : reader.GetString(5);
+            r.Distance = reader.GetDouble(6);
+            r.PageCount = reader.GetInt32(7);
+            r.Date = reader.IsDBNull(8) ? null : reader.GetDateTime(8);
+            r.SnippetSource = reader.IsDBNull(9) ? null : reader.GetString(9);
+            results.Add(r);
+        }
+        return results;
+    }
+
     /// <summary>
     /// Read paged results from the merged cache table.
     /// Returns (IDs in rank order, totalMergedCount).
@@ -675,7 +715,7 @@ public partial class DbService
     /// <summary>
     /// Get all merged IDs for this query hash (up to 50K, for the controller's ID cache).
     /// </summary>
-    public int[] GetAllMergedIds(string queryHash)
+    public Guid[] GetAllMergedIds(string queryHash)
     {
         using var conn = _dataSource.OpenConnection();
         using var cmd = new NpgsqlCommand(@"
@@ -686,9 +726,9 @@ public partial class DbService
         cmd.Parameters.AddWithValue("hash", queryHash);
         cmd.Parameters.AddWithValue("maxResults", MaxCachedResults);
 
-        var ids = new List<int>();
+        var ids = new List<Guid>();
         using var reader = cmd.ExecuteReader();
-        while (reader.Read()) ids.Add(reader.GetInt32(0));
+        while (reader.Read()) ids.Add(reader.GetGuid(0));
         return ids.ToArray();
     }
 
@@ -728,6 +768,16 @@ public partial class DbService
     // -----------------------------------------------------------------------
     // Cleanup expired searches
     // -----------------------------------------------------------------------
+
+    public void MarkTierDone(string queryHash, int tier)
+    {
+        using var conn = _dataSource.OpenConnection();
+        using var cmd = new NpgsqlCommand($@"
+            UPDATE SearchQueries SET Tier{tier}Done = TRUE 
+            WHERE QueryHash = @hash", conn);
+        cmd.Parameters.AddWithValue("hash", queryHash);
+        cmd.ExecuteNonQuery();
+    }
 
     public void CleanupExpiredSearches()
     {
