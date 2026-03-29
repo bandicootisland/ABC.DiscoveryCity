@@ -9,6 +9,7 @@
 @inject UserListService UserListService
 @inject NotificationService NotificationService
 @inject IJSRuntime JS
+@inject SemanticSearchInterop SemanticInterop
 
 <PageTitle>Semantic Search</PageTitle>
 
@@ -33,6 +34,15 @@
                         AvailableNames="@AvailableNames"
                         OnApplyCriteria="@OnAdvancedFindApply" />
 
+    @if (_semanticModelLoading)
+    {
+        <div class="text-muted small mb-1"><span class="spinner-border spinner-border-sm me-1"></span>@_semanticModelStatus</div>
+    }
+    else if (_semanticModelStatus != null)
+    {
+        <div class="text-warning small mb-1">@_semanticModelStatus</div>
+    }
+
     @if (_isEnriching)
     {
         <div class="d-flex align-items-center gap-2 mb-1" style="opacity: 0.7;">
@@ -46,9 +56,9 @@
     {
         <div class="alert alert-warning">No results found.</div>
     }
-    @if (string.IsNullOrWhiteSpace(SearchQuery) && TotalCount > 0)
+    @if (!HasSearched && string.IsNullOrWhiteSpace(SearchQuery))
     {
-        <div class="mb-1 text-muted fst-italic small">Browsing recent documents</div>
+        <div class="mb-2 text-muted fst-italic">Enter a search term and press Enter</div>
     }
     <div class="d-flex align-items-center gap-3 mb-1">
         <label class="form-check form-check-inline mb-0">
@@ -373,6 +383,11 @@
     private bool _isEnriching;
     private int _completedTiers;
 
+    // Client-side semantic: GUID computed in browser via Transformers.js + PQ codebook
+    private Guid? _currentSemanticGuid;
+    private bool _semanticModelLoading;
+    private string? _semanticModelStatus;
+
     protected override async Task OnInitializedAsync()
     {
         AvailableDataSets = (await SearchService.GetDataSetNamesAsync())
@@ -381,6 +396,49 @@
             
         AvailableLists = await UserListService.GetAllAsync();
         // Grid will fire OnRead automatically on first render
+
+        // Start loading the ONNX model in the background (first visit downloads ~330MB, then cached)
+        _ = InitSemanticModelAsync();
+    }
+
+    private async Task InitSemanticModelAsync()
+    {
+        try
+        {
+            _semanticModelLoading = true;
+            _semanticModelStatus = "Loading semantic model...";
+            StateHasChanged();
+
+            await SemanticInterop.InitAsync();
+
+            _semanticModelLoading = false;
+            _semanticModelStatus = null;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            _semanticModelLoading = false;
+            _semanticModelStatus = $"Semantic model failed: {ex.Message}";
+            Console.WriteLine($"[SemanticSearch] Model init failed: {ex.Message}");
+            StateHasChanged();
+        }
+    }
+
+    private async Task<Guid?> ComputeSemanticGuidAsync(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query) || !_useSemantic) return null;
+        try
+        {
+            if (!await SemanticInterop.IsReadyAsync()) return null;
+            var guid = await SemanticInterop.GetSemanticGuidAsync(query);
+            Console.WriteLine($"[SemanticSearch] Client GUID: {guid}");
+            return guid;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SemanticSearch] Client embedding failed: {ex.Message}");
+            return null; // fallback: server will use Ollama
+        }
     }
 
     /// <summary>
@@ -394,7 +452,15 @@
         var skip = args.Request.Skip;
         var take = args.Request.PageSize;
         var query = string.IsNullOrWhiteSpace(SearchQuery) ? null : SearchQuery;
-    
+
+        // Semantic page: don't browse all docs — wait for a search query
+        if (query == null)
+        {
+            args.Data = new List<SearchResultDto>();
+            args.Total = 0;
+            return;
+        }
+
         // Fast path: if page is already in client cache, return instantly — no debounce, no HTTP call
         var cached = SearchService.TryGetCachedPage(query, skip, true, ActiveDataSetFilter, ActiveNamesFilter, FilenameOnly, _useSemantic);
         if (cached != null)
@@ -426,7 +492,8 @@
         {
             var result = await SearchService.SearchPagedAsync(
                 query, skip, take, exactMatch: false,
-                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly, useSemantic: _useSemantic);
+                ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly, useSemantic: _useSemantic,
+                semanticGuid: _currentSemanticGuid, semanticOnly: _useSemantic);
 
             if (token.IsCancellationRequested)
             {
@@ -491,22 +558,12 @@
     /// </summary>
     private async Task OnSearchRequested()
     {
-        _searchTextCts.Cancel();
-        _searchTextCts = new CancellationTokenSource();
-        var token = _searchTextCts.Token;
-
-        try
-        {
-            await Task.Delay(1000, token);
-            if (!token.IsCancellationRequested)
-            {
-                RebindGrid();
-            }
-        }
-        catch (TaskCanceledException)
-        {
-            // Another keystroke came in — debounce restarted
-        }
+        // No debounce — only called on Enter/button click
+        // NOTE: Client GUID disabled — browser ONNX produces slightly different embeddings than Ollama,
+        // causing PQ centroid mismatches (2-3 bytes differ). Use server-side Ollama for now.
+        // _currentSemanticGuid = await ComputeSemanticGuidAsync(SearchQuery);
+        _currentSemanticGuid = null;
+        RebindGrid();
     }
 
     private async Task OnDataSetFilterChanged()
@@ -656,7 +713,8 @@
                 // Fetch silently — don't use Rebind() which triggers the grid spinner
                 var result = await SearchService.SearchPagedAsync(
                     SearchQuery, currentSkip, currentTake, exactMatch: false,
-                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly, useSemantic: _useSemantic);
+                    ActiveDataSetFilter, ActiveNamesFilter, token, filenameOnly: FilenameOnly, useSemantic: _useSemantic,
+                    semanticGuid: _currentSemanticGuid, semanticOnly: _useSemantic);
 
                 if (token.IsCancellationRequested) return;
 

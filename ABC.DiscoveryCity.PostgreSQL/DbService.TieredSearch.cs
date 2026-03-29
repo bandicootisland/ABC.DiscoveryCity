@@ -161,7 +161,8 @@ public partial class DbService
     // -----------------------------------------------------------------------
 
     public static string ComputeQueryHash(string? query, bool exactMatch, bool filenameOnly,
-        List<string>? datasets, List<string>? names, AdvancedFilters? advanced = null)
+        List<string>? datasets, List<string>? names, AdvancedFilters? advanced = null,
+        bool semanticOnly = false, Guid? semanticGuid = null)
     {
         var sb = new StringBuilder();
         sb.Append(query?.ToLowerInvariant() ?? "");
@@ -169,6 +170,9 @@ public partial class DbService
         sb.Append(exactMatch ? '1' : '0');
         sb.Append('|');
         sb.Append(filenameOnly ? '1' : '0');
+        if (semanticOnly) sb.Append("|so=1");
+        if (semanticGuid.HasValue && semanticGuid.Value != Guid.Empty)
+            sb.Append($"|sg={semanticGuid.Value}");
         if (datasets is { Count: > 0 })
         {
             sb.Append("|ds=");
@@ -198,9 +202,10 @@ public partial class DbService
     /// </summary>
     public (string QueryHash, bool IsNew, SearchQueryStatus? Status) GetOrCreateSearchQuery(
         string? query, bool exactMatch, bool filenameOnly,
-        List<string>? datasets, List<string>? names, AdvancedFilters? advanced = null)
+        List<string>? datasets, List<string>? names, AdvancedFilters? advanced = null,
+        bool semanticOnly = false, Guid? semanticGuid = null)
     {
-        var hash = ComputeQueryHash(query, exactMatch, filenameOnly, datasets, names, advanced);
+        var hash = ComputeQueryHash(query, exactMatch, filenameOnly, datasets, names, advanced, semanticOnly, semanticGuid);
 
         using var conn = _dataSource.OpenConnection();
 
@@ -484,25 +489,40 @@ public partial class DbService
     // -----------------------------------------------------------------------
 
     public async Task<int> ExecuteTier4_VectorAsync(string queryHash, string query,
-        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null,
+        Guid? clientSemanticGuid = null)
     {
-        if (_embeddingService == null) return 0;
+        Guid queryGuid;
 
-        float[] queryEmbedding;
-        try
+        if (clientSemanticGuid.HasValue && clientSemanticGuid.Value != Guid.Empty)
         {
-            queryEmbedding = await _embeddingService.GetEmbeddingAsync(query);
+            // Client already computed the SemanticId via browser-side ONNX + PQ quantization
+            queryGuid = clientSemanticGuid.Value;
+            Console.WriteLine($"[Tier4] Using client-provided SemanticId: {queryGuid}");
         }
-        catch (Exception ex)
+        else
         {
-            Console.WriteLine($"[Tier4] Embedding failed: {ex.Message}");
-            // Mark tier done even on failure so we don't block
-            using var conn2 = _dataSource.OpenConnection();
-            using var upd2 = new NpgsqlCommand(
-                "UPDATE SearchQueries SET Tier4Done = TRUE WHERE QueryHash = @hash", conn2);
-            upd2.Parameters.AddWithValue("hash", queryHash);
-            upd2.ExecuteNonQuery();
-            return 0;
+            // Fallback: server-side embedding via Ollama
+            if (_embeddingService == null) return 0;
+
+            float[] queryEmbedding;
+            try
+            {
+                queryEmbedding = await _embeddingService.GetEmbeddingAsync(query);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Tier4] Embedding failed: {ex.Message}");
+                using var conn2 = _dataSource.OpenConnection();
+                using var upd2 = new NpgsqlCommand(
+                    "UPDATE SearchQueries SET Tier4Done = TRUE WHERE QueryHash = @hash", conn2);
+                upd2.Parameters.AddWithValue("hash", queryHash);
+                upd2.ExecuteNonQuery();
+                return 0;
+            }
+
+            var quantizer = GetSentenceQuantizer();
+            queryGuid = quantizer.Quantize(queryEmbedding);
         }
 
         using var conn = _dataSource.OpenConnection();
@@ -515,10 +535,6 @@ public partial class DbService
         var advFragment = advanced?.BuildWhereFragment("p");
         if (!string.IsNullOrEmpty(advFragment)) whereClauses.Add(advFragment);
         var whereClause = string.Join(" AND ", whereClauses);
-
-        // --- SQ LOGIC: Quantize query and search for matching signatures ---
-        var quantizer = GetSentenceQuantizer();
-        var queryGuid = quantizer.Quantize(queryEmbedding);
 
         var sql = $@"
             INSERT INTO SearchTier4_Vector (QueryHash, DocumentId, ChunkId, ChunkIndex, Distance, Snippet, Rank)
@@ -550,6 +566,107 @@ public partial class DbService
         upd.ExecuteNonQuery();
 
         return count;
+    }
+
+    // -----------------------------------------------------------------------
+    // Semantic-only direct search (bypasses tier cache tables)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Approximate semantic search via PQ subspace matching.
+    /// Compares each of the 16 PQ bytes between query GUID and stored GUIDs.
+    /// Scores = number of matching subspaces (0-16). Threshold: 4+ matches.
+    /// Returns distinct document IDs ordered by best sentence score.
+    /// </summary>
+    public (Guid[] DocumentIds, int TotalCount) SearchBySemanticId(
+        Guid semanticGuid, int skip, int take,
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null)
+    {
+        using var conn = _dataSource.OpenConnection();
+        var datasetFilter = datasetNames is { Count: > 0 };
+        var namesFilter = nameValues is { Count: > 0 };
+
+        // Build byte-matching score expression: count how many of 16 PQ bytes match
+        var qb = "uuid_send(@guid::uuid)";
+        var sb = "uuid_send(s.SemanticId)";
+        var matchParts = new List<string>();
+        for (int i = 0; i < 16; i++)
+            matchParts.Add($"(get_byte({sb},{i})=get_byte({qb},{i}))::int");
+        var scoreExpr = string.Join("+", matchParts);
+
+        var filterClauses = new List<string> { "s.SemanticId IS NOT NULL" };
+        if (datasetFilter) filterClauses.Add("d.Name = ANY(@datasetNames)");
+        if (namesFilter) filterClauses.Add(NamesAndClause("p"));
+        var advFragment = advanced?.BuildWhereFragment("p");
+        if (!string.IsNullOrEmpty(advFragment)) filterClauses.Add(advFragment);
+        var filterWhere = string.Join(" AND ", filterClauses);
+
+        // Scored query: find sentences with 4+ matching PQ subspaces
+        const int minMatchThreshold = 3;
+
+        var scoredSql = $@"
+            WITH scored AS (
+                SELECT s.ParentId, ({scoreExpr}) as score
+                FROM SentenceSignatures s
+                JOIN ParentDocuments p ON s.ParentId = p.Id
+                LEFT JOIN DataSets d ON p.DataSetId = d.Id
+                WHERE {filterWhere}
+            ),
+            doc_scores AS (
+                SELECT ParentId, MAX(score) as best_score, COUNT(*) as hit_count
+                FROM scored
+                WHERE score >= {minMatchThreshold}
+                GROUP BY ParentId
+            )
+            SELECT COUNT(*) FROM doc_scores";
+
+        using var countCmd = new NpgsqlCommand(scoredSql, conn);
+        countCmd.CommandTimeout = DbCommandTimeout;
+        countCmd.Parameters.AddWithValue("guid", semanticGuid.ToString());
+        if (datasetFilter) countCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) countCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(countCmd);
+
+        var totalCount = Convert.ToInt32(countCmd.ExecuteScalar() ?? 0);
+        Console.WriteLine($"[SemanticOnly] GUID {semanticGuid}: {totalCount} docs with {minMatchThreshold}+ subspace matches");
+
+        if (totalCount == 0)
+            return (Array.Empty<Guid>(), 0);
+
+        var pageSql = $@"
+            WITH scored AS (
+                SELECT s.ParentId, ({scoreExpr}) as score
+                FROM SentenceSignatures s
+                JOIN ParentDocuments p ON s.ParentId = p.Id
+                LEFT JOIN DataSets d ON p.DataSetId = d.Id
+                WHERE {filterWhere}
+            ),
+            doc_scores AS (
+                SELECT ParentId, MAX(score) as best_score, COUNT(*) as hit_count
+                FROM scored
+                WHERE score >= {minMatchThreshold}
+                GROUP BY ParentId
+            )
+            SELECT ParentId FROM doc_scores
+            ORDER BY best_score DESC, hit_count DESC
+            OFFSET @skip LIMIT @take";
+
+        using var pageCmd = new NpgsqlCommand(pageSql, conn);
+        pageCmd.CommandTimeout = DbCommandTimeout;
+        pageCmd.Parameters.AddWithValue("guid", semanticGuid.ToString());
+        pageCmd.Parameters.AddWithValue("skip", skip);
+        pageCmd.Parameters.AddWithValue("take", take);
+        if (datasetFilter) pageCmd.Parameters.AddWithValue("datasetNames", datasetNames!.ToArray());
+        if (namesFilter) pageCmd.Parameters.AddWithValue("nameValues", nameValues!.ToArray());
+        advanced?.ApplyParams(pageCmd);
+
+        var ids = new List<Guid>();
+        using var reader = pageCmd.ExecuteReader();
+        while (reader.Read())
+            ids.Add(reader.GetGuid(0));
+
+        Console.WriteLine($"[SemanticOnly] Returning {ids.Count} docs (skip={skip})");
+        return (ids.ToArray(), totalCount);
     }
 
     // -----------------------------------------------------------------------

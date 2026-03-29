@@ -7,12 +7,8 @@
     <div class="col-md-4">
         <EditForm Model="@this" OnValidSubmit="@OnSearchClicked">
             <div class="input-group">
-                <TelerikAutoComplete Data="@_searchHistory"
-                                     @bind-Value="@_localSearchText"
-                                     OnChange="@OnSearchTextChanged"
-                                     Placeholder="Enter search term..."
-                                     Width="100%"
-                                     Filterable="true" />
+                <input type="text" class="form-control" @bind="_localSearchText"
+                       placeholder="Enter search term..." />
                 @if (!string.IsNullOrEmpty(_localSearchText))
                 {
                     <TelerikButton OnClick="@OnClearSearch" Icon="@SvgIcon.X" Title="Clear search"
@@ -120,9 +116,9 @@
 
     private async Task OnSearchTextChanged(object newValue)
     {
+        // Just update the local text — don't fire search on every keystroke
         _localSearchText = newValue?.ToString() ?? "";
         await SearchQueryChanged.InvokeAsync(_localSearchText);
-        await OnSearch.InvokeAsync();
     }
 
     private async Task OnSearchClicked()

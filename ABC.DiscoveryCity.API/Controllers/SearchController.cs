@@ -72,6 +72,8 @@ public class SearchController : ControllerBase
         [FromQuery] List<string>? names = null,
         [FromQuery] bool filenameOnly = false,
         [FromQuery] bool useSemantic = true,
+        [FromQuery] Guid? semanticGuid = null,
+        [FromQuery] bool semanticOnly = false,
         [FromQuery] List<string>? ext = null,
         [FromQuery] string? dateFrom = null,
         [FromQuery] string? dateTo = null,
@@ -100,15 +102,21 @@ public class SearchController : ControllerBase
             return Ok(FilenamePaged(query, skip, take, datasetNames, nameValues, advanced));
         }
 
+        // Semantic-only mode — bypass all tiered fan-out, run Tier 4 directly
+        if (semanticOnly)
+        {
+            return Ok(await SemanticOnlyPaged(query, skip, take, datasetNames, nameValues, advanced, semanticGuid));
+        }
+
         // --- Tiered fan-out search ---
-        var queryHash = DbService.ComputeQueryHash(query, exactMatch, filenameOnly, datasetNames, nameValues, advanced);
+        var queryHash = DbService.ComputeQueryHash(query, exactMatch, filenameOnly, datasetNames, nameValues, advanced, semanticOnly, semanticGuid);
         var (_, isNew, existingStatus) = _dbService.GetOrCreateSearchQuery(
-            query, exactMatch, filenameOnly, datasetNames, nameValues, advanced);
+            query, exactMatch, filenameOnly, datasetNames, nameValues, advanced, semanticOnly, semanticGuid);
 
         if (isNew)
         {
             // Launch fan-out: all tiers in parallel, don't await all
-            LaunchFanOut(queryHash, query, exactMatch, datasetNames, nameValues, advanced, useSemantic: useSemantic);
+            LaunchFanOut(queryHash, query, exactMatch, datasetNames, nameValues, advanced, useSemantic: useSemantic, semanticGuid: semanticGuid, semanticOnly: semanticOnly);
 
             // Wait for fast tiers (1+2) to finish, with timeout
             var fastDeadline = Task.Delay(500);
@@ -168,7 +176,7 @@ public class SearchController : ControllerBase
     /// Merge checkpoints happen on the next poll from the client.
     /// </summary>
     private void LaunchFanOut(string queryHash, string query, bool exactMatch,
-        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null, bool useSemantic = true)
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced = null, bool useSemantic = true, Guid? semanticGuid = null, bool semanticOnly = false)
     {
         if (_inFlightSearches.ContainsKey(queryHash)) return;
 
@@ -176,32 +184,44 @@ public class SearchController : ControllerBase
         {
             try
             {
-                // Launch all tiers in parallel
-                var tier1 = Task.Run(() =>
+                // Launch tiers in parallel (semanticOnly skips Tiers 1-3)
+                Task tier1, tier2, tier3;
+                if (semanticOnly)
                 {
-                    try { _dbService.ExecuteTier1_Filename(queryHash, query, datasetNames, nameValues, advanced); }
-                    catch (Exception ex) { Console.WriteLine($"[Tier1] Error: {ex.Message}"); }
-                });
-
-                var tier2 = Task.Run(() =>
+                    // Mark text tiers done immediately — semantic-only mode
+                    _dbService.MarkTierDone(queryHash, 1);
+                    _dbService.MarkTierDone(queryHash, 2);
+                    _dbService.MarkTierDone(queryHash, 3);
+                    tier1 = tier2 = tier3 = Task.CompletedTask;
+                }
+                else
                 {
-                    try { _dbService.ExecuteTier2_Metadata(queryHash, query, datasetNames, nameValues, advanced); }
-                    catch (Exception ex) { Console.WriteLine($"[Tier2] Error: {ex.Message}"); }
-                });
+                    tier1 = Task.Run(() =>
+                    {
+                        try { _dbService.ExecuteTier1_Filename(queryHash, query, datasetNames, nameValues, advanced); }
+                        catch (Exception ex) { Console.WriteLine($"[Tier1] Error: {ex.Message}"); }
+                    });
 
-                var tier3 = Task.Run(() =>
-                {
-                    try { _dbService.ExecuteTier3_FullText(queryHash, query, datasetNames, nameValues, advanced); }
-                    catch (Exception ex) { Console.WriteLine($"[Tier3] Error: {ex.Message}"); }
-                });
+                    tier2 = Task.Run(() =>
+                    {
+                        try { _dbService.ExecuteTier2_Metadata(queryHash, query, datasetNames, nameValues, advanced); }
+                        catch (Exception ex) { Console.WriteLine($"[Tier2] Error: {ex.Message}"); }
+                    });
 
-                // Tier 4 only for non-exact-match (semantic search)
+                    tier3 = Task.Run(() =>
+                    {
+                        try { _dbService.ExecuteTier3_FullText(queryHash, query, datasetNames, nameValues, advanced); }
+                        catch (Exception ex) { Console.WriteLine($"[Tier3] Error: {ex.Message}"); }
+                    });
+                }
+
+                // Tier 4: semantic/vector search
                 Task tier4;
-                if (!exactMatch && useSemantic)
+                if (!exactMatch && (useSemantic || semanticOnly))
                 {
                     tier4 = Task.Run(async () =>
                     {
-                        try { await _dbService.ExecuteTier4_VectorAsync(queryHash, query, datasetNames, nameValues, advanced); }
+                        try { await _dbService.ExecuteTier4_VectorAsync(queryHash, query, datasetNames, nameValues, advanced, semanticGuid); }
                         catch (Exception ex) { Console.WriteLine($"[Tier4] Error: {ex.Message}"); }
                     });
                 }
@@ -331,6 +351,52 @@ public class SearchController : ControllerBase
         }
 
         return new PagedSearchResult { Items = dtos, TotalCount = entry.Ids.Length };
+    }
+
+    // -----------------------------------------------------------------------
+    // Semantic-only search — bypasses fan-out, runs Tier 4 directly
+    // -----------------------------------------------------------------------
+
+    private async Task<PagedSearchResult> SemanticOnlyPaged(string query, int skip, int take,
+        List<string>? datasetNames, List<string>? nameValues, AdvancedFilters? advanced, Guid? semanticGuid)
+    {
+        // Get or compute the SemanticId GUID
+        Guid queryGuid;
+        if (semanticGuid.HasValue && semanticGuid.Value != Guid.Empty)
+        {
+            queryGuid = semanticGuid.Value;
+            Console.WriteLine($"[SemanticOnly] Using client GUID: {queryGuid}");
+        }
+        else
+        {
+            // Fallback to server-side Ollama
+            var embeddingService = HttpContext.RequestServices.GetService<ABC.DiscoveryCity.Embeddings.IEmbeddingService>();
+            if (embeddingService == null)
+                return new PagedSearchResult { Items = new List<SearchResultDto>(), TotalCount = 0 };
+
+            try
+            {
+                var embedding = await embeddingService.GetEmbeddingAsync(query);
+                var quantizer = _dbService.GetSentenceQuantizer();
+                queryGuid = quantizer.Quantize(embedding);
+                Console.WriteLine($"[SemanticOnly] Server GUID: {queryGuid}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SemanticOnly] Embedding failed: {ex.Message}");
+                return new PagedSearchResult { Items = new List<SearchResultDto>(), TotalCount = 0 };
+            }
+        }
+
+        // Query SentenceSignatures directly for matching SemanticId
+        var (documentIds, totalCount) = _dbService.SearchBySemanticId(queryGuid, skip, take, datasetNames, nameValues, advanced);
+
+        var hydrated = documentIds.Length > 0
+            ? _dbService.HydrateByIds(documentIds, query)
+            : new List<DocumentSearchResult>();
+
+        var dtos = hydrated.Select(MapToDto).ToList();
+        return new PagedSearchResult { Items = dtos, TotalCount = totalCount };
     }
 
     // -----------------------------------------------------------------------
