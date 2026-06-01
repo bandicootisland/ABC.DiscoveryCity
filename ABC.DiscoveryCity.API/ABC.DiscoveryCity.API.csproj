@@ -29,6 +29,7 @@
     <ProjectReference Include="..\ABC.DiscoveryCity.MariaDB\ABC.DiscoveryCity.MariaDB.csproj" />
     <ProjectReference Include="..\ABC.DiscoveryCity.TelerikProcessing\ABC.DiscoveryCity.TelerikProcessing.csproj" />
     <ProjectReference Include="..\ABC.DiscoveryCity.PostgreSQL\ABC.DiscoveryCity.PostgreSQL.csproj" />
+    <ProjectReference Include="..\ABC.DiscoveryCity.Words.Common\ABC.DiscoveryCity.Words.Common.csproj" />
     <ProjectReference Include="..\ABC.PdfProcessing.Syncfusion\ABC.PdfProcessing.Syncfusion.csproj" />
   </ItemGroup>
 

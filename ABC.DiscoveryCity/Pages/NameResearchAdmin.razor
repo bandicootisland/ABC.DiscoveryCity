@@ -1,0 +1,604 @@
+@page "/admin/names"
+@using System.Text.Json
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+@using Telerik.Blazor.Components.Common.Icon
+@using Telerik.DataSource
+@inject SearchService SearchService
+@inject NotificationService NotificationService
+@inject IJSRuntime JS
+
+<PageTitle>Name Research Admin</PageTitle>
+
+<div class="container-fluid">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <div>
+            <h3 class="mb-0">Name Research Admin</h3>
+            <div class="text-muted small">Manage names, typed name links, linked names, and private notes.</div>
+        </div>
+        <TelerikButton OnClick="@LoadPeople" Icon="@SvgIcon.ArrowRotateCw" Enabled="@(!IsLoading)">Refresh</TelerikButton>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="row g-3 align-items-end">
+                <div class="col-md-5">
+                    <label class="form-label">Search names or aliases</label>
+                    <TelerikTextBox @bind-Value="_searchText" PlaceHolder="Name, nickname, alias..." Width="100%" />
+                </div>
+                <div class="col-md-2">
+                    <TelerikButton OnClick="@LoadPeople" Icon="@SvgIcon.Search" Enabled="@(!IsLoading)" Class="w-100">Search</TelerikButton>
+                </div>
+                <div class="col-md-5 text-muted small">
+                    A name is a first-class record. It can have typed name links and can link to multiple other names without deleting or merging them.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header"><strong>Add new Name</strong></div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label">Name</label>
+                    <TelerikTextBox @bind-Value="_newPersonName" PlaceHolder="Canonical display name..." Width="100%" />
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label">Shared note</label>
+                    <textarea class="form-control" rows="1" @bind="_newPersonNotes" placeholder="Optional shared research note"></textarea>
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <TelerikButton OnClick="@CreatePersonAsync"
+                                   Enabled="@(!string.IsNullOrWhiteSpace(_newPersonName))"
+                                   ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                                   Class="w-100">Add</TelerikButton>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (IsLoading)
+    {
+        <div class="d-flex align-items-center gap-2 p-2 text-muted">
+            <TelerikLoader Visible="true" />
+            <span>Loading names...</span>
+        </div>
+    }
+
+    <NameRecordsGrid @ref="_peopleGrid"
+                     DataSource="@People"
+                     Pageable="true"
+                     PageSize="50"
+                     Sortable="true"
+                     Resizable="true"
+                     SelectionMode="@GridSelectionMode.Single"
+                     SelectedItems="@SelectedPeople"
+                     SelectedItemsChanged="@((IEnumerable<ResearchPersonAdminRowDto> people) => SelectedPeople = people)"
+                     OnStateChanged="@((GridStateEventArgs<ResearchPersonAdminRowDto> args) => OnPeopleGridStateChanged(args))"
+                     Height="calc(100vh - 365px)">
+            <DetailTemplate Context="person">
+                <div class="p-3 bg-light border-top">
+                    <div class="row g-3">
+                        <div class="col-lg-4">
+                            <h6>Edit person</h6>
+                            <label class="form-label small">Name</label>
+                            <TelerikTextBox Value="@GetEditName(person)"
+                                            ValueChanged="@((string value) => SetEditName(person.EntityId, value))"
+                                            Width="100%" />
+                            <label class="form-label small mt-2">Status</label>
+                            <select class="form-select" value="@GetEditStatus(person)" @onchange="@((ChangeEventArgs args) => SetEditStatus(person.EntityId, args.Value?.ToString() ?? "candidate"))">
+                                @foreach (var status in StatusOptions)
+                                {
+                                    <option value="@status">@status</option>
+                                }
+                            </select>
+                            <label class="form-label small mt-2">Shared note</label>
+                            <textarea class="form-control" rows="3" value="@GetEditNotes(person)" @oninput="@((ChangeEventArgs args) => SetEditNotes(person.EntityId, args.Value?.ToString() ?? ""))"></textarea>
+                            <TelerikButton OnClick="@(() => SavePersonAsync(person))"
+                                           Enabled="@CanSavePerson(person)"
+                                           ThemeColor="@ThemeConstants.Button.ThemeColor.Primary"
+                                           Class="mt-2">Save shared changes</TelerikButton>
+                        </div>
+
+                        <div class="col-lg-4">
+                            <h6>Name links</h6>
+                            <div class="small text-muted mb-2">@person.AliasSummary</div>
+                            <label class="form-label small">Add name link, nickname, first name, email label</label>
+                            <TelerikTextBox Value="@GetNewAlias(person.EntityId)"
+                                            ValueChanged="@((string value) => SetNewAlias(person.EntityId, value))"
+                                            PlaceHolder="Name link or nickname..."
+                                            Width="100%" />
+                            <div class="row g-2 align-items-end mt-1">
+                                <div class="col-md-5">
+                                    <label class="form-label small mb-1">Type</label>
+                                    <select class="form-select form-select-sm" value="@GetNewAliasType(person.EntityId)" @onchange="@((ChangeEventArgs args) => SetNewAliasType(person.EntityId, args.Value?.ToString() ?? ""))">
+                                        <option value="">Optional</option>
+                                        @foreach (var aliasType in AliasTypeOptions)
+                                        {
+                                            <option value="@aliasType">@aliasType</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small mb-1">Confidence</label>
+                                    <input class="form-control form-control-sm"
+                                           type="number"
+                                           min="0"
+                                           max="1"
+                                           step="0.05"
+                                           value="@GetNewAliasConfidence(person.EntityId).ToString("0.##")"
+                                           @oninput="@((ChangeEventArgs args) => SetNewAliasConfidence(person.EntityId, args.Value?.ToString()))" />
+                                </div>
+                                <div class="col-md-3">
+                                    <TelerikButton OnClick="@(() => AddAliasAsync(person))"
+                                                   Enabled="@CanAddAlias(person.EntityId)">Add</TelerikButton>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-lg-4">
+                            <h6>Private local note</h6>
+                            <div class="small text-muted mb-2">Stored only in this browser via localStorage. It is not written to the shared database.</div>
+                            <textarea class="form-control" rows="7" value="@GetPrivateNote(person.EntityId)" @oninput="@((ChangeEventArgs args) => SetPrivateNote(person.EntityId, args.Value?.ToString() ?? ""))"></textarea>
+                            <div class="d-flex gap-2 mt-2">
+                                <TelerikButton OnClick="@(() => SavePrivateNoteAsync(person.EntityId))">Save local note</TelerikButton>
+                                <TelerikButton OnClick="@(() => ClearPrivateNoteAsync(person.EntityId))"
+                                               FillMode="@ThemeConstants.Button.FillMode.Flat">Clear</TelerikButton>
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <NameLinkPanel Person="@person"
+                                           People="@People"
+                                           TargetEntityId="@GetNameLinkTarget(person.EntityId)"
+                                           TargetEntityIdChanged="@((Guid? value) => SetNameLinkTarget(person.EntityId, value))"
+                                           Confidence="@GetNameLinkConfidence(person.EntityId)"
+                                           ConfidenceChanged="@((decimal value) => SetNameLinkConfidence(person.EntityId, value))"
+                                           OnLinkRequested="@LinkNameAsync"
+                                           PersonLoader="@LoadNameForNestedGridAsync"
+                                           OnLinkedNameSelected="@OpenLinkedNameAsync" />
+                        </div>
+                    </div>
+                </div>
+            </DetailTemplate>
+        </NameRecordsGrid>
+</div>
+
+@code {
+    private static readonly string[] StatusOptions = { "candidate", "verified", "disputed", "rejected", "archived" };
+    private static readonly string[] AliasTypeOptions =
+    {
+        "Proper Name",
+        "Known As",
+        "Nickname",
+        "Can be Called",
+        "Place Name",
+        "Publication Name",
+        "Web Site Name"
+    };
+
+    private List<ResearchPersonAdminRowDto> People { get; set; } = new();
+    private bool IsLoading { get; set; } = true;
+    private string _searchText = "";
+    private string _newPersonName = "";
+    private string _newPersonNotes = "";
+    private readonly Dictionary<Guid, string> _editNameByEntity = new();
+    private readonly Dictionary<Guid, string> _editStatusByEntity = new();
+    private readonly Dictionary<Guid, string> _editNotesByEntity = new();
+    private readonly Dictionary<Guid, string> _newAliasByEntity = new();
+    private readonly Dictionary<Guid, string> _newAliasTypeByEntity = new();
+    private readonly Dictionary<Guid, decimal> _newAliasConfidenceByEntity = new();
+    private readonly Dictionary<Guid, Guid?> _nameLinkTargetByEntity = new();
+    private readonly Dictionary<Guid, decimal> _nameLinkConfidenceByEntity = new();
+    private readonly Dictionary<Guid, string> _privateNotesByEntity = new();
+    private NameRecordsGrid? _peopleGrid;
+    private IEnumerable<ResearchPersonAdminRowDto> SelectedPeople { get; set; } = Enumerable.Empty<ResearchPersonAdminRowDto>();
+    private HashSet<Guid> _expandedEntityIds = new();
+    private List<NameResearchAdminSortState> _sortStates = new();
+    private int? _gridPage;
+    private bool _restoreGridStatePending;
+    private const string PageStateKey = "discoverycity.research.names.admin-state";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadPageStateAsync();
+        await LoadPeople();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_restoreGridStatePending)
+            return;
+
+        _restoreGridStatePending = false;
+        await RestoreGridStateAsync();
+    }
+
+    private async Task LoadPeople()
+    {
+        CaptureGridState();
+        IsLoading = true;
+        StateHasChanged();
+        try
+        {
+            People = await SearchService.GetResearchPeopleAsync(_searchText, 500);
+            SyncEditBuffers();
+            await LoadPrivateNotesAsync();
+        }
+        finally
+        {
+            IsLoading = false;
+            _restoreGridStatePending = true;
+            await SavePageStateAsync();
+        }
+    }
+
+    private async Task LoadPageStateAsync()
+    {
+        var raw = await JS.InvokeAsync<string?>("pageState.get", PageStateKey);
+        if (string.IsNullOrWhiteSpace(raw))
+            return;
+
+        try
+        {
+            var state = JsonSerializer.Deserialize<NameResearchAdminPageState>(raw);
+            if (state == null)
+                return;
+
+            _searchText = state.SearchText ?? "";
+            _expandedEntityIds = state.ExpandedEntityIds.ToHashSet();
+            _sortStates = state.SortStates;
+            _gridPage = state.Page;
+        }
+        catch
+        {
+            await JS.InvokeVoidAsync("pageState.remove", PageStateKey);
+        }
+    }
+
+    private async Task SavePageStateAsync()
+    {
+        var state = new NameResearchAdminPageState
+        {
+            SearchText = _searchText,
+            ExpandedEntityIds = _expandedEntityIds.ToList(),
+            SortStates = _sortStates,
+            Page = _gridPage
+        };
+
+        await JS.InvokeVoidAsync("pageState.set", PageStateKey, JsonSerializer.Serialize(state));
+    }
+
+    private async Task OnPeopleGridStateChanged(GridStateEventArgs<ResearchPersonAdminRowDto> args)
+    {
+        if (args.GridState.ExpandedItems != null)
+            _expandedEntityIds = args.GridState.ExpandedItems.Select(person => person.EntityId).ToHashSet();
+        if (args.GridState.SortDescriptors != null)
+        {
+            _sortStates = args.GridState.SortDescriptors
+                .Where(sort => !string.IsNullOrWhiteSpace(sort.Member))
+                .Select(sort => new NameResearchAdminSortState
+                {
+                    Member = sort.Member,
+                    Direction = sort.SortDirection.ToString()
+                })
+                .ToList();
+        }
+
+        _gridPage = args.GridState.Page;
+
+        await SavePageStateAsync();
+    }
+
+    private void CaptureGridState()
+    {
+        if (_peopleGrid == null)
+            return;
+
+        var state = _peopleGrid.GetState();
+        if (state.ExpandedItems != null)
+            _expandedEntityIds = state.ExpandedItems.Select(person => person.EntityId).ToHashSet();
+        if (state.SortDescriptors != null)
+        {
+            _sortStates = state.SortDescriptors
+                .Where(sort => !string.IsNullOrWhiteSpace(sort.Member))
+                .Select(sort => new NameResearchAdminSortState
+                {
+                    Member = sort.Member,
+                    Direction = sort.SortDirection.ToString()
+                })
+                .ToList();
+        }
+
+        _gridPage = state.Page;
+    }
+
+    private async Task RestoreGridStateAsync()
+    {
+        if (_peopleGrid == null)
+            return;
+
+        var state = _peopleGrid.GetState();
+        state.ExpandedItems = People
+            .Where(person => _expandedEntityIds.Contains(person.EntityId))
+            .ToList();
+        state.SortDescriptors = _sortStates
+            .Select(sort => new SortDescriptor
+            {
+                Member = sort.Member,
+                SortDirection = Enum.TryParse<ListSortDirection>(sort.Direction, out var direction)
+                    ? direction
+                    : ListSortDirection.Ascending
+            })
+            .ToList();
+        if (_gridPage.HasValue)
+            state.Page = _gridPage.Value;
+
+        await _peopleGrid.SetStateAsync(state);
+    }
+
+    private void SyncEditBuffers()
+    {
+        foreach (var person in People)
+        {
+            _editNameByEntity.TryAdd(person.EntityId, person.DisplayName);
+            _editStatusByEntity.TryAdd(person.EntityId, string.IsNullOrWhiteSpace(person.Status) ? "candidate" : person.Status);
+            _editNotesByEntity.TryAdd(person.EntityId, person.Notes ?? "");
+        }
+    }
+
+    private async Task LoadPrivateNotesAsync()
+    {
+        foreach (var person in People)
+        {
+            var note = await JS.InvokeAsync<string?>("pageState.get", LocalNoteKey(person.EntityId));
+            if (note != null)
+                _privateNotesByEntity[person.EntityId] = note;
+        }
+    }
+
+    private string GetEditName(ResearchPersonAdminRowDto person)
+        => _editNameByEntity.TryGetValue(person.EntityId, out var value) ? value : person.DisplayName;
+
+    private void SetEditName(Guid entityId, string value)
+        => _editNameByEntity[entityId] = value;
+
+    private string GetEditStatus(ResearchPersonAdminRowDto person)
+        => _editStatusByEntity.TryGetValue(person.EntityId, out var value) ? value : person.Status;
+
+    private void SetEditStatus(Guid entityId, string value)
+        => _editStatusByEntity[entityId] = value;
+
+    private string GetEditNotes(ResearchPersonAdminRowDto person)
+        => _editNotesByEntity.TryGetValue(person.EntityId, out var value) ? value : person.Notes;
+
+    private void SetEditNotes(Guid entityId, string value)
+        => _editNotesByEntity[entityId] = value;
+
+    private bool CanSavePerson(ResearchPersonAdminRowDto person)
+        => !string.IsNullOrWhiteSpace(GetEditName(person));
+
+    private async Task SavePersonAsync(ResearchPersonAdminRowDto person)
+    {
+        var saved = await SearchService.UpdateResearchPersonAsync(
+            person.EntityId,
+            GetEditName(person).Trim(),
+            GetEditStatus(person),
+            GetEditNotes(person));
+
+        if (saved == null)
+            return;
+
+        ReplacePerson(saved);
+        NotificationService.ShowSuccess($"Saved {saved.DisplayName}.");
+    }
+
+    private string GetNewAlias(Guid entityId)
+        => _newAliasByEntity.TryGetValue(entityId, out var value) ? value : "";
+
+    private void SetNewAlias(Guid entityId, string value)
+        => _newAliasByEntity[entityId] = value;
+
+    private string GetNewAliasType(Guid entityId)
+        => _newAliasTypeByEntity.TryGetValue(entityId, out var value) ? value : "";
+
+    private void SetNewAliasType(Guid entityId, string value)
+        => _newAliasTypeByEntity[entityId] = value;
+
+    private decimal GetNewAliasConfidence(Guid entityId)
+        => _newAliasConfidenceByEntity.TryGetValue(entityId, out var value) ? value : 1.0m;
+
+    private void SetNewAliasConfidence(Guid entityId, string? value)
+    {
+        if (!decimal.TryParse(value, out var confidence))
+            confidence = 1.0m;
+
+        _newAliasConfidenceByEntity[entityId] = Math.Clamp(confidence, 0m, 1m);
+    }
+
+    private bool CanAddAlias(Guid entityId)
+        => !string.IsNullOrWhiteSpace(GetNewAlias(entityId));
+
+    private async Task AddAliasAsync(ResearchPersonAdminRowDto person)
+    {
+        var alias = GetNewAlias(person.EntityId).Trim();
+        if (string.IsNullOrWhiteSpace(alias))
+            return;
+
+        var saved = await SearchService.AddResearchPersonAliasAsync(
+            person.EntityId,
+            alias,
+            aliasType: GetNewAliasType(person.EntityId),
+            confidence: GetNewAliasConfidence(person.EntityId));
+        if (saved == null)
+            return;
+
+        _newAliasByEntity.Remove(person.EntityId);
+        _newAliasTypeByEntity.Remove(person.EntityId);
+        _newAliasConfidenceByEntity.Remove(person.EntityId);
+        await RefreshPersonAsync(person.EntityId);
+        NotificationService.ShowSuccess($"Added name link \"{saved.Alias}\" to {person.DisplayName}.");
+    }
+
+    private Guid? GetNameLinkTarget(Guid sourceEntityId)
+        => _nameLinkTargetByEntity.TryGetValue(sourceEntityId, out var value) ? value : null;
+
+    private void SetNameLinkTarget(Guid sourceEntityId, Guid? targetEntityId)
+        => _nameLinkTargetByEntity[sourceEntityId] = targetEntityId;
+
+    private decimal GetNameLinkConfidence(Guid entityId)
+        => _nameLinkConfidenceByEntity.TryGetValue(entityId, out var value) ? value : 1.0m;
+
+    private void SetNameLinkConfidence(Guid entityId, string? value)
+    {
+        if (!decimal.TryParse(value, out var confidence))
+            confidence = 1.0m;
+
+        _nameLinkConfidenceByEntity[entityId] = Math.Clamp(confidence, 0m, 1m);
+    }
+
+    private void SetNameLinkConfidence(Guid entityId, decimal confidence)
+        => _nameLinkConfidenceByEntity[entityId] = Math.Clamp(confidence, 0m, 1m);
+
+    private async Task LinkNameAsync(ResearchPersonAdminRowDto person)
+    {
+        var targetEntityId = GetNameLinkTarget(person.EntityId);
+        if (targetEntityId is not Guid target || target == Guid.Empty || target == person.EntityId)
+            return;
+
+        var result = await SearchService.LinkResearchNamesAsync(person.EntityId, target, GetNameLinkConfidence(person.EntityId));
+        if (result == null)
+            return;
+
+        _nameLinkTargetByEntity.Remove(person.EntityId);
+        _nameLinkConfidenceByEntity.Remove(person.EntityId);
+        _expandedEntityIds.Add(person.EntityId);
+        await RefreshPersonAsync(person.EntityId);
+        await RefreshPersonAsync(target);
+        _restoreGridStatePending = true;
+        await SavePageStateAsync();
+        NotificationService.ShowSuccess(
+            $"Linked {person.DisplayName} to {result.TargetDisplayName}.");
+    }
+
+    private async Task CreatePersonAsync()
+    {
+        var saved = await SearchService.CreateResearchPersonAsync(_newPersonName.Trim(), _newPersonNotes);
+        if (saved == null)
+            return;
+
+        _newPersonName = "";
+        _newPersonNotes = "";
+        ReplacePerson(saved);
+        SelectedPeople = new[] { saved };
+        NotificationService.ShowSuccess($"Added {saved.DisplayName}.");
+    }
+
+    private async Task RefreshPersonAsync(Guid entityId)
+    {
+        var refreshed = await SearchService.GetResearchPersonAsync(entityId);
+        if (refreshed != null)
+            ReplacePerson(refreshed);
+    }
+
+    private async Task<ResearchPersonAdminRowDto?> LoadNameForNestedGridAsync(Guid entityId)
+    {
+        var existing = People.FirstOrDefault(person => person.EntityId == entityId);
+        if (existing != null)
+            return existing;
+
+        var loaded = await SearchService.GetResearchPersonAsync(entityId);
+        if (loaded != null)
+            ReplacePerson(loaded);
+
+        return loaded;
+    }
+
+    private async Task OpenLinkedNameAsync(ResearchLinkedNameDto linkedName)
+    {
+        var person = People.FirstOrDefault(item => item.EntityId == linkedName.EntityId);
+        if (person == null)
+        {
+            _searchText = linkedName.DisplayName;
+            await LoadPeople();
+            person = People.FirstOrDefault(item => item.EntityId == linkedName.EntityId);
+        }
+
+        if (person == null)
+            return;
+
+        SelectedPeople = new[] { person };
+        _expandedEntityIds.Add(person.EntityId);
+        _restoreGridStatePending = true;
+        await SavePageStateAsync();
+        StateHasChanged();
+    }
+
+    private string GetPrivateNote(Guid entityId)
+        => _privateNotesByEntity.TryGetValue(entityId, out var value) ? value : "";
+
+    private void SetPrivateNote(Guid entityId, string value)
+        => _privateNotesByEntity[entityId] = value;
+
+    private async Task SavePrivateNoteAsync(Guid entityId)
+    {
+        await JS.InvokeVoidAsync("pageState.set", LocalNoteKey(entityId), GetPrivateNote(entityId));
+        NotificationService.ShowSuccess("Private local note saved.");
+    }
+
+    private async Task ClearPrivateNoteAsync(Guid entityId)
+    {
+        _privateNotesByEntity.Remove(entityId);
+        await JS.InvokeVoidAsync("pageState.remove", LocalNoteKey(entityId));
+        NotificationService.ShowSuccess("Private local note cleared.");
+    }
+
+    private void ReplacePerson(ResearchPersonAdminRowDto saved)
+    {
+        var index = People.FindIndex(person => person.EntityId == saved.EntityId);
+        if (index >= 0)
+            CopyPerson(saved, People[index]);
+        else
+            People.Insert(0, saved);
+
+        _editNameByEntity[saved.EntityId] = saved.DisplayName;
+        _editStatusByEntity[saved.EntityId] = saved.Status;
+        _editNotesByEntity[saved.EntityId] = saved.Notes ?? "";
+    }
+
+    private static void CopyPerson(ResearchPersonAdminRowDto source, ResearchPersonAdminRowDto target)
+    {
+        target.CanonicalName = source.CanonicalName;
+        target.DisplayName = source.DisplayName;
+        target.NormalizedName = source.NormalizedName;
+        target.Confidence = source.Confidence;
+        target.Status = source.Status;
+        target.AliasSummary = source.AliasSummary;
+        target.AliasCount = source.AliasCount;
+        target.MentionCount = source.MentionCount;
+        target.DocumentCount = source.DocumentCount;
+        target.LinkedNameCount = source.LinkedNameCount;
+        target.LinkedNameSummary = source.LinkedNameSummary;
+        target.LinkedNames = source.LinkedNames;
+        target.Notes = source.Notes;
+    }
+
+    private static string LocalNoteKey(Guid entityId)
+        => $"discoverycity.research.person-note.{entityId:N}";
+
+    private sealed class NameResearchAdminPageState
+    {
+        public string SearchText { get; set; } = "";
+        public List<Guid> ExpandedEntityIds { get; set; } = new();
+        public List<NameResearchAdminSortState> SortStates { get; set; } = new();
+        public int? Page { get; set; }
+    }
+
+    private sealed class NameResearchAdminSortState
+    {
+        public string Member { get; set; } = "";
+        public string Direction { get; set; } = nameof(ListSortDirection.Ascending);
+    }
+}

@@ -524,15 +524,29 @@ if (embeddingsOnly)
     int totalUpdated = 0;
     int totalErrors = 0;
     int batchLimit = limitFiles > 0 ? limitFiles : int.MaxValue;
+    var startTime = DateTime.UtcNow;
+    var progressFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "embeddings_progress.log");
+    int lastProgressWrite = 0;
+
+    void WriteProgress(bool final = false)
+    {
+        var elapsed = DateTime.UtcNow - startTime;
+        double rate = elapsed.TotalSeconds > 0 ? totalUpdated / elapsed.TotalSeconds : 0;
+        long remaining = totalMissing - totalUpdated;
+        var eta = rate > 0 ? TimeSpan.FromSeconds(remaining / rate) : TimeSpan.Zero;
+        var line = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] Updated: {totalUpdated:N0}/{totalMissing:N0} | Errors: {totalErrors} | Rate: {rate:F1}/s | ETA: {eta:hh\\:mm\\:ss}{(final ? " | COMPLETE" : "")}";
+        Console.WriteLine(line);
+        File.AppendAllText(progressFile, line + Environment.NewLine);
+    }
+
+    File.WriteAllText(progressFile, $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] Embedding run started. Target: {totalMissing:N0} documents.{Environment.NewLine}");
 
     while (totalUpdated < batchLimit)
     {
         var docs = dbService.GetDocsWithoutEmbeddings(Math.Min(batchSize, batchLimit - totalUpdated));
         if (docs.Count == 0) break;
 
-        Console.WriteLine($"  Batch: {docs.Count} documents (total updated so far: {totalUpdated}/{totalMissing})");
-
-        await Parallel.ForEachAsync(docs, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (doc, ct) =>
+        await Parallel.ForEachAsync(docs, new ParallelOptions { MaxDegreeOfParallelism = 8 }, async (doc, ct) =>
         {
             try
             {
@@ -542,6 +556,11 @@ if (embeddingsOnly)
                     int count = Interlocked.Increment(ref totalUpdated);
                     if (count % 100 == 0)
                         Console.WriteLine($"    [{count}/{totalMissing}] embeddings updated...");
+                    if (count - lastProgressWrite >= 1000)
+                    {
+                        lastProgressWrite = count;
+                        WriteProgress();
+                    }
                 }
             }
             catch (Exception ex)
@@ -553,6 +572,7 @@ if (embeddingsOnly)
         });
     }
 
+    WriteProgress(final: true);
     Console.WriteLine($"\nEmbeddings complete! Updated: {totalUpdated}, Errors: {totalErrors}");
     return;
 }

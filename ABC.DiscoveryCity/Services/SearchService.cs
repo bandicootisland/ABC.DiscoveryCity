@@ -339,6 +339,272 @@ public class SearchService
         }
     }
 
+    public async Task<ResearchDocumentNameScanResult?> ScanDocumentNamesAsync(Guid documentId, string? filePath = null)
+    {
+        try
+        {
+            var request = new ResearchDocumentScanRequest
+            {
+                Persist = true,
+                IncludeCoMentionRelationships = true,
+                SourceKind = "viewer_scan",
+                MaxRelationshipNamesPerSentence = 6,
+                MinimumCandidateConfidence = 0.0m
+            };
+
+            HttpResponseMessage response;
+            if (documentId != Guid.Empty)
+            {
+                response = await _httpClient.PostAsJsonAsync($"api/research/scan-names/document/{documentId}", request);
+            }
+            else if (!string.IsNullOrWhiteSpace(filePath))
+            {
+                response = await _httpClient.PostAsJsonAsync("api/research/scan-names/path",
+                    new ResearchDocumentPathScanRequest
+                    {
+                        FilePath = filePath,
+                        Persist = request.Persist,
+                        IncludeCoMentionRelationships = request.IncludeCoMentionRelationships,
+                        SourceKind = request.SourceKind,
+                        MaxRelationshipNamesPerSentence = request.MaxRelationshipNamesPerSentence,
+                        MinimumCandidateConfidence = request.MinimumCandidateConfidence
+                    });
+            }
+            else
+            {
+                _notifications.ShowWarning("Cannot scan names because this document has no database id or file path.");
+                return null;
+            }
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchDocumentNameScanResult>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"ScanDocumentNames error: {ex.Message}");
+            _notifications.ShowError($"Name scan failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ResearchDocumentNameScanResult?> GetDocumentNameScanAsync(Guid documentId, string? filePath = null)
+    {
+        try
+        {
+            HttpResponseMessage response;
+            if (documentId != Guid.Empty)
+            {
+                response = await _httpClient.GetAsync($"api/research/scan-names/document/{documentId}");
+            }
+            else if (!string.IsNullOrWhiteSpace(filePath))
+            {
+                response = await _httpClient.GetAsync($"api/research/scan-names/path?filePath={Uri.EscapeDataString(filePath)}");
+            }
+            else
+            {
+                return null;
+            }
+
+            if ((int)response.StatusCode == 404)
+                return null;
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchDocumentNameScanResult>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetDocumentNameScan error: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ResearchNameResearchView?> GetNameResearchAsync(Guid documentId, string? filePath = null)
+    {
+        try
+        {
+            HttpResponseMessage response;
+            if (documentId != Guid.Empty)
+            {
+                response = await _httpClient.GetAsync($"api/research/name-research/document/{documentId}");
+            }
+            else if (!string.IsNullOrWhiteSpace(filePath))
+            {
+                response = await _httpClient.GetAsync($"api/research/name-research/path?filePath={Uri.EscapeDataString(filePath)}");
+            }
+            else
+            {
+                return null;
+            }
+
+            if ((int)response.StatusCode == 404)
+                return null;
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchNameResearchView>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetNameResearch error: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ResearchPersonAliasDto?> AddResearchPersonAliasAsync(
+        Guid entityId,
+        string alias,
+        bool isPrimary = false,
+        string? aliasType = null,
+        decimal confidence = 1.0m)
+    {
+        try
+        {
+            var response = await _httpClient.PostAsJsonAsync($"api/research/people/{entityId}/aliases",
+                new ResearchAliasRequest
+                {
+                    Alias = alias,
+                    AliasType = aliasType?.Trim() ?? "",
+                    IsPrimary = isPrimary,
+                    Confidence = Math.Clamp(confidence, 0m, 1m),
+                    SourceKind = "researcher"
+                });
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchPersonAliasDto>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"AddResearchPersonAlias error: {ex.Message}");
+            _notifications.ShowError($"Alias save failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<List<ResearchPersonAdminRowDto>> GetResearchPeopleAsync(string? search = null, int take = 250)
+    {
+        try
+        {
+            var url = $"api/research/people?take={take}";
+            if (!string.IsNullOrWhiteSpace(search))
+                url += $"&search={Uri.EscapeDataString(search)}";
+
+            return await _httpClient.GetFromJsonAsync<List<ResearchPersonAdminRowDto>>(url)
+                ?? new List<ResearchPersonAdminRowDto>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetResearchPeople error: {ex.Message}");
+            _notifications.ShowError($"Failed to load research people: {ex.Message}");
+            return new List<ResearchPersonAdminRowDto>();
+        }
+    }
+
+    public async Task<ResearchPersonAdminRowDto?> GetResearchPersonAsync(Guid entityId)
+    {
+        try
+        {
+            return await _httpClient.GetFromJsonAsync<ResearchPersonAdminRowDto>($"api/research/people/{entityId}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"GetResearchPerson error: {ex.Message}");
+            _notifications.ShowError($"Failed to load name: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ResearchPersonAdminRowDto?> CreateResearchPersonAsync(string displayName, string? notes = null)
+    {
+        try
+        {
+            var response = await _httpClient.PostAsJsonAsync("api/research/people",
+                new ResearchPersonCreateRequest
+                {
+                    DisplayName = displayName,
+                    Notes = notes,
+                    Status = "verified",
+                    Confidence = 1.0m,
+                    SourceKind = "researcher"
+                });
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchPersonAdminRowDto>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"CreateResearchPerson error: {ex.Message}");
+            _notifications.ShowError($"Person save failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ResearchPersonAdminRowDto?> UpdateResearchPersonAsync(Guid entityId, string displayName, string status, string? notes)
+    {
+        try
+        {
+            var response = await _httpClient.PutAsJsonAsync($"api/research/people/{entityId}",
+                new ResearchPersonUpdateRequest
+                {
+                    DisplayName = displayName,
+                    Status = status,
+                    Notes = notes
+                });
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchPersonAdminRowDto>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"UpdateResearchPerson error: {ex.Message}");
+            _notifications.ShowError($"Person update failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ResearchPersonMergeResultDto?> MergeResearchPeopleAsync(Guid sourceEntityId, Guid targetEntityId)
+    {
+        try
+        {
+            var response = await _httpClient.PostAsJsonAsync($"api/research/people/{sourceEntityId}/merge",
+                new ResearchPersonMergeRequest
+                {
+                    TargetEntityId = targetEntityId,
+                    SourceKind = "researcher"
+                });
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchPersonMergeResultDto>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"MergeResearchPeople error: {ex.Message}");
+            _notifications.ShowError($"Person merge failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<ResearchNameLinkDto?> LinkResearchNamesAsync(Guid sourceEntityId, Guid targetEntityId, decimal confidence = 1.0m)
+    {
+        try
+        {
+            var response = await _httpClient.PostAsJsonAsync($"api/research/people/{sourceEntityId}/links",
+                new ResearchNameLinkRequest
+                {
+                    TargetEntityId = targetEntityId,
+                    Confidence = Math.Clamp(confidence, 0m, 1m),
+                    SourceKind = "researcher"
+                });
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadFromJsonAsync<ResearchNameLinkDto>();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"LinkResearchNames error: {ex.Message}");
+            _notifications.ShowError($"Name link failed: {ex.Message}");
+            return null;
+        }
+    }
+
     public async Task<List<string>> GetDataSetNamesAsync()
     {
         try
@@ -553,4 +819,194 @@ public class UserEditResult
     public string? DocumentPath { get; set; }
     public long FileSize { get; set; }
     public DateTime UploadedAt { get; set; }
+}
+
+public class ResearchDocumentScanRequest
+{
+    public bool Persist { get; set; } = true;
+    public bool IncludeCoMentionRelationships { get; set; } = true;
+    public string SourceKind { get; set; } = "viewer_scan";
+    public string? SourceRef { get; set; }
+    public string? ResearcherDisplayName { get; set; }
+    public int MaxRelationshipNamesPerSentence { get; set; } = 6;
+    public int MaxCharacters { get; set; }
+    public decimal MinimumCandidateConfidence { get; set; } = 0.0m;
+}
+
+public sealed class ResearchDocumentPathScanRequest : ResearchDocumentScanRequest
+{
+    public string FilePath { get; set; } = "";
+}
+
+public sealed class ResearchDocumentNameScanResult
+{
+    public Guid DocumentId { get; set; }
+    public string FileName { get; set; } = "";
+    public string? FilePath { get; set; }
+    public string ExtractorVersion { get; set; } = "";
+    public int SentenceCount { get; set; }
+    public int CandidateNameCount { get; set; }
+    public int MentionCount { get; set; }
+    public bool Persisted { get; set; }
+    public int EntitiesCreated { get; set; }
+    public int EntitiesMatched { get; set; }
+    public int EntitiesUpserted { get; set; }
+    public int MentionsInserted { get; set; }
+    public int RelationshipsCreated { get; set; }
+    public int RelationshipsMatched { get; set; }
+    public int RelationshipsUpserted { get; set; }
+    public int RelationshipEvidenceInserted { get; set; }
+    public List<ResearchNameCandidateDto> Candidates { get; set; } = new();
+    public List<string> Warnings { get; set; } = new();
+}
+
+public sealed class ResearchNameCandidateDto
+{
+    public string DisplayName { get; set; } = "";
+    public string NormalizedName { get; set; } = "";
+    public decimal Confidence { get; set; }
+    public int MentionCount { get; set; }
+    public List<string> Sources { get; set; } = new();
+}
+
+public sealed class ResearchNameResearchView
+{
+    public Guid DocumentId { get; set; }
+    public string FileName { get; set; } = "";
+    public string? FilePath { get; set; }
+    public int SentenceCount { get; set; }
+    public int PersonCount { get; set; }
+    public int AliasCount { get; set; }
+    public int MentionCount { get; set; }
+    public List<ResearchPersonGroupDto> People { get; set; } = new();
+}
+
+public sealed class ResearchPersonGroupDto
+{
+    public Guid EntityId { get; set; }
+    public string CanonicalName { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string NormalizedName { get; set; } = "";
+    public decimal Confidence { get; set; }
+    public string Status { get; set; } = "";
+    public int AliasCount { get; set; }
+    public int MentionCount { get; set; }
+    public int LinkedNameCount { get; set; }
+    public string LinkedNameSummary { get; set; } = "";
+    public List<ResearchPersonAliasDto> Aliases { get; set; } = new();
+    public List<ResearchPersonMentionDto> Mentions { get; set; } = new();
+}
+
+public sealed class ResearchPersonAliasDto
+{
+    public Guid AliasId { get; set; }
+    public string Alias { get; set; } = "";
+    public string NormalizedAlias { get; set; } = "";
+    public string AliasType { get; set; } = "name";
+    public bool IsPrimary { get; set; }
+    public decimal Confidence { get; set; }
+    public string SourceKind { get; set; } = "";
+}
+
+public sealed class ResearchPersonMentionDto
+{
+    public Guid MentionId { get; set; }
+    public string RawMention { get; set; } = "";
+    public string NormalizedMention { get; set; } = "";
+    public int? SentenceOrdinal { get; set; }
+    public int? PageNumber { get; set; }
+    public decimal Confidence { get; set; }
+    public string SourcePattern { get; set; } = "";
+    public string? SentenceText { get; set; }
+}
+
+public sealed class ResearchAliasRequest
+{
+    public string Alias { get; set; } = "";
+    public string AliasType { get; set; } = "";
+    public bool IsPrimary { get; set; }
+    public decimal Confidence { get; set; } = 1.0m;
+    public string SourceKind { get; set; } = "researcher";
+}
+
+public sealed class ResearchPersonAdminRowDto
+{
+    public Guid EntityId { get; set; }
+    public string CanonicalName { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string NormalizedName { get; set; } = "";
+    public decimal Confidence { get; set; }
+    public string Status { get; set; } = "";
+    public string AliasSummary { get; set; } = "";
+    public int AliasCount { get; set; }
+    public int MentionCount { get; set; }
+    public int DocumentCount { get; set; }
+    public int LinkedNameCount { get; set; }
+    public string LinkedNameSummary { get; set; } = "";
+    public List<ResearchLinkedNameDto> LinkedNames { get; set; } = new();
+    public string Notes { get; set; } = "";
+}
+
+public sealed class ResearchLinkedNameDto
+{
+    public Guid RelationshipId { get; set; }
+    public Guid EntityId { get; set; }
+    public string DisplayName { get; set; } = "";
+    public string NormalizedName { get; set; } = "";
+    public decimal Confidence { get; set; }
+    public string Status { get; set; } = "";
+}
+
+public sealed class ResearchPersonCreateRequest
+{
+    public string DisplayName { get; set; } = "";
+    public string Status { get; set; } = "verified";
+    public decimal Confidence { get; set; } = 1.0m;
+    public string? Notes { get; set; }
+    public string SourceKind { get; set; } = "researcher";
+}
+
+public sealed class ResearchPersonUpdateRequest
+{
+    public string DisplayName { get; set; } = "";
+    public string Status { get; set; } = "candidate";
+    public string? Notes { get; set; }
+}
+
+public sealed class ResearchPersonMergeRequest
+{
+    public Guid TargetEntityId { get; set; }
+    public string SourceKind { get; set; } = "researcher";
+}
+
+public sealed class ResearchNameLinkRequest
+{
+    public Guid TargetEntityId { get; set; }
+    public decimal Confidence { get; set; } = 1.0m;
+    public string SourceKind { get; set; } = "researcher";
+}
+
+public sealed class ResearchNameLinkDto
+{
+    public Guid RelationshipId { get; set; }
+    public Guid SourceEntityId { get; set; }
+    public Guid TargetEntityId { get; set; }
+    public string TargetDisplayName { get; set; } = "";
+    public decimal Confidence { get; set; }
+    public string Status { get; set; } = "";
+}
+
+public sealed class ResearchPersonMergeResultDto
+{
+    public Guid SourceEntityId { get; set; }
+    public Guid TargetEntityId { get; set; }
+    public string SourceDisplayName { get; set; } = "";
+    public string TargetDisplayName { get; set; } = "";
+    public int AliasesMoved { get; set; }
+    public int AliasesDeduped { get; set; }
+    public int MentionsMoved { get; set; }
+    public int RelationshipsMoved { get; set; }
+    public int RelationshipsRemoved { get; set; }
+    public int FindingsMoved { get; set; }
+    public int AssertionsMoved { get; set; }
 }

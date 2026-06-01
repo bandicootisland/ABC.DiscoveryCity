@@ -1,0 +1,47 @@
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor.Components
+
+@if (Items.Count == 0)
+{
+    <div class="small text-muted">No linked names yet.</div>
+}
+else
+{
+    <TelerikGrid Data="@Items"
+                 Pageable="false"
+                 Sortable="true"
+                 Resizable="true"
+                 Height="@Height">
+        <GridColumns>
+            <GridColumn Field="@nameof(ResearchLinkedNameDto.DisplayName)" Title="Linked Name" />
+            <GridColumn Field="@nameof(ResearchLinkedNameDto.Confidence)" Title="Confidence" DisplayFormat="{0:P0}" Width="120px" />
+            <GridColumn Field="@nameof(ResearchLinkedNameDto.Status)" Title="Status" Width="115px" />
+        </GridColumns>
+        <DetailTemplate>
+            @{
+                var link = (ResearchLinkedNameDto)context;
+            }
+            <div class="p-3 bg-white border-top">
+                <NameLockedGrid Link="@link"
+                                People="@People"
+                                PersonLoader="@PersonLoader"
+                                OnLinkedNameSelected="@OnLinkedNameSelected" />
+            </div>
+        </DetailTemplate>
+    </TelerikGrid>
+}
+
+@code {
+    [Parameter] public IEnumerable<ResearchLinkedNameDto>? DataSource { get; set; }
+    [Parameter] public IReadOnlyList<ResearchPersonAdminRowDto> People { get; set; } = Array.Empty<ResearchPersonAdminRowDto>();
+    [Parameter] public Func<Guid, Task<ResearchPersonAdminRowDto?>>? PersonLoader { get; set; }
+    [Parameter] public string Height { get; set; } = "240px";
+    [Parameter] public EventCallback<ResearchLinkedNameDto> OnLinkedNameSelected { get; set; }
+
+    private List<ResearchLinkedNameDto> Items =>
+        DataSource?
+            .OrderBy(link => link.DisplayName)
+            .ToList()
+        ?? new List<ResearchLinkedNameDto>();
+
+}

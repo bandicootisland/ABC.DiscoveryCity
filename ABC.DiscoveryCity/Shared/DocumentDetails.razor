@@ -35,7 +35,7 @@
                     <div class="mt-4 p-3 bg-light border rounded">
                          <h6 class="border-bottom pb-2">Document Metadata</h6>
                          <ul class="list-unstyled mb-0">
-                             <li class="mb-1"><strong>Est. Date:</strong> @(Document?.Date?.ToString("yyyy-MM-dd") ?? "Unknown")</li>
+                             <li class="mb-1"><strong>Est. Date:</strong> @FormatDate(Document?.Date)</li>
                              <li class="mb-1"><strong>@PageCountLabel:</strong> @Document?.PageCount</li>
                              <li class="mb-1"><strong>Relevance:</strong> @($"{Math.Max(0, (1 - (Document?.Distance ?? 1)) * 100):F0}%")</li>
                              <li class="mb-1"><strong>File:</strong> <span class="text-break">@Document?.FileName</span></li>
@@ -70,37 +70,12 @@
     <TabStripTab Title="@ViewerTabTitle">
         @if (Category == FileCategory.Pdf)
         {
-            <TelerikSplitter Orientation="@SplitterOrientation.Horizontal" Height="800px">
-                <SplitterPanes>
-                    <SplitterPane Size="55%">
-                        <PdfDocumentViewer Data="@ViewerData"
-                                           FilePath="@Document?.FilePath"
-                                           DownloadUrl="@ReconstructedDownloadUrl"
-                                           PreviewImageUrl="@PreviewImageUrl"
-                                           AutoLoad="false"
-                                           Height="100%" />
-                    </SplitterPane>
-                    <SplitterPane>
-                        <div style="height: 100%; overflow-y: auto; padding: 10px; background-color: var(--kendo-base-bg, #f9f9f9); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; line-height: 1.5;">
-                            <div class="d-flex align-items-center justify-content-between" style="color: var(--kendo-subtle-text, #666); margin-bottom: 1em;">
-                                <span>[Sentence]</span>
-                                @if (!string.IsNullOrEmpty(Document?.Text))
-                                {
-                                    <TelerikButton OnClick="@CopyTextToClipboard" Icon="@SvgIcon.Copy" Title="Copy text to clipboard" FillMode="@ThemeConstants.Button.FillMode.Flat" />
-                                }
-                            </div>
-                            @if (!string.IsNullOrEmpty(Document?.Text))
-                            {
-                                @((MarkupString)Document.Text.FormatWithSentenceBreaks().HighlightSearchTerms(SearchQuery))
-                            }
-                            else
-                            {
-                                <span class="text-muted fst-italic">No text content available.</span>
-                            }
-                        </div>
-                    </SplitterPane>
-                </SplitterPanes>
-            </TelerikSplitter>
+            <PdfDocumentViewer Data="@ViewerData"
+                               FilePath="@Document?.FilePath"
+                               DownloadUrl="@ReconstructedDownloadUrl"
+                               PreviewImageUrl="@PreviewImageUrl"
+                               AutoLoad="false"
+                               Height="800px" />
         }
         else if (HasNativeViewer)
         {
@@ -237,7 +212,7 @@
             </div>
         }
     </TabStripTab>
-    <TabStripTab Title="Images" Visible="@(Category == FileCategory.Pdf && _imagePages.Count > 0)">
+    <TabStripTab Title="Images" Visible="@ShowImagesTab">
         <div class="p-3">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
                 <div style="display: flex; align-items: center; gap: 8px;">
@@ -297,6 +272,260 @@
             </div>
         </div>
     </TabStripTab>
+    <TabStripTab Title="Name Research">
+        <div class="p-3">
+            <div class="d-flex align-items-center justify-content-between mb-3">
+                <div>
+                    <h5 class="mb-0">Name Research</h5>
+                    <div class="text-muted small">Document-level name extraction, review, and sentence evidence.</div>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <TelerikButton OnClick="@ScanNamesAsync" Icon="@SvgIcon.Search"
+                                   Title="Scan this document for people names"
+                                   Enabled="@CanScanNames">@ScanNamesButtonText</TelerikButton>
+                    <TelerikButton OnClick="@RefreshNameScanAsync" Icon="@SvgIcon.ArrowRotateCw"
+                                   Title="Reload saved research names"
+                                   FillMode="@ThemeConstants.Button.FillMode.Flat"
+                                   Enabled="@CanLoadNameScan">Refresh</TelerikButton>
+                    @if (!string.IsNullOrEmpty(Document?.Text))
+                    {
+                        <TelerikButton OnClick="@CopyTextToClipboard" Icon="@SvgIcon.Copy" Title="Copy sentence text" FillMode="@ThemeConstants.Button.FillMode.Flat" />
+                    }
+                </div>
+            </div>
+
+            <div class="card mb-3">
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <strong>Name scan review</strong>
+                    @if (NameResearchView != null)
+                    {
+                        <span class="small text-muted">
+                            @NameResearchView.PersonCount people,
+                            @NameResearchView.AliasCount name links,
+                            @NameResearchView.MentionCount mentions
+                        </span>
+                    }
+                </div>
+                <div class="card-body p-2">
+                    @if (IsLoadingNameScan)
+                    {
+                        <div class="d-flex align-items-center gap-2 p-3 text-muted">
+                            <TelerikLoader Visible="true" />
+                            <span>Loading saved name scan...</span>
+                        </div>
+                    }
+                    else if (NameResearchView == null)
+                    {
+                        <div class="p-3 text-muted">
+                            No saved name scan loaded for this document. Click <strong>Scan names</strong> to extract and save candidates.
+                        </div>
+                    }
+                    else if (NameResearchPeople.Count == 0)
+                    {
+                        <div class="p-3 text-muted">No name-like candidates saved for this document.</div>
+                    }
+                    else
+                    {
+                        <TelerikGrid Data="@NameResearchPeople"
+                                     Pageable="true"
+                                     PageSize="10"
+                                     Sortable="true"
+                                     Resizable="true"
+                                     Height="320px"
+                                     OnRowClick="@OnNamePersonRowClick">
+                            <GridColumns>
+                                <GridColumn Field="@nameof(ResearchPersonGroupDto.DisplayName)" Title="Name" />
+                                <GridColumn Field="@nameof(ResearchPersonGroupDto.Status)" Title="Status" Width="120px" />
+                                <GridColumn Field="@nameof(ResearchPersonGroupDto.Confidence)" Title="Confidence" DisplayFormat="{0:P0}" Width="130px" />
+                                <GridColumn Field="@nameof(ResearchPersonGroupDto.AliasCount)" Title="Name Links" Width="110px" />
+                                <GridColumn Field="@nameof(ResearchPersonGroupDto.LinkedNameCount)" Title="Linked Names" Width="130px" />
+                                <GridColumn Field="@nameof(ResearchPersonGroupDto.MentionCount)" Title="Mentions" Width="110px" />
+                                <GridColumn Title="Name Links" Width="260px">
+                                    <Template>
+                                        @{
+                                            var person = (ResearchPersonGroupDto)context;
+                                        }
+                                        <span class="small text-muted">@string.Join(", ", person.Aliases.Take(4).Select(a => a.Alias))</span>
+                                    </Template>
+                                </GridColumn>
+                            </GridColumns>
+                            <DetailTemplate>
+                                @{
+                                    var person = (ResearchPersonGroupDto)context;
+                                }
+                                <div class="p-3 bg-light border-top" @onclick:stopPropagation="true">
+                                    <div class="row g-3">
+                                        <div class="col-md-5">
+                                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                                <strong>Name links</strong>
+                                                <span class="small text-muted">@person.AliasCount links</span>
+                                            </div>
+                                            <table class="table table-sm table-striped mb-2">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Name</th>
+                                                        <th style="width: 120px;">Type</th>
+                                                        <th style="width: 100px;">Confidence</th>
+                                                        <th style="width: 80px;">Primary</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    @foreach (var alias in person.Aliases)
+                                                    {
+                                                        <tr>
+                                                            <td>@alias.Alias</td>
+                                                            <td>@FormatAliasType(alias)</td>
+                                                            <td>@alias.Confidence.ToString("P0")</td>
+                                                            <td>@(alias.IsPrimary ? "yes" : "")</td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                            <div class="row g-2 align-items-end">
+                                                <div class="col-12">
+                                                    <TelerikTextBox Value="@GetNewAlias(person.EntityId)"
+                                                                    ValueChanged="@((string value) => SetNewAlias(person.EntityId, value))"
+                                                                    Placeholder="Add name link, nickname, first name..." />
+                                                </div>
+                                                <div class="col-md-5">
+                                                    <label class="form-label small mb-1">Type</label>
+                                                    <select class="form-select form-select-sm" value="@GetNewAliasType(person.EntityId)" @onchange="@((ChangeEventArgs args) => SetNewAliasType(person.EntityId, args.Value?.ToString() ?? ""))">
+                                                        <option value="">Optional</option>
+                                                        @foreach (var aliasType in AliasTypeOptions)
+                                                        {
+                                                            <option value="@aliasType">@aliasType</option>
+                                                        }
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">Confidence</label>
+                                                    <input class="form-control form-control-sm"
+                                                           type="number"
+                                                           min="0"
+                                                           max="1"
+                                                           step="0.05"
+                                                           value="@GetNewAliasConfidence(person.EntityId).ToString("0.##")"
+                                                           @oninput="@((ChangeEventArgs args) => SetNewAliasConfidence(person.EntityId, args.Value?.ToString()))" />
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <TelerikButton OnClick="@(() => AddAliasAsync(person))"
+                                                                   Enabled="@CanAddAlias(person.EntityId)">Add</TelerikButton>
+                                                </div>
+                                            </div>
+                                            <div class="mt-3 pt-3 border-top">
+                                                <div class="d-flex align-items-center justify-content-between mb-2">
+                                                    <strong>Link to another Name</strong>
+                                                    <span class="small text-muted">Add a non-destructive link to another name</span>
+                                                </div>
+                                                <div class="small text-muted mb-2">
+                                                    @if (string.IsNullOrWhiteSpace(person.LinkedNameSummary))
+                                                    {
+                                                        <span>No linked names yet.</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span>Linked to: @person.LinkedNameSummary</span>
+                                                    }
+                                                </div>
+                                                <div class="row g-2 align-items-end">
+                                                    <div class="col-md-7">
+                                                        <TelerikDropDownList Data="@GetNameLinkTargets(person.EntityId)"
+                                                                         TItem="ResearchPersonGroupDto"
+                                                                         TValue="Guid?"
+                                                                         TextField="@nameof(ResearchPersonGroupDto.DisplayName)"
+                                                                         ValueField="@nameof(ResearchPersonGroupDto.EntityId)"
+                                                                         Value="@GetNameLinkTarget(person.EntityId)"
+                                                                         ValueChanged="@((Guid? value) => SetNameLinkTarget(person.EntityId, value))"
+                                                                         DefaultText="Select name..."
+                                                                         Width="100%" />
+                                                    </div>
+                                                    <div class="col-md-3">
+                                                        <label class="form-label small mb-1">Confidence</label>
+                                                        <input class="form-control form-control-sm"
+                                                               type="number"
+                                                               min="0"
+                                                               max="1"
+                                                               step="0.05"
+                                                               value="@GetNameLinkConfidence(person.EntityId).ToString("0.##")"
+                                                               @oninput="@((ChangeEventArgs args) => SetNameLinkConfidence(person.EntityId, args.Value?.ToString()))" />
+                                                    </div>
+                                                    <div class="col-md-2">
+                                                        <TelerikButton OnClick="@(() => LinkNameAsync(person))"
+                                                                       Enabled="@CanLinkName(person.EntityId)"
+                                                                       ThemeColor="@ThemeConstants.Button.ThemeColor.Primary">Link</TelerikButton>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-7">
+                                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                                <strong>Mentions</strong>
+                                                <span class="small text-muted">@person.MentionCount mentions</span>
+                                            </div>
+                                            <TelerikGrid Data="@person.Mentions"
+                                                         Pageable="true"
+                                                         PageSize="6"
+                                                         Sortable="true"
+                                                         Height="260px"
+                                                         OnRowClick="@OnNameMentionRowClick">
+                                                <GridColumns>
+                                                    <GridColumn Field="@nameof(ResearchPersonMentionDto.RawMention)" Title="Mention" Width="160px" />
+                                                    <GridColumn Field="@nameof(ResearchPersonMentionDto.SentenceOrdinal)" Title="Sentence" Width="110px" />
+                                                    <GridColumn Field="@nameof(ResearchPersonMentionDto.Confidence)" Title="Confidence" DisplayFormat="{0:P0}" Width="120px" />
+                                                    <GridColumn Field="@nameof(ResearchPersonMentionDto.SourcePattern)" Title="Evidence" />
+                                                </GridColumns>
+                                            </TelerikGrid>
+                                        </div>
+                                    </div>
+                                </div>
+                            </DetailTemplate>
+                        </TelerikGrid>
+                    }
+                </div>
+            </div>
+
+            <div class="card" id="@SentenceGridElementId">
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <strong>Sentence view</strong>
+                    <span class="small text-muted">@SentenceRows.Count sentences</span>
+                </div>
+                <div class="card-body p-2">
+                    @if (SentenceRows.Count == 0)
+                    {
+                        <div class="p-3 text-muted">No sentence text available.</div>
+                    }
+                    else
+                    {
+                        <TelerikGrid Data="@SentenceRows"
+                                     Pageable="true"
+                                     PageSize="@SentencePageSize"
+                                     Page="@SentenceGridPage"
+                                     PageChanged="@((int page) => SentenceGridPage = page)"
+                                     Sortable="true"
+                                     Resizable="true"
+                                     Height="520px"
+                                     SelectionMode="@GridSelectionMode.Single"
+                                     SelectedItems="@SelectedSentenceRows"
+                                     SelectedItemsChanged="@((IEnumerable<SentenceViewRow> rows) => SelectedSentenceRows = rows)">
+                            <GridColumns>
+                                <GridColumn Field="@nameof(SentenceViewRow.Ordinal)" Title="#" Width="90px" />
+                                <GridColumn Title="Sentence">
+                                    <Template>
+                                        @{
+                                            var sentence = (SentenceViewRow)context;
+                                        }
+                                        <div style="white-space: normal; line-height: 1.45;">
+                                            @((MarkupString)System.Net.WebUtility.HtmlEncode(sentence.Text).HighlightSearchTerms(SearchQuery))
+                                        </div>
+                                    </Template>
+                                </GridColumn>
+                            </GridColumns>
+                        </TelerikGrid>
+                    }
+                </div>
+            </div>
+        </div>
+    </TabStripTab>
 </TelerikTabStrip>
 
 @code {
@@ -314,13 +543,57 @@
 
     private byte[]? ViewerData { get; set; }
     private bool IsLoadingViewer { get; set; }
+    private bool IsScanningNames { get; set; }
+    private bool IsLoadingNameScan { get; set; }
+    private ResearchDocumentNameScanResult? LastNameScanResult { get; set; }
+    private ResearchNameResearchView? NameResearchView { get; set; }
+    private List<SentenceViewRow> SentenceRows { get; set; } = new();
+    private IEnumerable<SentenceViewRow> SelectedSentenceRows { get; set; } = Enumerable.Empty<SentenceViewRow>();
+    private int SentenceGridPage { get; set; } = 1;
+    private Dictionary<Guid, string> NewAliasByEntity { get; } = new();
+    private Dictionary<Guid, string> NewAliasTypeByEntity { get; } = new();
+    private Dictionary<Guid, decimal> NewAliasConfidenceByEntity { get; } = new();
+    private Dictionary<Guid, Guid?> NameLinkTargetByEntity { get; } = new();
+    private Dictionary<Guid, decimal> NameLinkConfidenceByEntity { get; } = new();
     private string? LoadedViewerPath { get; set; }
+    private const int ViewerTabIndex = 1;
+    private const int ImagesTabIndex = 2;
+    private const int SentencePageSize = 25;
+    private readonly string _sentenceGridElementId = $"sentence-grid-{Guid.NewGuid():N}";
+    private static readonly string[] AliasTypeOptions =
+    {
+        "Proper Name",
+        "Known As",
+        "Nickname",
+        "Can be Called",
+        "Place Name",
+        "Publication Name",
+        "Web Site Name"
+    };
 
     // Image tab state
     private record ImagePageInfo(int Page, string Info);
     private List<ImagePageInfo> _imagePages = new();
     private int _imagePageIndex;
-    private Guid _lastImageDocId;
+    private string? _lastDocumentKey;
+    private string? _loadedNameScanKey;
+    private bool ShowImagesTab => Category == FileCategory.Pdf && _imagePages.Count > 0;
+    private int NameResearchTabIndex => ShowImagesTab ? 4 : 3;
+    private string SentenceGridElementId => _sentenceGridElementId;
+
+    private sealed class SentenceViewRow
+    {
+        public int Ordinal { get; set; }
+        public string Text { get; set; } = "";
+    }
+
+    private List<ResearchPersonGroupDto> NameResearchPeople =>
+        NameResearchView?.People
+            .OrderByDescending(p => p.MentionCount)
+            .ThenByDescending(p => p.Confidence)
+            .ThenBy(p => p.DisplayName)
+            .ToList()
+        ?? new List<ResearchPersonGroupDto>();
 
     private void ParseImagePages()
     {
@@ -434,6 +707,16 @@
 
     private List<KeyValuePair<string, string>> MetadataEntries => ParseMetadata();
 
+    private bool CanScanNames =>
+        !IsScanningNames
+        && Document != null
+        && (Document.Id != Guid.Empty || !string.IsNullOrWhiteSpace(Document.FilePath));
+    private bool CanLoadNameScan =>
+        !IsLoadingNameScan
+        && Document != null
+        && (Document.Id != Guid.Empty || !string.IsNullOrWhiteSpace(Document.FilePath));
+    private string ScanNamesButtonText => IsScanningNames ? "Scanning..." : "Scan names";
+
     private enum FileCategory { Pdf, Spreadsheet, Video, Audio, Image, Unknown }
 
     private FileCategory Category => GetFileCategory();
@@ -525,35 +808,342 @@
 
     protected override async Task OnParametersSetAsync()
     {
-        if (Document?.FilePath != LoadedViewerPath)
+        var documentKey = GetDocumentKey(Document);
+        var documentChanged = documentKey != _lastDocumentKey;
+
+        if (documentChanged)
         {
+            _lastDocumentKey = documentKey;
             ViewerData = null;
+            LastNameScanResult = null;
+            NameResearchView = null;
+            SentenceRows = BuildSentenceRows(Document?.Text);
+            SelectedSentenceRows = Enumerable.Empty<SentenceViewRow>();
+            SentenceGridPage = 1;
+            NewAliasByEntity.Clear();
+            NewAliasTypeByEntity.Clear();
+            NewAliasConfidenceByEntity.Clear();
+            NameLinkTargetByEntity.Clear();
+            NameLinkConfidenceByEntity.Clear();
             LoadedViewerPath = null;
+            _loadedNameScanKey = null;
+            ParseImagePages();
 
-            // Parse image pages when document changes
-            if (Document?.Id != _lastImageDocId)
-            {
-                _lastImageDocId = Document?.Id ?? Guid.Empty;
-                ParseImagePages();
-            }
-
-            // Keep current tab — parent controls ActiveTabIndex
-            // If already on Viewer tab, auto-load the new document
-            if (ActiveTabIndex == 1 && HasNativeViewer)
-            {
-                await LoadViewerDataAsync();
-            }
+            if (ActiveTabIndex == ImagesTabIndex && !ShowImagesTab)
+                await OnTabChanged(0);
         }
+
+        if (Document?.FilePath != LoadedViewerPath && ActiveTabIndex == ViewerTabIndex && HasNativeViewer)
+        {
+            await LoadViewerDataAsync();
+        }
+
+        if (ActiveTabIndex == NameResearchTabIndex)
+        {
+            await LoadSavedNameScanAsync();
+        }
+    }
+
+    private static string? GetDocumentKey(SearchResultDto? document)
+    {
+        if (document == null)
+            return null;
+        if (document.Id != Guid.Empty)
+            return document.Id.ToString();
+        if (!string.IsNullOrWhiteSpace(document.FilePath))
+            return document.FilePath;
+        return document.FileName;
     }
 
     private async Task OnTabChanged(int index)
     {
         ActiveTabIndex = index;
         await ActiveTabIndexChanged.InvokeAsync(index);
-        if (index == 1 && HasNativeViewer && ViewerData == null && !IsLoadingViewer)
+        if (index == ViewerTabIndex && HasNativeViewer && ViewerData == null && !IsLoadingViewer)
         {
             await LoadViewerDataAsync();
         }
+
+        if (index == NameResearchTabIndex)
+        {
+            await LoadSavedNameScanAsync();
+        }
+    }
+
+    private async Task OnNamePersonRowClick(GridRowClickEventArgs args)
+    {
+        if (args.Item is not ResearchPersonGroupDto person)
+            return;
+
+        var sentence = FindFirstSentenceForPerson(person);
+        if (sentence == null)
+        {
+            NotificationService.ShowInfo($"No sentence occurrence found for {person.DisplayName}.");
+            return;
+        }
+
+        await JumpToSentenceAsync(sentence);
+    }
+
+    private async Task OnNameMentionRowClick(GridRowClickEventArgs args)
+    {
+        if (args.Item is not ResearchPersonMentionDto mention)
+            return;
+
+        var sentence = mention.SentenceOrdinal.HasValue
+            ? SentenceRows.FirstOrDefault(row => row.Ordinal == mention.SentenceOrdinal.Value)
+            : null;
+
+        if (sentence == null)
+            sentence = FindFirstSentenceContaining(mention.RawMention);
+
+        if (sentence == null)
+        {
+            NotificationService.ShowInfo($"No sentence occurrence found for {mention.RawMention}.");
+            return;
+        }
+
+        await JumpToSentenceAsync(sentence);
+    }
+
+    private async Task JumpToSentenceAsync(SentenceViewRow sentence)
+    {
+        var index = SentenceRows.FindIndex(row => row.Ordinal == sentence.Ordinal);
+        if (index >= 0)
+            SentenceGridPage = (index / SentencePageSize) + 1;
+
+        SelectedSentenceRows = new[] { sentence };
+        StateHasChanged();
+        await Task.Yield();
+        await JS.InvokeVoidAsync("scrollElementIntoView", SentenceGridElementId);
+    }
+
+    private SentenceViewRow? FindFirstSentenceForPerson(ResearchPersonGroupDto person)
+    {
+        var mentionWithOrdinal = person.Mentions
+            .Where(m => m.SentenceOrdinal.HasValue)
+            .OrderBy(m => m.SentenceOrdinal)
+            .FirstOrDefault();
+        if (mentionWithOrdinal?.SentenceOrdinal is int ordinal)
+        {
+            var sentence = SentenceRows.FirstOrDefault(row => row.Ordinal == ordinal);
+            if (sentence != null)
+                return sentence;
+        }
+
+        var aliases = person.Aliases.Select(a => a.Alias)
+            .Concat(new[] { person.DisplayName, person.CanonicalName })
+            .Where(a => !string.IsNullOrWhiteSpace(a))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var alias in aliases)
+        {
+            var sentence = FindFirstSentenceContaining(alias);
+            if (sentence != null)
+                return sentence;
+        }
+
+        return null;
+    }
+
+    private SentenceViewRow? FindFirstSentenceContaining(string candidateName)
+    {
+        var normalizedName = NormalizeForSentenceSearch(candidateName);
+        if (string.IsNullOrWhiteSpace(normalizedName))
+            return null;
+
+        foreach (var row in SentenceRows.OrderBy(row => row.Ordinal))
+        {
+            if (NormalizeForSentenceSearch(row.Text).Contains(normalizedName, StringComparison.Ordinal))
+                return row;
+        }
+
+        var nameParts = normalizedName
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Where(part => part.Length > 1)
+            .ToArray();
+        if (nameParts.Length <= 1)
+            return null;
+
+        foreach (var row in SentenceRows.OrderBy(row => row.Ordinal))
+        {
+            var normalizedText = NormalizeForSentenceSearch(row.Text);
+            if (nameParts.All(part => normalizedText.Contains(part, StringComparison.Ordinal)))
+                return row;
+        }
+
+        return null;
+    }
+
+    private static string NormalizeForSentenceSearch(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        var normalized = value.ToLowerInvariant();
+        normalized = System.Text.RegularExpressions.Regex.Replace(normalized, @"[^a-z0-9']+", " ");
+        return System.Text.RegularExpressions.Regex.Replace(normalized, @"\s+", " ").Trim();
+    }
+
+    private string GetNewAlias(Guid entityId)
+        => NewAliasByEntity.TryGetValue(entityId, out var value) ? value : "";
+
+    private void SetNewAlias(Guid entityId, string value)
+        => NewAliasByEntity[entityId] = value;
+
+    private string GetNewAliasType(Guid entityId)
+        => NewAliasTypeByEntity.TryGetValue(entityId, out var value) ? value : "";
+
+    private void SetNewAliasType(Guid entityId, string value)
+        => NewAliasTypeByEntity[entityId] = value;
+
+    private decimal GetNewAliasConfidence(Guid entityId)
+        => NewAliasConfidenceByEntity.TryGetValue(entityId, out var value) ? value : 1.0m;
+
+    private void SetNewAliasConfidence(Guid entityId, string? value)
+    {
+        if (!decimal.TryParse(value, out var confidence))
+            confidence = 1.0m;
+
+        NewAliasConfidenceByEntity[entityId] = Math.Clamp(confidence, 0m, 1m);
+    }
+
+    private bool CanAddAlias(Guid entityId)
+        => !string.IsNullOrWhiteSpace(GetNewAlias(entityId));
+
+    private static string FormatAliasType(ResearchPersonAliasDto alias)
+    {
+        if (alias.IsPrimary || string.Equals(alias.AliasType, "name", StringComparison.OrdinalIgnoreCase))
+            return "Proper Name";
+
+        return string.IsNullOrWhiteSpace(alias.AliasType) ? "" : alias.AliasType;
+    }
+
+    private List<ResearchPersonGroupDto> GetNameLinkTargets(Guid sourceEntityId)
+        => NameResearchPeople
+            .Where(person => person.EntityId != sourceEntityId)
+            .OrderByDescending(person => person.MentionCount)
+            .ThenBy(person => person.DisplayName)
+            .ToList();
+
+    private Guid? GetNameLinkTarget(Guid sourceEntityId)
+        => NameLinkTargetByEntity.TryGetValue(sourceEntityId, out var value) ? value : null;
+
+    private void SetNameLinkTarget(Guid sourceEntityId, Guid? targetEntityId)
+        => NameLinkTargetByEntity[sourceEntityId] = targetEntityId;
+
+    private decimal GetNameLinkConfidence(Guid entityId)
+        => NameLinkConfidenceByEntity.TryGetValue(entityId, out var value) ? value : 1.0m;
+
+    private void SetNameLinkConfidence(Guid entityId, string? value)
+    {
+        if (!decimal.TryParse(value, out var confidence))
+            confidence = 1.0m;
+
+        NameLinkConfidenceByEntity[entityId] = Math.Clamp(confidence, 0m, 1m);
+    }
+
+    private bool CanLinkName(Guid sourceEntityId)
+        => GetNameLinkTarget(sourceEntityId) is Guid targetEntityId
+           && targetEntityId != Guid.Empty
+           && targetEntityId != sourceEntityId;
+
+    private async Task AddAliasAsync(ResearchPersonGroupDto person)
+    {
+        var alias = GetNewAlias(person.EntityId).Trim();
+        if (string.IsNullOrWhiteSpace(alias))
+            return;
+
+        var saved = await SearchService.AddResearchPersonAliasAsync(
+            person.EntityId,
+            alias,
+            aliasType: GetNewAliasType(person.EntityId),
+            confidence: GetNewAliasConfidence(person.EntityId));
+        if (saved == null)
+            return;
+
+        NewAliasByEntity.Remove(person.EntityId);
+        NewAliasTypeByEntity.Remove(person.EntityId);
+        NewAliasConfidenceByEntity.Remove(person.EntityId);
+        await LoadSavedNameScanAsync(force: true);
+        NotificationService.ShowSuccess($"Added name link \"{saved.Alias}\" to {person.DisplayName}.");
+    }
+
+    private async Task LinkNameAsync(ResearchPersonGroupDto person)
+    {
+        var targetEntityId = GetNameLinkTarget(person.EntityId);
+        if (targetEntityId is not Guid target || target == Guid.Empty || target == person.EntityId)
+            return;
+
+        var result = await SearchService.LinkResearchNamesAsync(person.EntityId, target, GetNameLinkConfidence(person.EntityId));
+        if (result == null)
+            return;
+
+        NameLinkTargetByEntity.Remove(person.EntityId);
+        NameLinkConfidenceByEntity.Remove(person.EntityId);
+        await LoadSavedNameScanAsync(force: true);
+        NotificationService.ShowSuccess(
+            $"Linked {person.DisplayName} to {result.TargetDisplayName}.");
+    }
+
+    private async Task RefreshNameScanAsync()
+    {
+        await LoadSavedNameScanAsync(force: true);
+    }
+
+    private async Task LoadSavedNameScanAsync(bool force = false)
+    {
+        if (!CanLoadNameScan || Document == null)
+            return;
+
+        var documentKey = GetDocumentKey(Document);
+        if (!force && documentKey == _loadedNameScanKey)
+            return;
+
+        IsLoadingNameScan = true;
+        StateHasChanged();
+        try
+        {
+            NameResearchView = await SearchService.GetNameResearchAsync(Document.Id, Document.FilePath);
+            _loadedNameScanKey = documentKey;
+        }
+        finally
+        {
+            IsLoadingNameScan = false;
+        }
+    }
+
+    private static List<SentenceViewRow> BuildSentenceRows(string? text)
+    {
+        var rows = new List<SentenceViewRow>();
+        if (string.IsNullOrWhiteSpace(text))
+            return rows;
+
+        var matches = System.Text.RegularExpressions.Regex.Matches(
+            text,
+            @"\[(\d+)\]\s*(.*?)(?=\s*\[\d+\]\s|\z)",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        foreach (System.Text.RegularExpressions.Match match in matches)
+        {
+            if (!int.TryParse(match.Groups[1].Value, out var ordinal))
+                ordinal = rows.Count + 1;
+
+            var sentenceText = System.Text.RegularExpressions.Regex
+                .Replace(match.Groups[2].Value, @"\s+", " ")
+                .Trim();
+
+            if (sentenceText.Length > 0)
+                rows.Add(new SentenceViewRow { Ordinal = ordinal, Text = sentenceText });
+        }
+
+        if (rows.Count > 0)
+            return rows;
+
+        return text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select((line, index) => new SentenceViewRow { Ordinal = index + 1, Text = line })
+            .Where(row => !string.IsNullOrWhiteSpace(row.Text))
+            .ToList();
     }
 
     private async Task LoadViewerDataAsync()
@@ -629,6 +1219,40 @@
         }
     }
 
+    private async Task ScanNamesAsync()
+    {
+        if (Document == null)
+            return;
+
+        var documentId = Document.Id;
+        IsScanningNames = true;
+        try
+        {
+            var result = await SearchService.ScanDocumentNamesAsync(documentId, Document.FilePath);
+            if (result == null)
+                return;
+
+            LastNameScanResult = result;
+            await LoadSavedNameScanAsync(force: true);
+
+            if (result.CandidateNameCount == 0)
+            {
+                NotificationService.ShowInfo("No name-like candidates found.");
+                return;
+            }
+
+            var sample = result.Candidates.Count > 0
+                ? ": " + string.Join(", ", result.Candidates.Take(5).Select(c => c.DisplayName))
+                : "";
+            NotificationService.ShowSuccess(
+                $"Saved {result.CandidateNameCount} candidates, {result.MentionsInserted} mentions and {result.RelationshipEvidenceInserted} links for review{sample}");
+        }
+        finally
+        {
+            IsScanningNames = false;
+        }
+    }
+
     private static string StripDrivePrefix(string path)
     {
         var segments = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -651,5 +1275,12 @@
             return "[drive]/" + string.Join("/", segments[1..]);
 
         return path;
+    }
+
+    private static string FormatDate(DateTime? date)
+    {
+        return date.HasValue && date.Value.Year > 1
+            ? date.Value.ToString("yyyy-MM-dd")
+            : "";
     }
 }

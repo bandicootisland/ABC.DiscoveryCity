@@ -1,3 +1,4 @@
+using ABC.DiscoveryCity.Words.Common.Research;
 using System.Text.RegularExpressions;
 
 namespace ABC.DiscoveryCity.DocumentIngestionProcessing.Pipeline;
@@ -103,55 +104,7 @@ public static class MetadataExtractors
 
     public static (List<string> Names, List<string> Terms) ExtractNamesAndTerms(string text)
     {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var terms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(text)) return (new List<string>(), new List<string>());
-
-        string snippet = text.Length > 8000 ? text.Substring(0, 8000) : text;
-
-        // 1. Email header patterns (From:, To:, Cc:, Sent by:) -> Names
-        var headerPatterns = new[]
-        {
-            @"(?:From|To|Cc|Bcc|Sent\s*(?:by)?)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
-            @"(?:From|To|Cc|Bcc)\s*:\s*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*<",
-            @"(?:To|Cc|Bcc)\s*:\s*(?:(?:[A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})\s*;\s*)*([A-Z=][a-z=]+(?:\s+[A-Z=]\.?)?\s+[A-Z=][a-z=]{1,20})",
-        };
-
-        foreach (var pattern in headerPatterns)
-        {
-            foreach (Match m in Regex.Matches(snippet, pattern))
-            {
-                var name = CleanExtractedName(m.Groups[1].Value);
-                if (IsValidPersonName(name)) names.Add(name);
-            }
-        }
-
-        // 2. "Dear X" / "Hi X" / "Hello X" patterns -> Names
-        foreach (Match m in Regex.Matches(snippet, @"\b(?:Dear|Hi|Hello|Attn)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20})?)", RegexOptions.None))
-        {
-            var name = CleanExtractedName(m.Groups[1].Value);
-            if (IsValidPersonName(name)) names.Add(name);
-        }
-
-        // 3. Known-name-context patterns -> Names
-        foreach (Match m in Regex.Matches(snippet, @"\b(?:w/|with|meeting\s+with|Appt\s+w/|LUNCH\s+w/)\s+([A-Z=][a-z=]+(?:\s+[A-Z=][a-z=]{1,20}))", RegexOptions.None))
-        {
-            var name = CleanExtractedName(m.Groups[1].Value);
-            if (IsValidPersonName(name)) names.Add(name);
-        }
-
-        // 4. Capitalized "Firstname Lastname" sequences -> Terms
-        foreach (Match m in Regex.Matches(snippet, @"\b([A-Z=][a-z=]{2,15}\s+[A-Z=][a-z=]{2,20})\b"))
-        {
-            var candidate = CleanExtractedName(m.Groups[1].Value);
-            if (IsValidPersonName(candidate) && !IsCommonPhrase(candidate))
-            {
-                if (!names.Contains(candidate))
-                    terms.Add(candidate);
-            }
-        }
-
-        return (names.OrderBy(p => p).ToList(), terms.OrderBy(t => t).ToList());
+        return ResearchNameScanner.ExtractNamesAndTerms(text);
     }
 
     public static string CleanExtractedName(string name)

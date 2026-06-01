@@ -95,6 +95,12 @@
                 cards[index].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
             }
         };
+        window.scrollElementIntoView = (id) => {
+            const element = document.getElementById(id);
+            if (element) {
+                element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+        };
         window.triggerFileDownload = (url, fileName) => {
             const anchor = document.createElement('a');
             anchor.href = url;

@@ -74,13 +74,9 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Initialize tiered search cache tables on startup
-using (var scope = app.Services.CreateScope())
-{
-    var dbService = scope.ServiceProvider.GetRequiredService<ABC.DiscoveryCity.PostgreSQL.DbService>();
-    dbService.InitTieredSearchTables();
-    dbService.InitUserEditsTables();
-}
+// Skip database initialization at startup so the API can bind immediately even if the
+// remote PostgreSQL instance is down or its credentials have changed.
+Console.WriteLine("[API STARTUP] Database initialization deferred until first DB-backed request.");
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

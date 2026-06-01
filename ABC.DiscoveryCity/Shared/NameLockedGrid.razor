@@ -1,0 +1,113 @@
+@using ABC.DiscoveryCity.Services
+
+@if (_isLoading)
+{
+    <div class="d-flex align-items-center gap-2 p-2 text-muted">
+        <TelerikLoader Visible="true" />
+        <span>Loading @Link.DisplayName...</span>
+    </div>
+}
+else if (_person == null)
+{
+    <div class="small text-muted">No additional details are loaded for @Link.DisplayName.</div>
+}
+else
+{
+    <div class="mb-2 small text-muted">
+        Relationship @Link.RelationshipId
+    </div>
+
+    <NameRecordsGrid DataSource="@LockedDataSource"
+                     Pageable="false"
+                     PageSize="1"
+                     Height="260px">
+        <DetailTemplate Context="person">
+            <div class="p-3 bg-white border-top">
+                <div class="row g-3">
+                    <div class="col-md-3">
+                        <div class="text-muted small">Name</div>
+                        <div class="fw-semibold">@person.DisplayName</div>
+                        <div class="small text-muted">@person.NormalizedName</div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="text-muted small">Status</div>
+                        <div>@person.Status</div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="text-muted small">Mentions</div>
+                        <div>@person.MentionCount</div>
+                    </div>
+                    <div class="col-md-2">
+                        <div class="text-muted small">Documents</div>
+                        <div>@person.DocumentCount</div>
+                    </div>
+                    <div class="col-md-3 d-flex align-items-end justify-content-md-end">
+                        <TelerikButton OnClick="@(() => OnLinkedNameSelected.InvokeAsync(Link))"
+                                       FillMode="@ThemeConstants.Button.FillMode.Flat">Open this Name</TelerikButton>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="text-muted small">Name links / nicknames</div>
+                        <div class="small">@(!string.IsNullOrWhiteSpace(person.AliasSummary) ? person.AliasSummary : "-")</div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="text-muted small">Linked to</div>
+                        <div class="small">@(!string.IsNullOrWhiteSpace(person.LinkedNameSummary) ? person.LinkedNameSummary : "-")</div>
+                    </div>
+                    <div class="col-12">
+                        <NameLinksGrid DataSource="@person.LinkedNames"
+                                       People="@NestedPeople"
+                                       PersonLoader="@PersonLoader"
+                                       Height="220px"
+                                       OnLinkedNameSelected="@OnLinkedNameSelected" />
+                    </div>
+                </div>
+            </div>
+        </DetailTemplate>
+    </NameRecordsGrid>
+}
+
+@code {
+    private ResearchPersonAdminRowDto? _person;
+    private bool _isLoading;
+    private Guid _loadedEntityId;
+
+    [Parameter, EditorRequired] public ResearchLinkedNameDto Link { get; set; } = new();
+    [Parameter] public IReadOnlyList<ResearchPersonAdminRowDto> People { get; set; } = Array.Empty<ResearchPersonAdminRowDto>();
+    [Parameter] public Func<Guid, Task<ResearchPersonAdminRowDto?>>? PersonLoader { get; set; }
+    [Parameter] public EventCallback<ResearchLinkedNameDto> OnLinkedNameSelected { get; set; }
+
+    private IReadOnlyList<ResearchPersonAdminRowDto> LockedDataSource =>
+        _person == null
+            ? Array.Empty<ResearchPersonAdminRowDto>()
+            : new[] { _person };
+
+    private IReadOnlyList<ResearchPersonAdminRowDto> NestedPeople =>
+        _person == null
+            ? People
+            : People
+                .Concat(new[] { _person })
+                .GroupBy(person => person.EntityId)
+                .Select(group => group.First())
+                .ToList();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Link.EntityId == Guid.Empty || _loadedEntityId == Link.EntityId)
+            return;
+
+        _loadedEntityId = Link.EntityId;
+        _person = People.FirstOrDefault(person => person.EntityId == Link.EntityId);
+        if (_person != null || PersonLoader == null)
+            return;
+
+        _isLoading = true;
+        try
+        {
+            _person = await PersonLoader(Link.EntityId);
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+}

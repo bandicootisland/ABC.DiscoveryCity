@@ -1,0 +1,74 @@
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor.Components
+
+<div class="name-link-panel mt-3 pt-3 border-top">
+    <h6>Link to another Name</h6>
+
+    <div class="row g-2 align-items-end mt-2 mb-3">
+        <div class="col-lg-8 col-md-7">
+            <label class="form-label small mb-1">Add link</label>
+            <TelerikDropDownList Data="@LinkTargets"
+                                 TItem="ResearchPersonAdminRowDto"
+                                 TValue="Guid?"
+                                 TextField="@nameof(ResearchPersonAdminRowDto.DisplayName)"
+                                 ValueField="@nameof(ResearchPersonAdminRowDto.EntityId)"
+                                 Value="@TargetEntityId"
+                                 ValueChanged="@TargetEntityIdChanged"
+                                 DefaultText="Select name..."
+                                 Width="100%" />
+        </div>
+        <div class="col-lg-2 col-md-3">
+            <label class="form-label small mb-1">Confidence</label>
+            <input class="form-control form-control-sm"
+                   type="number"
+                   min="0"
+                   max="1"
+                   step="0.05"
+                   value="@Confidence.ToString("0.##")"
+                   @oninput="@OnConfidenceChanged" />
+        </div>
+        <div class="col-lg-2 col-md-2">
+            <TelerikButton OnClick="@(() => OnLinkRequested.InvokeAsync(Person))"
+                           Enabled="@CanLink"
+                           ThemeColor="@ThemeConstants.Button.ThemeColor.Primary">Link</TelerikButton>
+        </div>
+    </div>
+
+    <NameLinksGrid DataSource="@Person.LinkedNames"
+                   People="@People"
+                   PersonLoader="@PersonLoader"
+                   Height="260px"
+                   OnLinkedNameSelected="@OnLinkedNameSelected" />
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ResearchPersonAdminRowDto Person { get; set; } = new();
+    [Parameter, EditorRequired] public IReadOnlyList<ResearchPersonAdminRowDto> People { get; set; } = Array.Empty<ResearchPersonAdminRowDto>();
+    [Parameter] public Guid? TargetEntityId { get; set; }
+    [Parameter] public EventCallback<Guid?> TargetEntityIdChanged { get; set; }
+    [Parameter] public decimal Confidence { get; set; } = 1.0m;
+    [Parameter] public EventCallback<decimal> ConfidenceChanged { get; set; }
+    [Parameter] public EventCallback<ResearchPersonAdminRowDto> OnLinkRequested { get; set; }
+    [Parameter] public EventCallback<ResearchLinkedNameDto> OnLinkedNameSelected { get; set; }
+    [Parameter] public Func<Guid, Task<ResearchPersonAdminRowDto?>>? PersonLoader { get; set; }
+
+    private List<ResearchPersonAdminRowDto> LinkTargets =>
+        People
+            .Where(person => person.EntityId != Person.EntityId && !string.Equals(person.Status, "archived", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(person => person.MentionCount)
+            .ThenBy(person => person.DisplayName)
+            .ToList();
+
+    private bool CanLink =>
+        TargetEntityId is Guid targetEntityId
+        && targetEntityId != Guid.Empty
+        && targetEntityId != Person.EntityId;
+
+    private async Task OnConfidenceChanged(ChangeEventArgs args)
+    {
+        if (!decimal.TryParse(args.Value?.ToString(), out var confidence))
+            confidence = 1.0m;
+
+        await ConfidenceChanged.InvokeAsync(Math.Clamp(confidence, 0m, 1m));
+    }
+}

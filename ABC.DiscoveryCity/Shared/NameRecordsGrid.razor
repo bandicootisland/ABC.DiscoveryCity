@@ -1,0 +1,60 @@
+@using ABC.DiscoveryCity.Services
+@using Telerik.Blazor
+@using Telerik.Blazor.Components
+
+<TelerikGrid @ref="_grid"
+             Data="@Items"
+             Pageable="@Pageable"
+             PageSize="@PageSize"
+             Sortable="@Sortable"
+             Resizable="@Resizable"
+             SelectionMode="@SelectionMode"
+             SelectedItems="@SelectedItems"
+             SelectedItemsChanged="@SelectedItemsChanged"
+             OnStateChanged="@OnStateChanged"
+             Height="@Height">
+    <GridColumns>
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.DisplayName)" Title="Name" Width="220px" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.Status)" Title="Status" Width="115px" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.Confidence)" Title="Confidence" DisplayFormat="{0:P0}" Width="120px" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.AliasCount)" Title="Name Links" Width="110px" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.LinkedNameCount)" Title="Linked Names" Width="130px" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.MentionCount)" Title="Mentions" Width="105px" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.DocumentCount)" Title="Docs" Width="85px" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.AliasSummary)" Title="Name Links / Nicknames" />
+        <GridColumn Field="@nameof(ResearchPersonAdminRowDto.LinkedNameSummary)" Title="Linked To" />
+    </GridColumns>
+    <DetailTemplate>
+        @{
+            var person = (ResearchPersonAdminRowDto)context;
+        }
+        @if (DetailTemplate != null)
+        {
+            @DetailTemplate(person)
+        }
+    </DetailTemplate>
+</TelerikGrid>
+
+@code {
+    private TelerikGrid<ResearchPersonAdminRowDto>? _grid;
+
+    [Parameter] public IEnumerable<ResearchPersonAdminRowDto>? DataSource { get; set; }
+    [Parameter] public bool Pageable { get; set; } = true;
+    [Parameter] public int PageSize { get; set; } = 50;
+    [Parameter] public bool Sortable { get; set; } = true;
+    [Parameter] public bool Resizable { get; set; } = true;
+    [Parameter] public string Height { get; set; } = "400px";
+    [Parameter] public GridSelectionMode SelectionMode { get; set; } = GridSelectionMode.None;
+    [Parameter] public IEnumerable<ResearchPersonAdminRowDto> SelectedItems { get; set; } = Enumerable.Empty<ResearchPersonAdminRowDto>();
+    [Parameter] public EventCallback<IEnumerable<ResearchPersonAdminRowDto>> SelectedItemsChanged { get; set; }
+    [Parameter] public EventCallback<GridStateEventArgs<ResearchPersonAdminRowDto>> OnStateChanged { get; set; }
+    [Parameter] public RenderFragment<ResearchPersonAdminRowDto>? DetailTemplate { get; set; }
+
+    private List<ResearchPersonAdminRowDto> Items => DataSource?.ToList() ?? new List<ResearchPersonAdminRowDto>();
+
+    public GridState<ResearchPersonAdminRowDto> GetState()
+        => _grid?.GetState() ?? new GridState<ResearchPersonAdminRowDto>();
+
+    public Task SetStateAsync(GridState<ResearchPersonAdminRowDto> state)
+        => _grid?.SetStateAsync(state) ?? Task.CompletedTask;
+}

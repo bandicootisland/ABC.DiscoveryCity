@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ABC.DiscoveryCity.Embeddings\ABC.DiscoveryCity.Embeddings.csproj" />
+    <ProjectReference Include="..\ABC.DiscoveryCity.Words.Common\ABC.DiscoveryCity.Words.Common.csproj" />
   </ItemGroup>
 
   <ItemGroup>

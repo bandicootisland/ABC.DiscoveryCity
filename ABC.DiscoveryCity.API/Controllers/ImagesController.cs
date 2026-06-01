@@ -270,12 +270,12 @@ public class ImagesController : ControllerBase
             Telerik.Windows.Documents.Spreadsheet.Model.Workbook workbook;
             using (var input = System.IO.File.OpenRead(resolvedPath))
             {
-                workbook = importProvider.Import(input);
+                workbook = importProvider.Import(input, TimeSpan.FromSeconds(30));
             }
 
             var xlsxProvider = new XlsxFormatProvider();
             var output = new MemoryStream();
-            xlsxProvider.Export(workbook, output);
+            xlsxProvider.Export(workbook, output, TimeSpan.FromSeconds(30));
             output.Position = 0;
             return File(output, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         }
@@ -297,7 +297,7 @@ public class ImagesController : ControllerBase
 
             var xlsxProvider = new XlsxFormatProvider();
             var output = new MemoryStream();
-            xlsxProvider.Export(workbook, output);
+            xlsxProvider.Export(workbook, output, TimeSpan.FromSeconds(30));
             output.Position = 0;
             return File(output, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         }

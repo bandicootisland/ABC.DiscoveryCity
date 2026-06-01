@@ -87,13 +87,13 @@
                                     <div class="flex-grow-1 overflow-hidden">
                                         <div class="fw-bold text-truncate" title="@doc.FileName">@doc.FileName</div>
                                         <div class="text-muted small">
-                                            @if (doc.Date != null)
+                                            @if (HasDisplayDate(doc.Date))
                                             {
-                                                <span title="Date deduced from document content">~@doc.Date.Value.ToString("yyyy-MM-dd")</span>
+                                                <span title="Date deduced from document content">@doc.Date!.Value.ToString("yyyy-MM-dd")</span>
                                             }
                                             else
                                             {
-                                                <span>Unknown date</span>
+                                                <span></span>
                                             }
                                         </div>
                                         @if (!string.IsNullOrEmpty(doc.DataSetName))
@@ -191,6 +191,8 @@
     private bool _showQuickNewListDialog;
     private string _quickNewListName = "";
     private List<UserList> _availableLists = new();
+
+    private static bool HasDisplayDate(DateTime? date) => date.HasValue && date.Value.Year > 1;
 
     protected override async Task OnInitializedAsync()
     {

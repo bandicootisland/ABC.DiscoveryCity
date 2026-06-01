@@ -204,13 +204,13 @@
                             <Template>
                                 @{
                                     var item = context as SearchResultDto;
-                                    if (item?.Date != null)
+                                    if (HasDisplayDate(item?.Date))
                                     {
-                                        <span title="Date deduced from document content">~@item.Date.Value.ToString("yyyy-MM-dd")</span>
+                                        <span title="Date deduced from document content">@item!.Date!.Value.ToString("yyyy-MM-dd")</span>
                                     }
                                     else
                                     {
-                                        <span class="text-muted">Unknown</span>
+                                        <span class="text-muted"></span>
                                     }
                                 }
                             </Template>
@@ -363,6 +363,8 @@
     private List<ContextMenuItem> _contextMenuItems = new();
     private bool _showQuickNewListDialog;
     private string _quickNewListName = "";
+
+    private static bool HasDisplayDate(DateTime? date) => date.HasValue && date.Value.Year > 1;
 
     private bool CanSaveList => 
         _saveToListMode == "new" ? !string.IsNullOrWhiteSpace(_newListName) : !string.IsNullOrEmpty(_selectedExistingListId);

@@ -42,32 +42,44 @@ public class OllamaEmbeddingService : IEmbeddingService
     /// <inheritdoc/>
     public async Task<float[]> GetEmbeddingAsync(string text)
     {
-        // mxbai-embed-large supports 512 tokens, truncate to ~2000 chars
-        string truncatedText = text.Length > 2000 ? text.Substring(0, 2000) : text;
-        
-        var requestObj = new { model = _modelName, prompt = truncatedText };
-        var jsonContent = new StringContent(
-            JsonSerializer.Serialize(requestObj),
-            Encoding.UTF8,
-            "application/json");
+        // Start with generous limit, retry with progressively shorter text on context overflow
+        int maxChars = 2000;
 
-        var response = await _httpClient.PostAsync("/api/embeddings", jsonContent);
-        
-        if (!response.IsSuccessStatusCode)
+        while (maxChars >= 200)
         {
-            var errorBody = await response.Content.ReadAsStringAsync();
-            throw new Exception($"Ollama error {response.StatusCode}: {errorBody}");
+            string truncatedText = text.Length > maxChars ? text.Substring(0, maxChars) : text;
+
+            var requestObj = new { model = _modelName, prompt = truncatedText };
+            var jsonContent = new StringContent(
+                JsonSerializer.Serialize(requestObj),
+                Encoding.UTF8,
+                "application/json");
+
+            var response = await _httpClient.PostAsync("/api/embeddings", jsonContent);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync();
+                if (errorBody.Contains("context length", StringComparison.OrdinalIgnoreCase))
+                {
+                    maxChars /= 2;
+                    continue;
+                }
+                throw new Exception($"Ollama error {response.StatusCode}: {errorBody}");
+            }
+
+            var jsonString = await response.Content.ReadAsStringAsync();
+            var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(jsonString);
+
+            if (ollamaResponse?.Embedding == null || ollamaResponse.Embedding.Length == 0)
+            {
+                throw new Exception("Ollama returned empty embedding.");
+            }
+
+            return ollamaResponse.Embedding;
         }
 
-        var jsonString = await response.Content.ReadAsStringAsync();
-        var ollamaResponse = JsonSerializer.Deserialize<OllamaResponse>(jsonString);
-
-        if (ollamaResponse?.Embedding == null || ollamaResponse.Embedding.Length == 0)
-        {
-            throw new Exception("Ollama returned empty embedding.");
-        }
-
-        return ollamaResponse.Embedding;
+        throw new Exception($"Text too dense to embed even at {maxChars * 2} chars.");
     }
 
     private class OllamaResponse

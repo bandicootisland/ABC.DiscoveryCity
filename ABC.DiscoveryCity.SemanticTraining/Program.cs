@@ -15,7 +15,7 @@ Console.WriteLine("=== ABC DiscoveryCity Semantic Training (Sentence Quantizer) 
 Console.WriteLine("=== STRATIFIED SAMPLE SQ TRAINING ===");
 
 string discoveryCityConn = "Host=192.168.1.114;Port=5435;Database=discoverycity;Username=discovery_user;Password=WL71dM5oM2s36FP6ZrBo";
-int limit = 20000; // Adjusted for a balanced test/quality ratio (was 100,000)
+int limit = 200000; // 200K centroid training run
 string binPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "sq_codebook.bin");
 
 if (args.Any(a => a.StartsWith("--encode=")))

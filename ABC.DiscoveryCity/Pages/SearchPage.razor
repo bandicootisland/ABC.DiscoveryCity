@@ -182,13 +182,13 @@
                             <Template>
                                 @{
                                     var item = context as SearchResultDto;
-                                    if (item?.Date != null)
+                                    if (HasDisplayDate(item?.Date))
                                     {
-                                        <span title="Date deduced from document content">~@item.Date.Value.ToString("yyyy-MM-dd")</span>
+                                        <span title="Date deduced from document content">@item!.Date!.Value.ToString("yyyy-MM-dd")</span>
                                     }
                                     else
                                     {
-                                        <span class="text-muted">Unknown</span>
+                                        <span class="text-muted"></span>
                                     }
                                 }
                             </Template>
@@ -343,6 +343,8 @@
 
     private bool CanSaveList => 
         _saveToListMode == "new" ? !string.IsNullOrWhiteSpace(_newListName) : !string.IsNullOrEmpty(_selectedExistingListId);
+
+    private static bool HasDisplayDate(DateTime? date) => date.HasValue && date.Value.Year > 1;
 
     // Debounce: cancels in-flight scroll requests when new scrolls arrive
     private CancellationTokenSource _gridReadCts = new();
